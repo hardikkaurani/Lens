@@ -73,16 +73,19 @@ flowchart TD
   * Offline-capable capture queue with automatic background synchronization.
   * Fast mobile retrieval and reading mode.
 
-### 3.3 Backend API Service (`services/api/`) — *ACTIVE FOUNDATION (STAGE 3)*
+### 3.3 Backend API Service (`services/api/`) — *ACTIVE FOUNDATION & CAPTURE INGESTION (STAGE 5)*
 * **Technology**: FastAPI, Python 3.11+, Pydantic, Pydantic-Settings, SQLAlchemy (asyncio), AsyncPG, Redis (asyncio).
-* **Current Architectural Implementation (Stage 3 Foundation)**:
-  * **Core Application**: Minimal ASGI entrypoint (`app/main.py`) with lifespan management for graceful resource shutdown.
+* **Current Architectural Implementation (Stage 5)**:
+  * **Core Application**: Minimal ASGI entrypoint (`app/main.py`) with lifespan management for graceful resource shutdown. Registers `health_router` and `captures_router`.
   * **Configuration Layer (`app/core/config.py`)**: Centralized settings backed by `pydantic-settings`. Loads from root `.env` when present, normalizes PostgreSQL DSNs for `asyncpg`, and avoids hardcoded secrets. Does not require unimplemented credentials (JWT, GitHub, AI) to start.
   * **Async PostgreSQL Layer (`app/db/session.py`)**: `AsyncEngine` with connection pooling (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`) and active ping validation (`SELECT 1`).
   * **Redis Connectivity (`app/db/session.py`)**: Dedicated asynchronous Redis client providing connection reuse and active `PING` validation.
   * **Health Check Subsystem (`app/health/router.py`)**: Live `GET /health` endpoint verifying end-to-end connectivity to PostgreSQL and Redis. Emits `200 OK` when healthy and `503 Service Unavailable` with degraded status if any dependency fails, without leaking credentials or stack traces.
+  * **Capture Ingestion Subsystem (`app/captures/`)**:
+    * `POST /captures`: Atomic ingestion of URL or text captures. Validates schema inputs, handles optional metadata, and ensures atomic transaction rollback on failure. Returns `201 Created`.
+    * `GET /captures`: Deterministic pagination (`limit`, `offset`) ordered by `created_at` descending.
+    * `GET /captures/{capture_id}`: Single capture retrieval with attached source metadata, returning `404 Not Found` for nonexistent records and `422` for malformed UUIDs.
 * **Planned Product Responsibilities (*NOT YET IMPLEMENTED*)**:
-  * Ingestion endpoints: Fast validation, immediate persistence of raw capture records, and job dispatching.
   * Search endpoints: Hybrid search coordination (lexical + semantic vector queries).
   * Authentication & user management: JWT generation, verification, and tenant isolation.
   * External webhook receipt and validation (e.g., GitHub webhooks).
@@ -98,6 +101,33 @@ flowchart TD
 ---
 
 ## 4. End-to-End Data Flow
+
+### 4.1 Capture Ingestion Flow (Stage 5 Implementation)
+
+```
+Client
+  ↓
+POST /captures
+  ↓
+Pydantic validation
+  ↓
+SQLAlchemy transaction
+  ↓
+Capture + optional SourceMetadata
+  ↓
+PostgreSQL
+  ↓
+Response
+```
+
+> [!IMPORTANT]
+> **Stage 5 Boundaries & Current State**:
+> - **URL content is NOT fetched yet**: Stores exactly what the client sends. No automatic URL crawling or webpage scraping.
+> - **Files are NOT uploaded yet**: Object storage / S3 / MinIO uploads are not triggered.
+> - **Embeddings are NOT generated yet**: Background workers, chunking pipelines, and vector generations are not yet integrated.
+> - **Authentication is NOT implemented yet**: No users, sessions, or OAuth tokens are required or evaluated.
+
+### 4.2 Full Asynchronous Processing Pipeline (Planned)
 
 ```
 [Client]                [API]               [Storage / Queue]           [Worker]

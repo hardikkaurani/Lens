@@ -4,10 +4,10 @@
 
 ---
 
-## Current Status: Database Domain Modeling & Initial Migration / Stage 4
+## Current Status: Capture Ingestion API / Stage 5
 
 > [!NOTE]
-> This repository is currently in **Stage 4 (Database Domain Modeling and Initial Migration)**. The core domain schema (`captures`, `content_chunks` with pgvector storage, `source_metadata` with JSONB), SQLAlchemy 2.x declarative models, and initial Alembic migration workflow are established and verified against local PostgreSQL. Product features, authentication, AI embedding generation, and frontend applications remain planned for upcoming stages.
+> This repository is currently in **Stage 5 (Capture Ingestion API)**. The first core product capability—Capture Ingestion—is implemented and active. Clients can ingest URL and text captures via `POST /captures`, retrieve paginated captures via `GET /captures`, and fetch individual captures with metadata via `GET /captures/{capture_id}`. Background workers, automatic URL crawling, vector embeddings, file uploads, and authentication remain planned for upcoming stages.
 
 ---
 
@@ -106,7 +106,7 @@ lens/
 | :--- | :--- | :--- |
 | **Web Frontend** | Next.js (React), TypeScript | *Planned* |
 | **Mobile Frontend** | Flutter, Dart | *Planned* |
-| **Backend API** | FastAPI, Python 3.11+ | **Active Foundation** (`services/api/`) |
+| **Backend API** | FastAPI, Python 3.11+ | **Active Core & Capture Ingestion API** (`services/api/`) |
 | **Background Worker** | Python | *Planned* |
 | **Primary Database** | PostgreSQL 16 + `pgvector` extension | **Active Models & Migrations** (`services/api/alembic/`) |
 | **Cache & Queue** | Redis 7.4 | **Infra Configured** (`infra/docker-compose.yml`) |
@@ -209,11 +209,12 @@ The core API service provides the backend foundation for LENS:
   ```
   If PostgreSQL or Redis is unreachable, the endpoint returns `503 Service Unavailable` with `status: "degraded"` and identifies the failing component without exposing internal credentials or tracebacks.
 * **Current API Scope**:
-  - Foundational application structure (`app/core`, `app/db`, `app/health`).
+  - Foundational application structure (`app/core`, `app/db`, `app/health`, `app/captures`).
   - Configuration loader (`pydantic-settings`).
   - Asynchronous SQLAlchemy engine (`asyncpg`) and Redis client.
   - Active connectivity health checks (`GET /health`).
-  - *NOT YET IMPLEMENTED*: Authentication, user management, CRUD APIs, search endpoints, embeddings, file ingestion, or external integrations.
+  - Core capture ingestion endpoints (`POST /captures`, `GET /captures`, `GET /captures/{capture_id}`).
+  - *NOT YET IMPLEMENTED*: Authentication, user management, search endpoints, embeddings, file ingestion, or external integrations.
 
 ### 3. Database Domain Models & Migrations (`alembic/`)
 
@@ -239,6 +240,145 @@ The database layer utilizes modern SQLAlchemy 2.x declarative models and Alembic
   - Foundational data structures and storage capability for captures, chunks, vectors, and metadata.
   - Embeddings column is a storage-only placeholder; AI embedding calculation is not yet implemented.
   - User accounts, authentication schemas, queue persistence, and search APIs remain planned for upcoming stages.
+
+### 4. Capture Ingestion API (`POST /captures`, `GET /captures`, `GET /captures/{capture_id}`)
+
+Stage 5 implements the first core product capability of LENS: ingesting URLs and raw notes/text payloads into durable storage with optional source metadata.
+
+#### Ingestion Endpoints
+
+| Method | Path | Description | Success Status |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/captures` | Ingest and persist a new URL or text capture atomically | `201 Created` |
+| `GET` | `/captures` | Retrieve paginated captures ordered newest first (`created_at` DESC) | `200 OK` |
+| `GET` | `/captures/{capture_id}` | Retrieve a single capture by UUID along with source metadata | `200 OK` |
+
+#### Endpoint Details & Examples
+
+##### 1. `POST /captures`
+Ingests a new capture item. Validation strictly enforces:
+- `source_type`: Must be `"url"` or `"text"`. Unsupported types (`"image"`, `"pdf"`, `"file"`, `"github"`) are rejected until dedicated ingestion flows are built.
+- **URL Captures**:
+  - `original_url`: Required, must be a valid absolute HTTP or HTTPS URL (schemes like `file://` or `javascript:` are rejected).
+  - `title`, `content`, `mime_type`, `source_id`, `metadata`: Optional.
+- **Text Captures**:
+  - `content`: Required, must not be empty or whitespace-only.
+  - `title`, `metadata`: Optional.
+- **Atomicity**: If `metadata` is provided, `Capture` and `SourceMetadata` are persisted in a single atomic database transaction. If metadata persistence fails, the entire transaction rolls back.
+
+**Example Request — URL Capture**:
+```bash
+curl -X POST http://localhost:8000/captures \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_type": "url",
+    "original_url": "https://fastapi.tiangolo.com",
+    "title": "FastAPI Documentation",
+    "metadata": {"tags": ["python", "api"], "reading_priority": "high"}
+  }'
+```
+
+**Example Request — Text Capture**:
+```bash
+curl -X POST http://localhost:8000/captures \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_type": "text",
+    "title": "Architecture Thoughts",
+    "content": "Decoupling ingestion from chunking ensures fast capture response times."
+  }'
+```
+
+**Example Response (`201 Created`)**:
+```json
+{
+  "id": "1804f326-fa42-4916-834c-687f8f9024f0",
+  "source_type": "url",
+  "title": "FastAPI Documentation",
+  "original_url": "https://fastapi.tiangolo.com",
+  "content": null,
+  "mime_type": null,
+  "source_id": null,
+  "created_at": "2026-10-02T10:30:00Z",
+  "updated_at": "2026-10-02T10:30:00Z"
+}
+```
+
+##### 2. `GET /captures`
+Lists captures using deterministic pagination ordered newest-first (`created_at DESC, id DESC`). Does not load unneeded relationships.
+
+**Query Parameters**:
+- `limit`: Integer, default `20`, minimum `1`, maximum `100`.
+- `offset`: Integer, default `0`, minimum `0`.
+
+**Example Request**:
+```bash
+curl "http://localhost:8000/captures?limit=10&offset=0"
+```
+
+**Example Response (`200 OK`)**:
+```json
+{
+  "items": [
+    {
+      "id": "1804f326-fa42-4916-834c-687f8f9024f0",
+      "source_type": "url",
+      "title": "FastAPI Documentation",
+      "original_url": "https://fastapi.tiangolo.com",
+      "content": null,
+      "mime_type": null,
+      "source_id": null,
+      "created_at": "2026-10-02T10:30:00Z",
+      "updated_at": "2026-10-02T10:30:00Z"
+    }
+  ],
+  "limit": 10,
+  "offset": 0,
+  "total": 1
+}
+```
+
+##### 3. `GET /captures/{capture_id}`
+Retrieves a specific capture by UUID. If source metadata exists for the capture, it is included in the response.
+
+**Behavior**:
+- Returns `200 OK` with capture details and `metadata: dict | null`.
+- Returns `404 Not Found` if the UUID is valid but does not exist.
+- Returns `422 Unprocessable Entity` if the `capture_id` is not a valid UUID.
+
+**Example Request**:
+```bash
+curl http://localhost:8000/captures/1804f326-fa42-4916-834c-687f8f9024f0
+```
+
+**Example Response (`200 OK`)**:
+```json
+{
+  "id": "1804f326-fa42-4916-834c-687f8f9024f0",
+  "source_type": "url",
+  "title": "FastAPI Documentation",
+  "original_url": "https://fastapi.tiangolo.com",
+  "content": null,
+  "mime_type": null,
+  "source_id": null,
+  "created_at": "2026-10-02T10:30:00Z",
+  "updated_at": "2026-10-02T10:30:00Z",
+  "metadata": {
+    "tags": ["python", "api"],
+    "reading_priority": "high"
+  }
+}
+```
+
+#### Current Scope Limitations
+
+> [!IMPORTANT]
+> Stage 5 focuses strictly on reliable ingestion and persistence:
+> - **URL content is NOT fetched yet**: The API stores the URL and user-supplied fields. No HTTP crawling or scraping is executed.
+> - **Files and media are NOT uploaded yet**: Binary upload handlers and S3 bucket synchronization are not active.
+> - **Embeddings and chunks are NOT generated yet**: Background processing pipelines and pgvector population are planned for worker stages.
+> - **Authentication is NOT implemented yet**: Endpoints are currently unauthenticated; JWT and tenant isolation will be integrated in upcoming auth stages.
+> - **No background queues**: Redis tasks are not yet dispatched on capture creation.
 
 ---
 
