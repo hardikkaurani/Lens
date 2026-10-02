@@ -4,10 +4,10 @@
 
 ---
 
-## Current Status: Local Infrastructure / Stage 2
+## Current Status: FastAPI Backend Foundation / Stage 3
 
 > [!NOTE]
-> This repository is currently in **Stage 2 (Local Infrastructure)**. The monorepo foundation, environment configurations (`.env.example`), and local development infrastructure (`infra/docker-compose.yml`) supporting PostgreSQL + pgvector, Redis, and MinIO are established. Application code, schemas, and features remain planned for upcoming stages.
+> This repository is currently in **Stage 3 (Core FastAPI Backend Foundation)**. The monorepo foundation, local infrastructure (`infra/docker-compose.yml`), and foundational backend service (`services/api/`) with async PostgreSQL (pgvector) and Redis connectivity verification via `GET /health` are established. Product features, schemas, auth, and frontend applications remain planned for upcoming stages.
 
 ---
 
@@ -106,7 +106,7 @@ lens/
 | :--- | :--- | :--- |
 | **Web Frontend** | Next.js (React), TypeScript | *Planned* |
 | **Mobile Frontend** | Flutter, Dart | *Planned* |
-| **Backend API** | FastAPI, Python 3.11+ | *Planned* |
+| **Backend API** | FastAPI, Python 3.11+ | **Active Foundation** (`services/api/`) |
 | **Background Worker** | Python | *Planned* |
 | **Primary Database** | PostgreSQL 16 + `pgvector` extension | **Infra Configured** (`infra/docker-compose.yml`) |
 | **Cache & Queue** | Redis 7.4 | **Infra Configured** (`infra/docker-compose.yml`) |
@@ -133,7 +133,7 @@ Before setting up application components in subsequent stages, verify that your 
 
 ## Local Development & Infrastructure
 
-### Quickstart Guide
+### 1. Backing Services Quickstart
 
 To run the local backing services (PostgreSQL with pgvector, Redis, and MinIO), follow these steps:
 
@@ -174,6 +174,46 @@ To run the local backing services (PostgreSQL with pgvector, Redis, and MinIO), 
    docker compose -f infra/docker-compose.yml down
    ```
    *Note: Named volumes (`lens_postgres_data`, `lens_redis_data`, `lens_minio_data`) are preserved across stops. Add `-v` only if you explicitly intend to delete local data.*
+
+### 2. FastAPI Backend Service (`services/api/`)
+
+The core API service provides the backend foundation for LENS:
+
+* **Location**: `services/api/`
+* **Python Environment Setup**:
+  ```bash
+  cd services/api
+  python -m venv .venv
+  # Windows PowerShell
+  .\.venv\Scripts\Activate.ps1
+  # Linux / macOS
+  source .venv/bin/activate
+  ```
+* **Dependency Installation**:
+  ```bash
+  pip install -r requirements.txt
+  ```
+* **Prerequisites**: Ensure local infrastructure (PostgreSQL and Redis) is running via Docker Compose (`docker compose -f infra/docker-compose.yml up -d`).
+* **Start API Locally**:
+  ```bash
+  # From services/api/
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+  ```
+* **Verify Health**:
+  ```bash
+  curl http://localhost:8000/health
+  ```
+  Expected response when all dependencies are healthy:
+  ```json
+  {"status":"ok","api":"ok","database":"ok","redis":"ok"}
+  ```
+  If PostgreSQL or Redis is unreachable, the endpoint returns `503 Service Unavailable` with `status: "degraded"` and identifies the failing component without exposing internal credentials or tracebacks.
+* **Current API Scope**:
+  - Foundational application structure (`app/core`, `app/db`, `app/health`).
+  - Configuration loader (`pydantic-settings`).
+  - Asynchronous SQLAlchemy engine (`asyncpg`) and Redis client.
+  - Active connectivity health checks (`GET /health`).
+  - *NOT YET IMPLEMENTED*: Authentication, user management, application data models, migrations, search, embeddings, file ingestion, or external integrations.
 
 ---
 

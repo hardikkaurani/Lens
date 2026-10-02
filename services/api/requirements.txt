@@ -1,0 +1,15 @@
+# Core Framework & ASGI Server
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+
+# Database & ORM
+sqlalchemy[asyncio]>=2.0.30,<3.0.0
+asyncpg>=0.30.0,<1.0.0
+
+# Cache & Message Broker
+redis>=5.0.0,<6.0.0
+
+# Configuration & Settings
+pydantic>=2.8.0,<3.0.0
+pydantic-settings>=2.4.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0

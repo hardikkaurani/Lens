@@ -73,12 +73,18 @@ flowchart TD
   * Offline-capable capture queue with automatic background synchronization.
   * Fast mobile retrieval and reading mode.
 
-### 3.3 Backend API Service (`services/api/`) — *PLANNED*
-* **Technology**: FastAPI, Python 3.11+, Pydantic, SQLAlchemy / SQLModel.
-* **Responsibilities**:
+### 3.3 Backend API Service (`services/api/`) — *ACTIVE FOUNDATION (STAGE 3)*
+* **Technology**: FastAPI, Python 3.11+, Pydantic, Pydantic-Settings, SQLAlchemy (asyncio), AsyncPG, Redis (asyncio).
+* **Current Architectural Implementation (Stage 3 Foundation)**:
+  * **Core Application**: Minimal ASGI entrypoint (`app/main.py`) with lifespan management for graceful resource shutdown.
+  * **Configuration Layer (`app/core/config.py`)**: Centralized settings backed by `pydantic-settings`. Loads from root `.env` when present, normalizes PostgreSQL DSNs for `asyncpg`, and avoids hardcoded secrets. Does not require unimplemented credentials (JWT, GitHub, AI) to start.
+  * **Async PostgreSQL Layer (`app/db/session.py`)**: `AsyncEngine` with connection pooling (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`) and active ping validation (`SELECT 1`).
+  * **Redis Connectivity (`app/db/session.py`)**: Dedicated asynchronous Redis client providing connection reuse and active `PING` validation.
+  * **Health Check Subsystem (`app/health/router.py`)**: Live `GET /health` endpoint verifying end-to-end connectivity to PostgreSQL and Redis. Emits `200 OK` when healthy and `503 Service Unavailable` with degraded status if any dependency fails, without leaking credentials or stack traces.
+* **Planned Product Responsibilities (*NOT YET IMPLEMENTED*)**:
   * Ingestion endpoints: Fast validation, immediate persistence of raw capture records, and job dispatching.
   * Search endpoints: Hybrid search coordination (lexical + semantic vector queries).
-  * Authentication and authorization enforcement.
+  * Authentication & user management: JWT generation, verification, and tenant isolation.
   * External webhook receipt and validation (e.g., GitHub webhooks).
 
 ### 3.4 Background Worker (`services/worker/`) — *PLANNED*
