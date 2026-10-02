@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.captures.router import router as captures_router
 from app.core.config import get_settings
 from app.db.session import close_connections
 from app.health.router import router as health_router
@@ -23,8 +24,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Register health check router
+# Register routers
 app.include_router(health_router)
+app.include_router(captures_router)
 
 
 @app.get("/", tags=["root"])
