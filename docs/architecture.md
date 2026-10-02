@@ -116,23 +116,39 @@ flowchart TD
 
 ---
 
-## 5. Storage Subsystems
+## 5. Local Infrastructure & Storage Subsystems (Stage 2 Foundation)
 
-### 5.1 Primary Database: PostgreSQL + `pgvector` — *PLANNED*
-* **Structured Data**: Relational schemas for users, captures, collections, tags, and sync jobs.
-* **Vector Indexing**: High-dimensional vector columns storing embedding vectors for text chunks.
-* **Indexes**: HNSW (Hierarchical Navigable Small World) or IVFFlat indexes on vector columns for low-latency cosine / Euclidean distance similarity queries.
-* **ACID Guarantees**: Keeps metadata, textual content, and vectors unified in a single transactional system, eliminating dual-write consistency problems.
+> [!NOTE]
+> The backing storage and caching services defined below are established as **local infrastructure foundations** via `infra/docker-compose.yml`. They represent running containerized infrastructure; application-level database schemas, ORM models, migrations, queue consumers, and bucket management remain **PLANNED** for upcoming stages.
 
-### 5.2 Cache & Task Queue: Redis — *PLANNED*
-* **Task Queue**: Asynchronous message passing between API and worker processes.
-* **Transient Cache**: Caching search results, user sessions, and external rate limit counters.
-* **Pub/Sub**: Real-time event notifications for completed ingestion tasks.
+### 5.1 PostgreSQL + `pgvector`
+* **Infrastructure Implementation**: Container `lens-postgres` running `pgvector/pgvector:pg16` on host port `5432` with persisted named volume `lens_postgres_data`.
+* **Relational Application Data (*PLANNED*)**:
+  * Structured storage for users, captures, collections, tags, audit logs, and sync metadata.
+  * Relational constraints and transactional consistency for capture state transitions.
+* **Future Vector Embeddings (*PLANNED*)**:
+  * Vector columns enabled via the PostgreSQL `vector` extension (v0.8+).
+  * High-dimensional dense embeddings generated for captured content chunks.
+  * Fast approximate nearest neighbor search powered by HNSW or IVFFlat vector indexing.
 
-### 5.3 Object Storage: S3-Compatible Storage — *PLANNED*
-* **Payload Isolation**: Keeps heavy or binary assets out of PostgreSQL.
-* **Supported Media**: Raw HTML dumps, full page snapshots, uploaded PDFs, images, and audio notes.
-* **Addressing**: Database records reference assets strictly via deterministic S3 object keys.
+### 5.2 Redis
+* **Infrastructure Implementation**: Container `lens-redis` running `redis:7.4.7-alpine` on host port `6379` with persisted named volume `lens_redis_data` and append-only persistence enabled.
+* **Future Background Job Queue (*PLANNED*)**:
+  * High-throughput asynchronous broker coordinating work between `services/api` and `services/worker`.
+  * Reliable task distribution for link scraping, text extraction, chunking, and vector calculation.
+* **Caching (*PLANNED*)**:
+  * Low-latency caching for frequent search queries, resolved metadata, and user session state.
+* **Rate Limiting (*PLANNED*)**:
+  * Token bucket / sliding window rate limiting on public and ingestion API endpoints.
+
+### 5.3 MinIO (S3-Compatible Object Storage)
+* **Infrastructure Implementation**: Container `lens-minio` running `minio/minio:RELEASE.2025-09-07T16-13-09Z` on host port `9000` (S3 API) and `9001` (Web Console) with persisted named volume `lens_minio_data`.
+* **Local S3-Compatible Storage**:
+  * Drop-in replacement for AWS S3 / Cloudflare R2 in local development.
+  * Standard AWS S3 SDK compatibility across API and worker services.
+* **Future Raw Files, Images & Documents (*PLANNED*)**:
+  * Storing immutable raw payloads, HTML DOM dumps, uploaded PDFs, screenshots, and audio recordings.
+  * Keeps database records lightweight by storing deterministic S3 URI references rather than large BLOBs.
 
 ---
 

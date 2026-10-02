@@ -4,10 +4,10 @@
 
 ---
 
-## Current Status: Foundation / Stage 1
+## Current Status: Local Infrastructure / Stage 2
 
 > [!NOTE]
-> This repository is currently in **Stage 1 (Monorepo Foundation)**. The workspace structure, documentation, `.gitignore`, and tooling configurations are initialized. No product features, application code, database schemas, or third-party dependencies are implemented or installed yet.
+> This repository is currently in **Stage 2 (Local Infrastructure)**. The monorepo foundation, environment configurations (`.env.example`), and local development infrastructure (`infra/docker-compose.yml`) supporting PostgreSQL + pgvector, Redis, and MinIO are established. Application code, schemas, and features remain planned for upcoming stages.
 
 ---
 
@@ -108,12 +108,12 @@ lens/
 | **Mobile Frontend** | Flutter, Dart | *Planned* |
 | **Backend API** | FastAPI, Python 3.11+ | *Planned* |
 | **Background Worker** | Python | *Planned* |
-| **Primary Database** | PostgreSQL + `pgvector` extension | *Planned* |
-| **Cache & Queue** | Redis | *Planned* |
-| **Object Storage** | S3-Compatible (MinIO / AWS S3) | *Planned* |
+| **Primary Database** | PostgreSQL 16 + `pgvector` extension | **Infra Configured** (`infra/docker-compose.yml`) |
+| **Cache & Queue** | Redis 7.4 | **Infra Configured** (`infra/docker-compose.yml`) |
+| **Object Storage** | S3-Compatible (MinIO) | **Infra Configured** (`infra/docker-compose.yml`) |
 | **Authentication** | JWT (Initial) | *Planned* |
 | **Integrations** | GitHub OAuth & Webhooks | *Planned* |
-| **Local Containerization** | Docker & Docker Compose | *Planned* |
+| **Local Containerization** | Docker & Docker Compose | **Active / Tested** |
 
 ---
 
@@ -128,6 +128,52 @@ Before setting up application components in subsequent stages, verify that your 
 - **Android SDK / ADB**: For mobile device emulation and debugging
 - **Docker & Docker Compose**: For running local databases, caches, and object storage
 - **Git**: v2.40+ (v2.55.0 verified)
+
+---
+
+## Local Development & Infrastructure
+
+### Quickstart Guide
+
+To run the local backing services (PostgreSQL with pgvector, Redis, and MinIO), follow these steps:
+
+1. **Start Docker Desktop**:
+   Ensure the Docker daemon is running on your host machine.
+
+2. **Copy `.env.example` to `.env`**:
+   ```bash
+   cp .env.example .env
+   ```
+   > [!CAUTION]
+   > **CRITICAL RULE**: The `.env` file contains local secrets and must **NEVER** be committed to version control. The repository's `.gitignore` explicitly prevents tracking this file.
+
+3. **Fill Only Required Values for Local Development**:
+   For local development of infrastructure, the default values provided in `.env.example` for PostgreSQL (`lens_user`, `lens_password`, `lens`), Redis (`localhost:6379`), and MinIO (`minioadmin`/`minioadmin`) are functional defaults for local usage.
+
+   **Credentials NOT required at this stage** (features are planned and not yet implemented):
+   - `JWT_SECRET`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, `JWT_REFRESH_TOKEN_EXPIRE_DAYS` — Authentication service is not yet built.
+   - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_WEBHOOK_SECRET` — GitHub integration is not yet implemented.
+   - `AI_PROVIDER`, `AI_API_KEY` — Embedding and LLM pipelines are not yet implemented.
+
+4. **Start Infrastructure with Docker Compose**:
+   ```bash
+   docker compose -f infra/docker-compose.yml up -d
+   ```
+
+5. **Check Service Health**:
+   ```bash
+   docker compose -f infra/docker-compose.yml ps
+   ```
+   All three services should report healthy:
+   - `lens-postgres` (PostgreSQL 16 with pgvector on port `5432`)
+   - `lens-redis` (Redis 7.4 on port `6379`)
+   - `lens-minio` (MinIO S3 API on port `9000`, Web Console on port `9001`)
+
+6. **Stop Infrastructure When Finished**:
+   ```bash
+   docker compose -f infra/docker-compose.yml down
+   ```
+   *Note: Named volumes (`lens_postgres_data`, `lens_redis_data`, `lens_minio_data`) are preserved across stops. Add `-v` only if you explicitly intend to delete local data.*
 
 ---
 
