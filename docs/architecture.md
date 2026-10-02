@@ -127,15 +127,71 @@ flowchart TD
 > [!NOTE]
 > The backing storage and caching services defined below are established as **local infrastructure foundations** via `infra/docker-compose.yml`. They represent running containerized infrastructure; application-level database schemas, ORM models, migrations, queue consumers, and bucket management remain **PLANNED** for upcoming stages.
 
-### 5.1 PostgreSQL + `pgvector`
+### 5.1 PostgreSQL + `pgvector` (Active Domain Schema — Stage 4)
 * **Infrastructure Implementation**: Container `lens-postgres` running `pgvector/pgvector:pg16` on host port `5432` with persisted named volume `lens_postgres_data`.
-* **Relational Application Data (*PLANNED*)**:
-  * Structured storage for users, captures, collections, tags, audit logs, and sync metadata.
-  * Relational constraints and transactional consistency for capture state transitions.
-* **Future Vector Embeddings (*PLANNED*)**:
-  * Vector columns enabled via the PostgreSQL `vector` extension (v0.8+).
-  * High-dimensional dense embeddings generated for captured content chunks.
-  * Fast approximate nearest neighbor search powered by HNSW or IVFFlat vector indexing.
+* **Core Domain Entities (`services/api/app/db/models.py`)**:
+  * **`Capture`**: The central entity representing a captured artifact.
+    * `id`: UUID (Primary Key)
+    * `source_type`: `source_type` Enum (`url`, `text`, `image`, `pdf`, `file`, `github`)
+    * `title`: String(512), nullable
+    * `original_url`: Text, nullable
+    * `content`: Text, nullable
+    * `mime_type`: String(128), nullable
+    * `source_id`: String(256), nullable (indexed for fast external lookups)
+    * `created_at` / `updated_at`: Timezone-aware timestamps with automatic triggers
+  * **`ContentChunk`**: Searchable partitioned content units derived from a parent capture.
+    * `id`: UUID (Primary Key)
+    * `capture_id`: UUID, Foreign Key to `captures.id` (`ON DELETE CASCADE`)
+    * `chunk_index`: Integer, required (composite unique constraint `uq_content_chunks_capture_chunk`)
+    * `content`: Text, required
+    * `embedding`: `Vector(1536)`, nullable (pgvector storage reservation)
+    * `created_at`: Timezone-aware timestamp
+  * **`SourceMetadata`**: 1-to-1 extension table holding arbitrary source-specific attributes without schema bloating.
+    * `id`: UUID (Primary Key)
+    * `capture_id`: UUID, Unique Foreign Key to `captures.id` (`ON DELETE CASCADE`)
+    * `metadata`: PostgreSQL `JSONB`, required (default `{}`)
+    * `created_at` / `updated_at`: Timezone-aware timestamps
+
+#### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    CAPTURES ||--o{ CONTENT_CHUNKS : "has (1:N, cascade)"
+    CAPTURES ||--o| SOURCE_METADATA : "has (1:1, cascade)"
+
+    CAPTURES {
+        uuid id PK
+        source_type source_type "enum('url','text','image','pdf','file','github')"
+        varchar title "nullable"
+        text original_url "nullable"
+        text content "nullable"
+        varchar mime_type "nullable"
+        varchar source_id "nullable, indexed"
+        timestamptz created_at "indexed"
+        timestamptz updated_at
+    }
+
+    CONTENT_CHUNKS {
+        uuid id PK
+        uuid capture_id FK "captures.id, cascade"
+        int chunk_index "unique per capture"
+        text content "chunk text"
+        vector_1536 embedding "nullable, storage-only"
+        timestamptz created_at
+    }
+
+    SOURCE_METADATA {
+        uuid id PK
+        uuid capture_id FK "captures.id, unique, cascade"
+        jsonb metadata "arbitrary structured attributes"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+```
+
+* **Future Vector Embeddings Role (*STORAGE-ONLY PLACEHOLDER*)**:
+  > [!IMPORTANT]
+  > At Stage 4, the `embedding` column exists **strictly as a storage capability reservation** using `pgvector`. Vector dimension 1536 is a standard placeholder dimension (compatible with popular dense embedding models such as `text-embedding-3-small`). **No AI generation, external API calls, or automated embedding calculations are implemented at this stage.** Actual embedding generation pipelines will be introduced in subsequent worker/AI stages.
 
 ### 5.2 Redis
 * **Infrastructure Implementation**: Container `lens-redis` running `redis:7.4.7-alpine` on host port `6379` with persisted named volume `lens_redis_data` and append-only persistence enabled.
