@@ -1,10 +1,10 @@
-"""Integration test suite for LENS GitHub Integration & OAuth (Stage 13).
+"""Comprehensive integration & security test suite for LENS GitHub Integration & OAuth (Stage 13 & 13.1).
 
 Covers:
 1. OAuth configuration missing -> 503
-2. Connect endpoint generates redirect to GitHub
-3. State is cryptographically random
-4. State expires
+2. Connect endpoint generates redirect to GitHub & sets session binding cookie
+3. State & session binding are cryptographically random
+4. State expires (TTL check)
 5. State is single-use
 6. Missing state rejected -> 400
 7. Mismatched state rejected -> 400
@@ -29,6 +29,20 @@ Covers:
 26. DB failure handling -> 500
 27. Malicious username safely handled
 28. Open redirect protection
+
+Stage 13.1 Explicit Security & Threat Model Tests:
+29. Threat Test A: Valid same-browser flow (connect -> callback with same browser session) -> PASS
+30. Threat Test B: Missing browser binding cookie -> 400 REJECT
+31. Threat Test C: Wrong browser binding (Browser A state + Browser B cookie) -> 400 REJECT
+32. Threat Test D: Replayed callback with same state and cookie -> 400 REJECT
+33. Threat Test E: Expired state with cookie -> 400 REJECT
+34. Threat Test F: Mismatched state with cookie -> 400 REJECT
+35. Threat Test G: State and session binding high entropy verification
+36. Threat Test H: OAuth denial deletes session cookie and handles safely
+37. Threat Test I: Open redirect rejected in query and callback
+38. Threat Test J: Session cookie security attributes (HttpOnly, Lax, Max-Age, no sensitive data)
+39. Threat Test K: Redis production boundary - production mode strictly requires Redis & rejects memory fallback
+40. Threat Test L: AES-256-GCM encryption configuration & tamper verification
 """
 
 import asyncio
@@ -43,7 +57,13 @@ import httpx
 from sqlalchemy import delete, select
 
 from app.core.config import get_settings
-from app.core.encryption import decrypt_secret, encrypt_secret
+from app.core.encryption import (
+    CIPHERTEXT_VERSION_PREFIX,
+    EncryptionError,
+    _derive_key,
+    decrypt_secret,
+    encrypt_secret,
+)
 from app.db.models import GitHubConnection
 from app.db.session import AsyncSessionLocal, close_connections
 from app.integrations.github.client import (
@@ -54,7 +74,11 @@ from app.integrations.github.client import (
     get_github_client,
 )
 from app.integrations.github.service import (
+    OAUTH_COOKIE_NAME,
+    OAuthStorageError,
+    _memory_state_cache,
     generate_oauth_state,
+    generate_session_binding,
     store_oauth_state,
     validate_and_consume_oauth_state,
 )
@@ -69,8 +93,8 @@ async def clean_github_connections() -> None:
 
 
 async def run_all_stage13_tests() -> None:
-    """Execute all 28 Stage 13 GitHub integration tests sequentially."""
-    print("\n--- Starting Stage 13 GitHub Integration Tests ---")
+    """Execute all Stage 13 and 13.1 GitHub integration & security tests sequentially."""
+    print("\n--- Starting Stage 13 & 13.1 GitHub Integration & Security Tests ---")
 
     settings = get_settings()
     transport = httpx.ASGITransport(app=app)
@@ -94,7 +118,7 @@ async def run_all_stage13_tests() -> None:
         settings.FRONTEND_URL = "http://localhost:3000"
 
         # ----------------------------------------------------------------------
-        # 2. Connect endpoint generates redirect to GitHub
+        # 2. Connect endpoint generates redirect to GitHub & sets session cookie
         # ----------------------------------------------------------------------
         res2 = await client.get("/integrations/github/connect", follow_redirects=False)
         assert res2.status_code in (302, 307), f"Expected redirect, got {res2.status_code}"
@@ -103,31 +127,36 @@ async def run_all_stage13_tests() -> None:
         assert "client_id=test_github_client_id" in loc2
         assert "state=" in loc2
         assert "scope=" in loc2
-        assert "lens_oauth_state" in res2.cookies
-        state2 = res2.cookies["lens_oauth_state"]
-        assert f"state={state2}" in loc2
-        print("Test 2: connect endpoint generates redirect -> PASS")
+        assert OAUTH_COOKIE_NAME in res2.cookies
+        session_binding2 = res2.cookies[OAUTH_COOKIE_NAME]
+        # Crucial security guarantee: session binding is NOT passed in the public GitHub URL
+        assert session_binding2 not in loc2
+        print("Test 2: connect endpoint generates redirect & binds session cookie -> PASS")
 
         # ----------------------------------------------------------------------
-        # 3. State is cryptographically random (sufficient entropy)
+        # 3. State & session binding are cryptographically random
         # ----------------------------------------------------------------------
         states = {generate_oauth_state() for _ in range(50)}
+        bindings = {generate_session_binding() for _ in range(50)}
         assert len(states) == 50, "Generated states must be unique"
+        assert len(bindings) == 50, "Generated session bindings must be unique"
         for s in states:
             assert len(s) >= 32, "State string must provide sufficient entropy"
-        print("Test 3: state is cryptographically random -> PASS")
+        for b in bindings:
+            assert len(b) >= 32, "Session binding must provide sufficient entropy"
+        print("Test 3: state & session binding are cryptographically random -> PASS")
 
         # ----------------------------------------------------------------------
         # 4. State expires (TTL expiration check)
         # ----------------------------------------------------------------------
         test_state_exp = generate_oauth_state()
-        from app.integrations.github import service as gh_service
+        test_bind_exp = generate_session_binding()
         # Simulate an already-expired state in fallback memory store
-        gh_service._memory_state_cache[test_state_exp] = (
-            json.dumps({"created_at": time.time() - 700}),
+        _memory_state_cache[test_state_exp] = (
+            json.dumps({"session_binding": test_bind_exp, "created_at": time.time() - 700}),
             time.time() - 10,
         )
-        consumed_exp = await validate_and_consume_oauth_state(test_state_exp)
+        consumed_exp = await validate_and_consume_oauth_state(test_state_exp, test_bind_exp)
         assert consumed_exp is None, "Expired state must not be validated"
         print("Test 4: state expires -> PASS")
 
@@ -135,10 +164,11 @@ async def run_all_stage13_tests() -> None:
         # 5. State is single-use
         # ----------------------------------------------------------------------
         test_state_single = generate_oauth_state()
-        await store_oauth_state(test_state_single)
-        first_use = await validate_and_consume_oauth_state(test_state_single)
+        test_bind_single = generate_session_binding()
+        await store_oauth_state(test_state_single, test_bind_single)
+        first_use = await validate_and_consume_oauth_state(test_state_single, test_bind_single)
         assert first_use is not None, "First consumption must succeed"
-        second_use = await validate_and_consume_oauth_state(test_state_single)
+        second_use = await validate_and_consume_oauth_state(test_state_single, test_bind_single)
         assert second_use is None, "Second consumption of the same state must fail"
         print("Test 5: state is single-use -> PASS")
 
@@ -154,25 +184,27 @@ async def run_all_stage13_tests() -> None:
         # 7. Mismatched state rejected
         # ----------------------------------------------------------------------
         st7_query = generate_oauth_state()
-        st7_cookie = generate_oauth_state()
-        await store_oauth_state(st7_query)
-        client.cookies.set("lens_oauth_state", st7_cookie)
+        st7_stored = generate_oauth_state()
+        sb7 = generate_session_binding()
+        await store_oauth_state(st7_stored, sb7)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb7)
         res7 = await client.get(f"/integrations/github/callback?code=abc&state={st7_query}", follow_redirects=False)
         assert res7.status_code == 400, f"Expected 400, got {res7.status_code}"
-        assert "mismatched" in res7.json()["detail"].lower() or "invalid" in res7.json()["detail"].lower()
+        assert "invalid" in res7.json()["detail"].lower() or "expired" in res7.json()["detail"].lower()
         print("Test 7: mismatched state rejected -> PASS")
 
         # ----------------------------------------------------------------------
         # 8. Replayed state rejected
         # ----------------------------------------------------------------------
         st8 = generate_oauth_state()
-        await store_oauth_state(st8)
+        sb8 = generate_session_binding()
+        await store_oauth_state(st8, sb8)
         # Consume once manually
-        await validate_and_consume_oauth_state(st8)
-        client.cookies.set("lens_oauth_state", st8)
+        await validate_and_consume_oauth_state(st8, sb8)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb8)
         res8 = await client.get(f"/integrations/github/callback?code=abc&state={st8}", follow_redirects=False)
         assert res8.status_code == 400, f"Expected 400, got {res8.status_code}"
-        assert "already been used" in res8.json()["detail"].lower() or "expired" in res8.json()["detail"].lower()
+        assert "invalid" in res8.json()["detail"].lower() or "expired" in res8.json()["detail"].lower()
         print("Test 8: replayed state rejected -> PASS")
 
         # ----------------------------------------------------------------------
@@ -191,8 +223,9 @@ async def run_all_stage13_tests() -> None:
         # 10. Missing code rejected
         # ----------------------------------------------------------------------
         st10 = generate_oauth_state()
-        await store_oauth_state(st10)
-        client.cookies.set("lens_oauth_state", st10)
+        sb10 = generate_session_binding()
+        await store_oauth_state(st10, sb10)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb10)
         res10 = await client.get(f"/integrations/github/callback?state={st10}", follow_redirects=False)
         assert res10.status_code == 400, f"Expected 400, got {res10.status_code}"
         assert "code" in res10.json()["detail"].lower()
@@ -214,8 +247,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh
 
         st11 = generate_oauth_state()
-        await store_oauth_state(st11)
-        client.cookies.set("lens_oauth_state", st11)
+        sb11 = generate_session_binding()
+        await store_oauth_state(st11, sb11)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb11)
 
         res11 = await client.get(
             f"/integrations/github/callback?code=valid_code&state={st11}",
@@ -233,8 +267,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_fail
 
         st12 = generate_oauth_state()
-        await store_oauth_state(st12)
-        client.cookies.set("lens_oauth_state", st12)
+        sb12 = generate_session_binding()
+        await store_oauth_state(st12, sb12)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb12)
 
         res12 = await client.get(
             f"/integrations/github/callback?code=bad_code&state={st12}",
@@ -252,8 +287,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_malformed
 
         st13 = generate_oauth_state()
-        await store_oauth_state(st13)
-        client.cookies.set("lens_oauth_state", st13)
+        sb13 = generate_session_binding()
+        await store_oauth_state(st13, sb13)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb13)
 
         res13 = await client.get(
             f"/integrations/github/callback?code=code13&state={st13}",
@@ -267,8 +303,9 @@ async def run_all_stage13_tests() -> None:
         # ----------------------------------------------------------------------
         app.dependency_overrides[get_github_client] = lambda: mock_gh
         st14 = generate_oauth_state()
-        await store_oauth_state(st14)
-        client.cookies.set("lens_oauth_state", st14)
+        sb14 = generate_session_binding()
+        await store_oauth_state(st14, sb14)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb14)
 
         res14 = await client.get(
             f"/integrations/github/callback?code=code14&state={st14}",
@@ -291,8 +328,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_bad_ident
 
         st15 = generate_oauth_state()
-        await store_oauth_state(st15)
-        client.cookies.set("lens_oauth_state", st15)
+        sb15 = generate_session_binding()
+        await store_oauth_state(st15, sb15)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb15)
 
         res15 = await client.get(
             f"/integrations/github/callback?code=code15&state={st15}",
@@ -318,6 +356,7 @@ async def run_all_stage13_tests() -> None:
         async with AsyncSessionLocal() as session:
             conn17 = (await session.execute(select(GitHubConnection).where(GitHubConnection.provider == "github"))).scalar_one()
             assert conn17.encrypted_access_token != "gho_test_token_12345"
+            assert conn17.encrypted_access_token.startswith(CIPHERTEXT_VERSION_PREFIX)
             decrypted = decrypt_secret(conn17.encrypted_access_token)
             assert decrypted == "gho_test_token_12345"
         print("Test 17: token encrypted at rest -> PASS")
@@ -383,13 +422,15 @@ async def run_all_stage13_tests() -> None:
         # ----------------------------------------------------------------------
         app.dependency_overrides[get_github_client] = lambda: mock_gh
         st23_a = generate_oauth_state()
-        await store_oauth_state(st23_a)
-        client.cookies.set("lens_oauth_state", st23_a)
+        sb23_a = generate_session_binding()
+        await store_oauth_state(st23_a, sb23_a)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb23_a)
         await client.get(f"/integrations/github/callback?code=c1&state={st23_a}", follow_redirects=False)
 
         st23_b = generate_oauth_state()
-        await store_oauth_state(st23_b)
-        client.cookies.set("lens_oauth_state", st23_b)
+        sb23_b = generate_session_binding()
+        await store_oauth_state(st23_b, sb23_b)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb23_b)
         res23_b = await client.get(f"/integrations/github/callback?code=c2&state={st23_b}", follow_redirects=False)
         assert res23_b.status_code in (302, 307)
 
@@ -406,8 +447,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_timeout
 
         st24 = generate_oauth_state()
-        await store_oauth_state(st24)
-        client.cookies.set("lens_oauth_state", st24)
+        sb24 = generate_session_binding()
+        await store_oauth_state(st24, sb24)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb24)
 
         res24 = await client.get(f"/integrations/github/callback?code=c24&state={st24}", follow_redirects=False)
         assert res24.status_code == 504, f"Expected 504, got {res24.status_code}"
@@ -422,8 +464,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_500
 
         st25 = generate_oauth_state()
-        await store_oauth_state(st25)
-        client.cookies.set("lens_oauth_state", st25)
+        sb25 = generate_session_binding()
+        await store_oauth_state(st25, sb25)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb25)
 
         res25 = await client.get(f"/integrations/github/callback?code=c25&state={st25}", follow_redirects=False)
         assert res25.status_code == 502, f"Expected 502, got {res25.status_code}"
@@ -434,8 +477,9 @@ async def run_all_stage13_tests() -> None:
         # ----------------------------------------------------------------------
         app.dependency_overrides[get_github_client] = lambda: mock_gh
         st26 = generate_oauth_state()
-        await store_oauth_state(st26)
-        client.cookies.set("lens_oauth_state", st26)
+        sb26 = generate_session_binding()
+        await store_oauth_state(st26, sb26)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb26)
 
         with patch("app.integrations.github.router.upsert_github_connection", side_effect=RuntimeError("Simulated DB Crash")):
             res26 = await client.get(f"/integrations/github/callback?code=c26&state={st26}", follow_redirects=False)
@@ -459,8 +503,9 @@ async def run_all_stage13_tests() -> None:
         app.dependency_overrides[get_github_client] = lambda: mock_gh_malicious
 
         st27 = generate_oauth_state()
-        await store_oauth_state(st27)
-        client.cookies.set("lens_oauth_state", st27)
+        sb27 = generate_session_binding()
+        await store_oauth_state(st27, sb27)
+        client.cookies.set(OAUTH_COOKIE_NAME, sb27)
 
         res27 = await client.get(f"/integrations/github/callback?code=c27&state={st27}", follow_redirects=False)
         assert res27.status_code in (302, 307)
@@ -483,16 +528,291 @@ async def run_all_stage13_tests() -> None:
         res28 = await client.get("/integrations/github/connect?redirect=https://evil.com", follow_redirects=False)
         assert res28.status_code in (302, 307)
         loc28 = res28.headers.get("location", "")
-        # GitHub URL must only redirect to configured backend redirect_uri, not evil.com
         assert "evil.com" not in loc28
         print("Test 28: open redirect protection -> PASS")
+
+        # ======================================================================
+        # STAGE 13.1 EXPLICIT SESSION BINDING & THREAT MODEL TESTS (A - L)
+        # ======================================================================
+
+        # ----------------------------------------------------------------------
+        # 29. Threat Test A: Valid same-browser flow
+        # ----------------------------------------------------------------------
+        app.dependency_overrides[get_github_client] = lambda: mock_gh
+        # Step 1: initiate connect in browser session
+        res29_connect = await client.get("/integrations/github/connect", follow_redirects=False)
+        assert res29_connect.status_code in (302, 307)
+        assert OAUTH_COOKIE_NAME in res29_connect.cookies
+        cookie_binding_29 = res29_connect.cookies[OAUTH_COOKIE_NAME]
+
+        # Extract state from redirect location
+        loc29 = res29_connect.headers.get("location", "")
+        import urllib.parse
+        parsed_url29 = urllib.parse.urlparse(loc29)
+        query29 = urllib.parse.parse_qs(parsed_url29.query)
+        state_29 = query29["state"][0]
+
+        # Step 2: callback in SAME browser with same cookie
+        client.cookies.set(OAUTH_COOKIE_NAME, cookie_binding_29)
+        res29_callback = await client.get(
+            f"/integrations/github/callback?code=code_29&state={state_29}",
+            follow_redirects=False,
+        )
+        assert res29_callback.status_code in (302, 307)
+        assert "github=connected" in res29_callback.headers.get("location", "")
+        print("Test 29 (Threat Test A): valid same-browser flow -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 30. Threat Test B: Missing browser binding cookie
+        # ----------------------------------------------------------------------
+        # Connect initiates and returns state + cookie
+        res30_connect = await client.get("/integrations/github/connect", follow_redirects=False)
+        loc30 = res30_connect.headers.get("location", "")
+        state_30 = urllib.parse.parse_qs(urllib.parse.urlparse(loc30).query)["state"][0]
+
+        # Victim or attacker visits callback WITHOUT the session cookie
+        client.cookies.delete(OAUTH_COOKIE_NAME)
+        res30_callback = await client.get(
+            f"/integrations/github/callback?code=code_30&state={state_30}",
+            follow_redirects=False,
+        )
+        assert res30_callback.status_code == 400
+        assert "missing oauth browser session binding" in res30_callback.json()["detail"].lower()
+        print("Test 30 (Threat Test B): missing browser binding cookie rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 31. Threat Test C: Wrong browser binding (Browser A state + Browser B cookie)
+        # ----------------------------------------------------------------------
+        # Browser A initiates connect
+        res31_a = await client.get("/integrations/github/connect", follow_redirects=False)
+        state_31_a = urllib.parse.parse_qs(urllib.parse.urlparse(res31_a.headers["location"]).query)["state"][0]
+
+        # Browser B initiates connect
+        res31_b = await client.get("/integrations/github/connect", follow_redirects=False)
+        binding_31_b = res31_b.cookies[OAUTH_COOKIE_NAME]
+
+        # Callback invoked with Browser A's state but Browser B's session cookie
+        client.cookies.set(OAUTH_COOKIE_NAME, binding_31_b)
+        res31_callback = await client.get(
+            f"/integrations/github/callback?code=code_31&state={state_31_a}",
+            follow_redirects=False,
+        )
+        assert res31_callback.status_code == 400
+        assert "not bound to this browser session" in res31_callback.json()["detail"].lower()
+        print("Test 31 (Threat Test C): wrong browser binding rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 32. Threat Test D: Replayed callback rejected
+        # ----------------------------------------------------------------------
+        res32_connect = await client.get("/integrations/github/connect", follow_redirects=False)
+        state_32 = urllib.parse.parse_qs(urllib.parse.urlparse(res32_connect.headers["location"]).query)["state"][0]
+        binding_32 = res32_connect.cookies[OAUTH_COOKIE_NAME]
+
+        client.cookies.set(OAUTH_COOKIE_NAME, binding_32)
+        res32_first = await client.get(
+            f"/integrations/github/callback?code=code_32&state={state_32}",
+            follow_redirects=False,
+        )
+        assert res32_first.status_code in (302, 307)
+
+        # Replay same callback with same state and binding
+        client.cookies.set(OAUTH_COOKIE_NAME, binding_32)
+        res32_second = await client.get(
+            f"/integrations/github/callback?code=code_32&state={state_32}",
+            follow_redirects=False,
+        )
+        assert res32_second.status_code == 400
+        assert "invalid" in res32_second.json()["detail"].lower() or "expired" in res32_second.json()["detail"].lower()
+        print("Test 32 (Threat Test D): replayed callback rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 33. Threat Test E: Expired state rejected
+        # ----------------------------------------------------------------------
+        st33 = generate_oauth_state()
+        sb33 = generate_session_binding()
+        _memory_state_cache[st33] = (
+            json.dumps({"session_binding": sb33, "created_at": time.time() - 1000}),
+            time.time() - 20,
+        )
+        client.cookies.set(OAUTH_COOKIE_NAME, sb33)
+        res33 = await client.get(f"/integrations/github/callback?code=c33&state={st33}", follow_redirects=False)
+        assert res33.status_code == 400
+        print("Test 33 (Threat Test E): expired state rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 34. Threat Test F: Mismatched state rejected
+        # ----------------------------------------------------------------------
+        sb34 = generate_session_binding()
+        client.cookies.set(OAUTH_COOKIE_NAME, sb34)
+        res34 = await client.get(f"/integrations/github/callback?code=c34&state=nonexistent_state_val", follow_redirects=False)
+        assert res34.status_code == 400
+        print("Test 34 (Threat Test F): mismatched state rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 35. Threat Test G: High entropy verification
+        # ----------------------------------------------------------------------
+        sampled_states = [generate_oauth_state() for _ in range(100)]
+        sampled_bindings = [generate_session_binding() for _ in range(100)]
+        assert len(set(sampled_states)) == 100
+        assert len(set(sampled_bindings)) == 100
+        assert all(len(s) >= 43 for s in sampled_states)  # 32 raw bytes URL-safe base64 is 43 chars
+        assert all(len(b) >= 43 for b in sampled_bindings)
+        print("Test 35 (Threat Test G): high entropy verification -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 36. Threat Test H: OAuth denial deletes cookie & handles safely
+        # ----------------------------------------------------------------------
+        client.cookies.set(OAUTH_COOKIE_NAME, "active_session_binding_36")
+        res36 = await client.get(
+            "/integrations/github/callback?error=access_denied&error_description=The+user+has+denied+your+application+access.",
+            follow_redirects=False,
+        )
+        assert res36.status_code in (302, 307)
+        assert "github_error=access_denied" in res36.headers.get("location", "")
+        # Verify Set-Cookie header contains instructions to expire/delete the session cookie
+        set_cookie_36 = res36.headers.get("set-cookie", "")
+        assert OAUTH_COOKIE_NAME in set_cookie_36
+        print("Test 36 (Threat Test H): OAuth denial deletes cookie -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 37. Threat Test I: Open redirect rejected in connect
+        # ----------------------------------------------------------------------
+        for evil_url in [
+            "https://attacker.com",
+            "//attacker.com/evil",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+        ]:
+            res37 = await client.get(f"/integrations/github/connect?redirect={evil_url}", follow_redirects=False)
+            loc37 = res37.headers.get("location", "")
+            assert "attacker.com" not in loc37
+        print("Test 37 (Threat Test I): open redirect vectors rejected -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 38. Threat Test J: Session cookie security attributes
+        # ----------------------------------------------------------------------
+        res38 = await client.get("/integrations/github/connect", follow_redirects=False)
+        set_cookie_header = res38.headers.get("set-cookie", "")
+        assert f"{OAUTH_COOKIE_NAME}=" in set_cookie_header
+        assert "HttpOnly" in set_cookie_header or "httponly" in set_cookie_header.lower()
+        assert "samesite=lax" in set_cookie_header.lower()
+        assert "max-age=600" in set_cookie_header.lower()
+        # Verify cookie value does not contain state, tokens, or secrets
+        cookie_val38 = res38.cookies[OAUTH_COOKIE_NAME]
+        assert cookie_val38 != settings.GITHUB_CLIENT_SECRET
+        assert cookie_val38 != settings.GITHUB_CLIENT_ID
+        assert "gho_" not in cookie_val38
+        assert "state=" not in cookie_val38
+        print("Test 38 (Threat Test J): session cookie security attributes verified -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 39. Threat Test K: Redis production boundary
+        # ----------------------------------------------------------------------
+        # When APP_ENV == 'production', Redis is mandatory; failure raises OAuthStorageError & does not write memory
+        with patch.object(settings, "APP_ENV", "production"):
+            with patch("app.integrations.github.service.get_redis_client") as mock_redis_getter:
+                mock_redis = AsyncMock()
+                mock_redis.set.side_effect = ConnectionError("Redis cluster unreachable")
+                mock_redis_getter.return_value = mock_redis
+
+                test_st_prod = generate_oauth_state()
+                test_sb_prod = generate_session_binding()
+
+                storage_failed = False
+                try:
+                    await store_oauth_state(test_st_prod, test_sb_prod)
+                except OAuthStorageError:
+                    storage_failed = True
+
+                assert storage_failed is True, "In production mode, Redis failure must raise OAuthStorageError"
+                assert test_st_prod not in _memory_state_cache, "In production mode, must NEVER silently fall back to memory cache"
+
+                # Verify connect endpoint returns 503 Service Unavailable
+                res39 = await client.get("/integrations/github/connect", follow_redirects=False)
+                assert res39.status_code == 503
+                assert "unavailable" in res39.json()["detail"].lower()
+        print("Test 39 (Threat Test K): Redis production boundary strictly enforced -> PASS")
+
+        # ----------------------------------------------------------------------
+        # 40. Threat Test L: AES-256-GCM encryption configuration & tamper checks
+        # ----------------------------------------------------------------------
+        # 1. Round-trip
+        token_plain = "ghp_super_secret_github_personal_token_xyz987"
+        enc = encrypt_secret(token_plain)
+        assert enc.startswith(CIPHERTEXT_VERSION_PREFIX)
+        assert decrypt_secret(enc) == token_plain
+
+        # 2. Random nonce: encrypting same plaintext twice produces different ciphertexts
+        enc2 = encrypt_secret(token_plain)
+        assert enc != enc2, "Each encryption must use a unique random nonce"
+        assert decrypt_secret(enc2) == token_plain
+
+        # 3. Tampered ciphertext raises EncryptionError (MAC verification failure)
+        import base64
+        raw_b64 = enc[len(CIPHERTEXT_VERSION_PREFIX):]
+        raw_bytes = bytearray(base64.urlsafe_b64decode(raw_b64))
+        # Flip a bit in the ciphertext portion (after nonce [12B] and tag [16B])
+        raw_bytes[-1] ^= 0xFF
+        tampered_enc = f"{CIPHERTEXT_VERSION_PREFIX}{base64.urlsafe_b64encode(raw_bytes).decode('utf-8')}"
+        tamper_failed = False
+        try:
+            decrypt_secret(tampered_enc)
+        except EncryptionError:
+            tamper_failed = True
+        assert tamper_failed is True, "Tampered ciphertext must fail authentication tag verification"
+
+        # 4. Tampered tag raises EncryptionError
+        raw_bytes_tag = bytearray(base64.urlsafe_b64decode(raw_b64))
+        raw_bytes_tag[15] ^= 0xFF  # Flip bit in 16-byte tag
+        tampered_tag_enc = f"{CIPHERTEXT_VERSION_PREFIX}{base64.urlsafe_b64encode(raw_bytes_tag).decode('utf-8')}"
+        tag_failed = False
+        try:
+            decrypt_secret(tampered_tag_enc)
+        except EncryptionError:
+            tag_failed = True
+        assert tag_failed is True, "Tampered MAC tag must fail verification"
+
+        # 5. Raw 64-char hex key validation
+        raw_hex_key = "a" * 64
+        derived_hex = _derive_key(raw_hex_key)
+        assert len(derived_hex) == 32
+        assert derived_hex == bytes.fromhex(raw_hex_key)
+
+        # 6. Passphrase key derivation via PBKDF2
+        passphrase_key = "my-custom-passphrase-key"
+        derived_pass = _derive_key(passphrase_key)
+        assert len(derived_pass) == 32
+        assert derived_pass != passphrase_key.encode("utf-8")
+
+        # 7. Production mode validation: missing key raises EncryptionError
+        with patch.object(settings, "APP_ENV", "production"):
+            with patch.object(settings, "TOKEN_ENCRYPTION_KEY", None):
+                prod_key_failed = False
+                try:
+                    _derive_key(None)
+                except EncryptionError:
+                    prod_key_failed = True
+                assert prod_key_failed is True, "Production mode must fail when TOKEN_ENCRYPTION_KEY is unset"
+
+        print("Test 40 (Threat Test L): AES-256-GCM encryption & tamper verification -> PASS")
 
         # Final cleanup
         app.dependency_overrides.clear()
         await clean_github_connections()
 
     await close_connections()
-    print("\n--- ALL 28 STAGE 13 INTEGRATION TESTS PASSED SUCCESSFULLY ---")
+    print("\n--- ALL 40 STAGE 13 & 13.1 INTEGRATION & SECURITY TESTS PASSED SUCCESSFULLY ---")
+
+
+try:
+    import pytest
+
+    @pytest.mark.asyncio  # type: ignore[misc]
+    async def test_stage13_and_13_1_full_suite() -> None:
+        """Pytest entrypoint executing the 40 integration and security tests."""
+        await run_all_stage13_tests()
+except ImportError:
+    pass
 
 
 if __name__ == "__main__":

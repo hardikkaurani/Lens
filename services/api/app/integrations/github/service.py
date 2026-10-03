@@ -14,12 +14,20 @@ from app.db.session import get_redis_client
 
 logger = logging.getLogger(__name__)
 
+# Cookie name for browser session binding
+OAUTH_COOKIE_NAME = "lens_oauth_session"
+
 # Redis key prefix for OAuth states
 OAUTH_STATE_KEY_PREFIX = "lens:oauth:github:state:"
 OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
-# In-memory fallback cache for OAuth states when Redis is unavailable (e.g., isolated test environments)
+# In-memory fallback cache for OAuth states when Redis is unavailable (strictly for dev/test environments)
 _memory_state_cache: dict[str, tuple[str, float]] = {}
+
+
+class OAuthStorageError(Exception):
+    """Raised when OAuth state storage is unavailable or fails."""
+    pass
 
 
 def generate_oauth_state() -> str:
@@ -27,9 +35,35 @@ def generate_oauth_state() -> str:
     return secrets.token_urlsafe(32)
 
 
-async def store_oauth_state(state: str, metadata: Optional[dict[str, Any]] = None) -> None:
-    """Store OAuth state with a 10-minute expiration to prevent CSRF and replay attacks."""
-    payload_str = json.dumps(metadata or {"created_at": time.time()})
+def generate_session_binding() -> str:
+    """Generate a high-entropy, cryptographically secure browser session identifier."""
+    return secrets.token_urlsafe(32)
+
+
+async def store_oauth_state(
+    state: str,
+    session_binding: str,
+    metadata: Optional[dict[str, Any]] = None,
+) -> None:
+    """Store OAuth state bound to a browser session with a 10-minute expiration.
+
+    In production (APP_ENV == 'production'), Redis is mandatory. If Redis fails,
+    an OAuthStorageError is raised rather than falling back to process-local memory.
+    """
+    if not state or not state.strip():
+        raise ValueError("OAuth state cannot be empty.")
+    if not session_binding or not session_binding.strip():
+        raise ValueError("Session binding cannot be empty.")
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    is_production = settings.APP_ENV == "production"
+
+    payload: dict[str, Any] = dict(metadata) if metadata else {}
+    payload["session_binding"] = session_binding
+    payload["created_at"] = time.time()
+    payload_str = json.dumps(payload)
     key = f"{OAUTH_STATE_KEY_PREFIX}{state}"
 
     # Try storing in Redis
@@ -38,54 +72,84 @@ async def store_oauth_state(state: str, metadata: Optional[dict[str, Any]] = Non
         await redis.set(key, payload_str, ex=OAUTH_STATE_TTL_SECONDS)
         return
     except Exception as exc:
+        if is_production:
+            logger.error("Redis unavailable for OAuth state in production: %s", exc)
+            raise OAuthStorageError("OAuth storage is unavailable.") from exc
         logger.warning("Redis unavailable for OAuth state storage; falling back to memory store: %s", exc)
 
-    # Fallback to local memory store
+    # Fallback to local memory store (strictly allowed in dev/test only)
     expires_at = time.time() + OAUTH_STATE_TTL_SECONDS
     _memory_state_cache[state] = (payload_str, expires_at)
 
 
-async def validate_and_consume_oauth_state(state: str) -> Optional[dict[str, Any]]:
+async def validate_and_consume_oauth_state(
+    state: str,
+    expected_session_binding: Optional[str],
+) -> Optional[dict[str, Any]]:
     """Validate and atomically consume (delete) an OAuth state.
 
-    Returns the stored metadata if valid, or None if expired, missing, or already consumed.
+    Verifies:
+    1. State exists and is unexpired.
+    2. Expected browser session binding is present and matches the stored binding.
+    3. State is atomically consumed (single-use).
+
+    Returns stored metadata if all validations pass; returns None otherwise.
     """
     if not state or not state.strip():
         return None
+    if not expected_session_binding or not expected_session_binding.strip():
+        return None
 
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    is_production = settings.APP_ENV == "production"
     key = f"{OAUTH_STATE_KEY_PREFIX}{state}"
+    payload_str: Optional[str] = None
 
-    # 1. Try Redis first with atomic delete
+    # 1. Try Redis with atomic getdel
     try:
         redis = get_redis_client()
-        # getdel returns value and deletes in one atomic step (supported in Redis >= 6.2)
         val = await redis.getdel(key)
-        if val:
-            try:
-                data = json.loads(val)
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
+        if val is not None:
+            payload_str = val if isinstance(val, str) else val.decode("utf-8")
     except Exception as exc:
+        if is_production:
+            logger.error("Redis getdel failed for OAuth state in production: %s", exc)
+            raise OAuthStorageError("OAuth storage is unavailable.") from exc
         logger.warning("Redis getdel failed for OAuth state; checking memory fallback: %s", exc)
 
-    # 2. Check in-memory fallback
-    now = time.time()
-    # Clean up expired items
-    expired_keys = [k for k, (_, exp) in _memory_state_cache.items() if exp < now]
-    for k in expired_keys:
-        _memory_state_cache.pop(k, None)
+    # 2. Check in-memory fallback if not in production and not found in Redis
+    if payload_str is None and not is_production:
+        now = time.time()
+        # Clean up expired items
+        expired_keys = [k for k, (_, exp) in _memory_state_cache.items() if exp < now]
+        for k in expired_keys:
+            _memory_state_cache.pop(k, None)
 
-    if state in _memory_state_cache:
-        payload_str, expires_at = _memory_state_cache.pop(state)
-        if expires_at >= now:
-            try:
-                data = json.loads(payload_str)
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
+        if state in _memory_state_cache:
+            raw_payload, expires_at = _memory_state_cache.pop(state)
+            if expires_at >= now:
+                payload_str = raw_payload
 
-    return None
+    if payload_str is None:
+        return None
+
+    # Parse payload
+    try:
+        data = json.loads(payload_str)
+        if not isinstance(data, dict):
+            return None
+    except Exception:
+        return None
+
+    # Verify session binding using constant-time comparison
+    stored_binding = data.get("session_binding")
+    if not stored_binding or not secrets.compare_digest(stored_binding, expected_session_binding):
+        logger.warning("OAuth session binding mismatch for state: %s...", state[:8])
+        return None
+
+    return data
 
 
 async def get_github_connection(db: AsyncSession) -> Optional[GitHubConnection]:

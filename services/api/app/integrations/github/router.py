@@ -29,8 +29,11 @@ from app.integrations.github.schemas import (
     GitHubDisconnectResponse,
 )
 from app.integrations.github.service import (
+    OAUTH_COOKIE_NAME,
+    OAuthStorageError,
     delete_github_connection,
     generate_oauth_state,
+    generate_session_binding,
     get_github_connection,
     store_oauth_state,
     upsert_github_connection,
@@ -74,13 +77,21 @@ async def github_oauth_connect(
             detail="GitHub OAuth is not configured on this server.",
         )
 
-    # 1. Generate and persist cryptographic state (bound to Redis TTL)
+    # 1. Generate cryptographic state and independent browser session binding
     state = generate_oauth_state()
+    session_binding = generate_session_binding()
+
     state_meta = {}
     if redirect and _validate_safe_redirect(redirect, settings.FRONTEND_URL):
         state_meta["redirect"] = redirect
 
-    await store_oauth_state(state, state_meta)
+    try:
+        await store_oauth_state(state, session_binding, state_meta)
+    except OAuthStorageError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OAuth storage service temporarily unavailable.",
+        )
 
     # 2. Build redirect URI
     redirect_uri = settings.GITHUB_REDIRECT_URI
@@ -96,15 +107,15 @@ async def github_oauth_connect(
     }
     authorize_url = f"{settings.GITHUB_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
 
-    # 4. Set HttpOnly, SameSite=Lax cookie bound to user session
+    # 4. Set HttpOnly, SameSite=Lax cookie bound to user browser session
     response = RedirectResponse(
         url=authorize_url,
         status_code=status.HTTP_307_TEMPORARY_REDIRECT,
     )
     is_secure = settings.APP_ENV != "development"
     response.set_cookie(
-        key="lens_oauth_state",
-        value=state,
+        key=OAUTH_COOKIE_NAME,
+        value=session_binding,
         max_age=600,
         httponly=True,
         samesite="lax",
@@ -125,7 +136,7 @@ async def github_oauth_callback(
     state: Optional[str] = Query(None),
     error: Optional[str] = Query(None),
     error_description: Optional[str] = Query(None),
-    lens_oauth_state: Optional[str] = Cookie(None),
+    lens_oauth_session: Optional[str] = Cookie(None, alias=OAUTH_COOKIE_NAME),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
     github_client: GitHubClient = Depends(get_github_client),
@@ -136,7 +147,7 @@ async def github_oauth_callback(
         logger.warning("GitHub OAuth returned error: %s (%s)", error, error_description)
         redirect_target = f"{settings.FRONTEND_URL}/settings?github_error=access_denied"
         resp = RedirectResponse(url=redirect_target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-        resp.delete_cookie("lens_oauth_state", path="/")
+        resp.delete_cookie(OAUTH_COOKIE_NAME, path="/")
         return resp
 
     # 2. Validate state existence
@@ -146,21 +157,31 @@ async def github_oauth_callback(
             detail="Missing OAuth state parameter.",
         )
 
-    # 3. Validate state matching with cookie (CSRF defense)
-    if not lens_oauth_state or lens_oauth_state != state:
-        logger.warning("OAuth state cookie mismatch or missing cookie.")
+    # 3. Validate browser session binding cookie presence
+    if not lens_oauth_session or not lens_oauth_session.strip():
+        logger.warning("OAuth browser session binding cookie missing.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or mismatched OAuth state.",
+            detail="Missing OAuth browser session binding.",
         )
 
-    # 4. Validate and single-use consume state from store (Replay defense)
-    consumed_state = await validate_and_consume_oauth_state(state)
+    # 4. Validate and atomically consume state with session binding (CSRF & Replay defense)
+    try:
+        consumed_state = await validate_and_consume_oauth_state(
+            state=state,
+            expected_session_binding=lens_oauth_session,
+        )
+    except OAuthStorageError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OAuth storage service temporarily unavailable.",
+        )
+
     if consumed_state is None:
-        logger.warning("OAuth state invalid, expired, or already replayed: %s", state[:8])
+        logger.warning("OAuth state invalid, expired, replayed, or session binding mismatched: %s", state[:8])
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OAuth state has expired or has already been used.",
+            detail="OAuth state is invalid, expired, or not bound to this browser session.",
         )
 
     # 5. Validate authorization code
@@ -238,7 +259,7 @@ async def github_oauth_callback(
         url=destination,
         status_code=status.HTTP_307_TEMPORARY_REDIRECT,
     )
-    response.delete_cookie("lens_oauth_state", path="/")
+    response.delete_cookie(OAUTH_COOKIE_NAME, path="/")
     return response
 
 
