@@ -5,6 +5,7 @@ from app.db.models import (
     DEFAULT_EMBEDDING_DIMENSION,
     Capture,
     ContentChunk,
+    GitHubConnection,
     SourceMetadata,
     SourceType,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "SourceType",
     "Capture",
     "ContentChunk",
+    "GitHubConnection",
     "SourceMetadata",
     "DEFAULT_EMBEDDING_DIMENSION",
     "engine",
