@@ -7,6 +7,7 @@ from app.captures.router import router as captures_router
 from app.core.config import get_settings
 from app.db.session import close_connections
 from app.health.router import router as health_router
+from app.integrations.github.router import router as github_router
 from app.search.router import router as search_router
 
 settings = get_settings()
@@ -39,6 +40,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(captures_router)
 app.include_router(search_router)
+app.include_router(github_router)
 
 
 @app.get("/", tags=["root"])

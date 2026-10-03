@@ -58,6 +58,20 @@ export interface UploadCaptureOptions {
   timeoutMs?: number;
 }
 
+export interface GitHubConnectionStatus {
+  connected: boolean;
+  github_username?: string | null;
+  github_user_id?: string | null;
+  scope?: string | null;
+  connected_at?: string | null;
+  last_verified_at?: string | null;
+}
+
+export interface GitHubDisconnectResponse {
+  status: string;
+  message: string;
+}
+
 export function isCaptureDetail(data: unknown): data is CaptureDetail {
   if (!data || typeof data !== "object") return false;
   const c = data as Record<string, unknown>;
