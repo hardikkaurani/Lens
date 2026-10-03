@@ -18,3 +18,8 @@ python-dotenv>=1.0.0,<2.0.0
 
 # Testing & Client
 httpx>=0.27.0,<1.0.0
+
+# Multipart & Storage (Stage 11)
+python-multipart>=0.0.12,<1.0.0
+minio>=7.2.0,<8.0.0
+

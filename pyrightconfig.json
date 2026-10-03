@@ -1,0 +1,13 @@
+{
+  "include": [
+    "services/api/app",
+    "services/api/tests",
+    "services/worker/worker"
+  ],
+  "extraPaths": [
+    "services/api",
+    "services/worker"
+  ],
+  "venvPath": "services/api",
+  "venv": ".venv"
+}
