@@ -3,6 +3,8 @@ import {
   type CaptureCreatePayload,
   type CaptureDetail,
   type CaptureListResponse,
+  type GitHubConnectionStatus,
+  type GitHubDisconnectResponse,
   type HealthResponse,
   type SearchResponse,
   type UploadCaptureOptions,
@@ -339,5 +341,32 @@ export const apiClient = {
       method: "GET",
       signal: params.signal,
     });
+  },
+
+  /**
+   * Retrieve connection status for GitHub OAuth integration.
+   */
+  async getGitHubStatus(params: { signal?: AbortSignal } = {}): Promise<GitHubConnectionStatus> {
+    return request<GitHubConnectionStatus>("/integrations/github", {
+      method: "GET",
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Disconnect and remove stored GitHub integration credentials.
+   */
+  async disconnectGitHub(params: { signal?: AbortSignal } = {}): Promise<GitHubDisconnectResponse> {
+    return request<GitHubDisconnectResponse>("/integrations/github", {
+      method: "DELETE",
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Return server-side OAuth connect URL for initiating GitHub authorization.
+   */
+  getGitHubConnectUrl(): string {
+    return `${getApiBaseUrl()}/integrations/github/connect`;
   },
 };

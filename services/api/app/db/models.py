@@ -255,3 +255,76 @@ class SourceMetadata(Base):
     def __repr__(self) -> str:
         return f"<SourceMetadata id={self.id} capture_id={self.capture_id}>"
 
+
+class GitHubConnection(Base):
+    """Stores verified GitHub OAuth connection metadata and encrypted access tokens."""
+
+    __tablename__ = "github_connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    provider: Mapped[str] = mapped_column(
+        sa.String(32),
+        default="github",
+        nullable=False,
+        index=True,
+    )
+    github_user_id: Mapped[str] = mapped_column(
+        sa.String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    github_username: Mapped[Optional[str]] = mapped_column(
+        sa.String(255),
+        nullable=True,
+    )
+    encrypted_access_token: Mapped[str] = mapped_column(
+        sa.Text,
+        nullable=False,
+    )
+    token_type: Mapped[Optional[str]] = mapped_column(
+        sa.String(64),
+        nullable=True,
+        default="bearer",
+    )
+    scope: Mapped[Optional[str]] = mapped_column(
+        sa.String(512),
+        nullable=True,
+    )
+    token_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=dict,
+        server_default=sa.text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        onupdate=sa.func.now(),
+        nullable=False,
+    )
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "provider",
+            "github_user_id",
+            name="uq_github_connections_provider_user",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GitHubConnection id={self.id} user={self.github_username!r} provider={self.provider!r}>"
+
