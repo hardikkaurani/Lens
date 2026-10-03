@@ -1,0 +1,5 @@
+search-path = [
+    "services/api",
+    "services/worker",
+]
+python-interpreter-path = "services/api/.venv/Scripts/python.exe"

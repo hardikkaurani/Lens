@@ -37,11 +37,29 @@ class Settings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: Optional[str] = None
     AI_PROVIDER: Optional[str] = None
     AI_API_KEY: Optional[str] = None
-    S3_ENDPOINT: Optional[str] = None
-    S3_ACCESS_KEY: Optional[str] = None
-    S3_SECRET_KEY: Optional[str] = None
-    S3_BUCKET: Optional[str] = None
-    S3_REGION: Optional[str] = None
+    S3_ENDPOINT: str = "http://localhost:9000"
+    S3_ACCESS_KEY: str = "minioadmin"
+    S3_SECRET_KEY: str = "minioadmin"
+    S3_BUCKET: str = "lens-media"
+    S3_REGION: str = "us-east-1"
+    MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
+
+
+    # Stage 7 — Embedding settings
+    EMBEDDING_PROVIDER: str = "openai"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_DIMENSION: int = 1536
+    EMBEDDING_BATCH_SIZE: int = 32
+    EMBEDDING_TIMEOUT: float = 10.0
+
+    # Stage 7 — Search & Hybrid Ranking settings
+    HYBRID_LEXICAL_WEIGHT: float = 0.5
+    HYBRID_SEMANTIC_WEIGHT: float = 0.5
+    VECTOR_SIMILARITY_THRESHOLD: float = 0.2
+    SEARCH_DEFAULT_LIMIT: int = 10
+    SEARCH_MAX_LIMIT: int = 50
 
     @field_validator("DATABASE_URL", mode="after")
     @classmethod

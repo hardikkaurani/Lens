@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -24,6 +24,15 @@ class SourceType(str, enum.Enum):
     PDF = "pdf"
     FILE = "file"
     GITHUB = "github"
+
+
+class ProcessingStatus(str, enum.Enum):
+    """Lifecycle processing status for captured items."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class Capture(Base):
@@ -45,6 +54,26 @@ class Capture(Base):
         ),
         nullable=False,
         index=True,
+    )
+    processing_status: Mapped[ProcessingStatus] = mapped_column(
+        sa.Enum(
+            ProcessingStatus,
+            name="processing_status",
+            values_callable=lambda obj: [e.value for e in obj],
+            native_enum=True,
+        ),
+        default=ProcessingStatus.PENDING,
+        server_default="pending",
+        nullable=False,
+        index=True,
+    )
+    processing_error: Mapped[Optional[str]] = mapped_column(
+        sa.Text,
+        nullable=True,
+    )
+    processed_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
     )
     title: Mapped[Optional[str]] = mapped_column(
         sa.String(512),
@@ -98,6 +127,21 @@ class Capture(Base):
         uselist=False,
     )
 
+    # Full-text search tsvector computed column (title search)
+    tsv: Mapped[Optional[Any]] = mapped_column(
+        TSVECTOR,
+        sa.Computed("to_tsvector('english', coalesce(title, ''))", persisted=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        sa.Index(
+            "ix_captures_tsv",
+            "tsv",
+            postgresql_using="gin",
+        ),
+    )
+
     def __repr__(self) -> str:
         return f"<Capture id={self.id} type={self.source_type.value} title={self.title!r}>"
 
@@ -131,6 +175,12 @@ class ContentChunk(Base):
         Vector(DEFAULT_EMBEDDING_DIMENSION),
         nullable=True,
     )
+    # Full-text search tsvector computed column (chunk content search)
+    tsv: Mapped[Optional[Any]] = mapped_column(
+        TSVECTOR,
+        sa.Computed("to_tsvector('english', content)", persisted=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         server_default=sa.func.now(),
@@ -148,6 +198,11 @@ class ContentChunk(Base):
             "capture_id",
             "chunk_index",
             name="uq_content_chunks_capture_chunk",
+        ),
+        sa.Index(
+            "ix_content_chunks_tsv",
+            "tsv",
+            postgresql_using="gin",
         ),
     )
 
@@ -199,3 +254,4 @@ class SourceMetadata(Base):
 
     def __repr__(self) -> str:
         return f"<SourceMetadata id={self.id} capture_id={self.capture_id}>"
+

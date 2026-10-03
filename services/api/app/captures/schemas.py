@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.db.models import Capture, SourceType
+from app.db.models import Capture, ProcessingStatus, SourceType
 
 # Restricted source types permitted through the capture ingestion endpoint
 IngestionSourceType = Literal["url", "text"]
@@ -84,6 +84,9 @@ class CaptureResponse(BaseModel):
 
     id: uuid.UUID
     source_type: SourceType
+    processing_status: ProcessingStatus
+    processing_error: Optional[str] = None
+    processed_at: Optional[datetime] = None
     title: Optional[str] = None
     original_url: Optional[str] = None
     content: Optional[str] = None
@@ -95,22 +98,46 @@ class CaptureResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ContentChunkResponse(BaseModel):
+    """Public representation of an extracted content chunk without vector embeddings."""
+
+    id: uuid.UUID
+    chunk_index: int
+    content: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class CaptureDetailResponse(CaptureResponse):
-    """Detailed response schema including associated source metadata."""
+    """Detailed response schema including associated source metadata and content chunks."""
 
     metadata: Optional[dict[str, Any]] = None
+    chunks: list[ContentChunkResponse] = Field(default_factory=list)
 
     @classmethod
     def from_capture(cls, capture: Capture) -> "CaptureDetailResponse":
-        """Convert a Capture model instance and its optional SourceMetadata to a response."""
+        """Convert a Capture model instance and its optional SourceMetadata and chunks to a response."""
         metadata_dict = (
             capture.source_metadata.payload
             if capture.source_metadata is not None
             else None
         )
+        chunks_list = [
+            ContentChunkResponse(
+                id=ch.id,
+                chunk_index=ch.chunk_index,
+                content=ch.content,
+                created_at=ch.created_at,
+            )
+            for ch in sorted(capture.chunks or [], key=lambda c: c.chunk_index)
+        ]
         return cls(
             id=capture.id,
             source_type=capture.source_type,
+            processing_status=capture.processing_status,
+            processing_error=capture.processing_error,
+            processed_at=capture.processed_at,
             title=capture.title,
             original_url=capture.original_url,
             content=capture.content,
@@ -119,6 +146,7 @@ class CaptureDetailResponse(CaptureResponse):
             created_at=capture.created_at,
             updated_at=capture.updated_at,
             metadata=metadata_dict,
+            chunks=chunks_list,
         )
 
 
