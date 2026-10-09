@@ -1,4 +1,4 @@
-# LENS
+# LENS !
 
 > A personal information capture and retrieval system: anything you encounter and want to find again should be easy to capture, understand, connect, and retrieve.
 
