@@ -317,6 +317,14 @@ class GitHubConnection(Base):
         nullable=True,
     )
 
+    # One-to-many relationship with GitHubRepository (cascade deletion)
+    repositories: Mapped[list["GitHubRepository"]] = relationship(
+        "GitHubRepository",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     __table_args__ = (
         sa.UniqueConstraint(
             "provider",
@@ -327,4 +335,167 @@ class GitHubConnection(Base):
 
     def __repr__(self) -> str:
         return f"<GitHubConnection id={self.id} user={self.github_username!r} provider={self.provider!r}>"
+
+
+class RepositorySyncStatus(str, enum.Enum):
+    """Synchronization status of a discovered GitHub repository."""
+
+    DISCOVERED = "discovered"
+    SYNCING = "syncing"
+    SYNCED = "synced"
+    FAILED = "failed"
+
+
+class GitHubRepository(Base):
+    """Stores normalized metadata for GitHub repositories discovered for a connection."""
+
+    __tablename__ = "github_repositories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("github_connections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    github_repository_id: Mapped[str] = mapped_column(
+        sa.String(64),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(
+        sa.String(255),
+        nullable=False,
+    )
+    full_name: Mapped[str] = mapped_column(
+        sa.String(255),
+        nullable=False,
+        index=True,
+    )
+    owner_login: Mapped[str] = mapped_column(
+        sa.String(255),
+        nullable=False,
+    )
+    owner_id: Mapped[Optional[str]] = mapped_column(
+        sa.String(64),
+        nullable=True,
+    )
+    is_private: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=False,
+    )
+    is_fork: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=False,
+    )
+    is_archived: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=False,
+    )
+    is_disabled: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=False,
+    )
+    is_selected: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+    )
+    html_url: Mapped[str] = mapped_column(
+        sa.String(512),
+        nullable=False,
+    )
+    description: Mapped[Optional[str]] = mapped_column(
+        sa.Text,
+        nullable=True,
+    )
+    default_branch: Mapped[Optional[str]] = mapped_column(
+        sa.String(128),
+        nullable=True,
+    )
+    language: Mapped[Optional[str]] = mapped_column(
+        sa.String(64),
+        nullable=True,
+    )
+    visibility: Mapped[Optional[str]] = mapped_column(
+        sa.String(32),
+        nullable=True,
+    )
+    license_name: Mapped[Optional[str]] = mapped_column(
+        sa.String(128),
+        nullable=True,
+    )
+    sync_status: Mapped[RepositorySyncStatus] = mapped_column(
+        sa.Enum(
+            RepositorySyncStatus,
+            name="repository_sync_status",
+            values_callable=lambda obj: [e.value for e in obj],
+            native_enum=True,
+        ),
+        default=RepositorySyncStatus.DISCOVERED,
+        server_default="discovered",
+        nullable=False,
+        index=True,
+    )
+    sync_error: Mapped[Optional[str]] = mapped_column(
+        sa.Text,
+        nullable=True,
+    )
+    github_created_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+    github_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+    github_pushed_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        onupdate=sa.func.now(),
+        nullable=False,
+    )
+
+    connection: Mapped["GitHubConnection"] = relationship(
+        "GitHubConnection",
+        back_populates="repositories",
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "connection_id",
+            "github_repository_id",
+            name="uq_github_repositories_conn_repo",
+        ),
+        sa.Index(
+            "ix_github_repositories_conn_sync",
+            "connection_id",
+            "sync_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GitHubRepository id={self.id} full_name={self.full_name!r} status={self.sync_status.value}>"
 

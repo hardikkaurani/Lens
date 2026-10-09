@@ -2,8 +2,8 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import { SettingsContent } from "@/app/settings/page";
-import { apiClient } from "@/lib/api-client";
-import type { GitHubConnectionStatus } from "@/types/api";
+import { apiClient, ApiClientError } from "@/lib/api-client";
+import type { GitHubConnectionStatus, GitHubRepoSyncResponse } from "@/types/api";
 
 let mockSearchParams = new URLSearchParams();
 
@@ -204,3 +204,404 @@ describe("Stage 13 Web GitHub Integration UX (Tests 29-37)", () => {
     }
   });
 });
+
+describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)", () => {
+  const mockConnectedStatus: GitHubConnectionStatus = {
+    connected: true,
+    github_username: "octocat_repo_owner",
+    github_user_id: "445566",
+    scope: "read:user,repo",
+    connected_at: "2026-10-03T10:00:00Z",
+    last_verified_at: "2026-10-03T11:00:00Z",
+  };
+
+  const mockRepos = [
+    {
+      id: "repo-uuid-1",
+      github_repository_id: "101",
+      name: "lens-core",
+      full_name: "octocat/lens-core",
+      owner_login: "octocat",
+      is_private: false,
+      is_fork: false,
+      is_archived: false,
+      is_disabled: false,
+      is_selected: false,
+      html_url: "https://github.com/octocat/lens-core",
+      description: "LENS core retrieval engine",
+      default_branch: "main",
+      language: "TypeScript",
+      visibility: "public",
+      license_name: "MIT",
+      sync_status: "synced" as const,
+      sync_error: null,
+      created_at: "2026-10-03T10:00:00Z",
+      updated_at: "2026-10-03T10:00:00Z",
+    },
+    {
+      id: "repo-uuid-2",
+      github_repository_id: "102",
+      name: "lens-infra",
+      full_name: "octocat/lens-infra",
+      owner_login: "octocat",
+      is_private: true,
+      is_fork: true,
+      is_archived: true,
+      is_disabled: false,
+      is_selected: true,
+      html_url: "https://github.com/octocat/lens-infra",
+      description: "Private archived deployment scripts",
+      default_branch: "develop",
+      language: "Python",
+      visibility: "private",
+      license_name: "Apache-2.0",
+      sync_status: "synced" as const,
+      sync_error: null,
+      created_at: "2026-10-03T10:00:00Z",
+      updated_at: "2026-10-03T10:00:00Z",
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  // 34. connected GitHub state displays repositories section
+  it("34. renders repositories section when GitHub is connected", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repositories-section")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Discovered Repositories")).toBeInTheDocument();
+  });
+
+  // 35. repository sync button renders and triggers sync API
+  it("35. renders sync button and calls sync API on click", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+    const syncSpy = vi.spyOn(apiClient, "syncGitHubRepositories").mockResolvedValue({
+      status: "completed",
+      synced_count: 2,
+      total: 2,
+      message: "Sync success",
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-repos-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("sync-repos-btn"));
+
+    await waitFor(() => {
+      expect(syncSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // 36. loading state displays loading skeleton
+  it("36. displays repository loading skeleton while fetching", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockReturnValue(new Promise(() => {}));
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repos-loading")).toBeInTheDocument();
+    });
+  });
+
+  // 37. repository list renders discovered repositories
+  it("37. renders list of discovered repositories with full names and links", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-list")).toBeInTheDocument();
+      expect(screen.getByTestId("repo-name-repo-uuid-1")).toHaveTextContent("octocat/lens-core");
+      expect(screen.getByTestId("repo-name-repo-uuid-2")).toHaveTextContent("octocat/lens-infra");
+    });
+  });
+
+  // 38. private/public display correctly shows badges
+  it("38. correctly renders Public and Private badges", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      const publicBadge = screen.getByText("Public");
+      const privateBadge = screen.getByText("Private");
+      expect(publicBadge).toBeInTheDocument();
+      expect(privateBadge).toBeInTheDocument();
+    });
+  });
+
+  // 39. archived/fork indicators render badges
+  it("39. correctly renders Archived and Fork badges", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Archived")).toBeInTheDocument();
+      expect(screen.getByText("Fork")).toBeInTheDocument();
+    });
+  });
+
+  // 40. safe repository-name rendering prevents script execution
+  it("40. renders malicious repository name safely without HTML injection", async () => {
+    const maliciousRepos = [
+      {
+        ...mockRepos[0],
+        name: "<script>alert('xss')</script>",
+        full_name: "octocat/<script>alert('xss')</script>",
+      },
+    ];
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: maliciousRepos,
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      const repoNameEl = screen.getByTestId("repo-name-repo-uuid-1");
+      expect(repoNameEl.textContent).toBe("octocat/<script>alert('xss')</script>");
+    });
+    expect(document.querySelector("script[src]")).toBeNull();
+  });
+
+  // 41. safe description rendering escapes dangerous payloads
+  it("41. renders dangerous repository description safely as plain text", async () => {
+    const maliciousDescRepos = [
+      {
+        ...mockRepos[0],
+        description: "<img src=x onerror=alert('xss')>",
+      },
+    ];
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: maliciousDescRepos,
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByText("<img src=x onerror=alert('xss')>")).toBeInTheDocument();
+    });
+    expect(document.querySelector("img[src='x']")).toBeNull();
+  });
+
+  // 42. empty repository state displays clean message
+  it("42. renders empty state when no repositories have been discovered", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-empty-state")).toBeInTheDocument();
+      expect(screen.getByText(/no repositories discovered yet/i)).toBeInTheDocument();
+    });
+  });
+
+  // 43. API error handling displays safe error message
+  it("43. displays clean error banner when repository fetch fails", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockRejectedValue(
+      new Error("Database connection dropped")
+    );
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-error-message")).toBeInTheDocument();
+    });
+  });
+
+  // 44. rate-limit error handling displays rate limit alert on 429
+  it("44. displays rate limit error message when sync API returns 429", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+    const error429 = new ApiClientError(429, "Rate limit exceeded");
+    vi.spyOn(apiClient, "syncGitHubRepositories").mockRejectedValue(error429);
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-repos-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("sync-repos-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-error-message")).toBeInTheDocument();
+      expect(screen.getByText(/rate limit/i)).toBeInTheDocument();
+    });
+  });
+
+  // 45. sync action cannot double-submit while sync is in flight
+  it("45. disables sync button while synchronization is in flight", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+    let resolveSync: (value: GitHubRepoSyncResponse) => void = () => {};
+    const syncPromise = new Promise<GitHubRepoSyncResponse>((resolve) => {
+      resolveSync = resolve;
+    });
+    const syncSpy = vi.spyOn(apiClient, "syncGitHubRepositories").mockReturnValue(syncPromise);
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-repos-btn")).toBeInTheDocument();
+    });
+
+    const syncBtn = screen.getByTestId("sync-repos-btn");
+    fireEvent.click(syncBtn);
+    fireEvent.click(syncBtn);
+
+    expect(syncSpy).toHaveBeenCalledTimes(1);
+    expect(syncBtn).toBeDisabled();
+
+    // Resolve in-flight request
+    resolveSync({ status: "completed", synced_count: 0, total: 0, message: "Done" });
+    await waitFor(() => {
+      expect(syncBtn).not.toBeDisabled();
+    });
+  });
+
+  // 46. no token rendered in repository DOM
+  it("46. verifies no token or secret is leaked in repository section DOM", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    const { container } = render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repositories-section")).toBeInTheDocument();
+    });
+
+    const html = container.innerHTML.toLowerCase();
+    expect(html).not.toContain("bearer");
+    expect(html).not.toContain("gho_");
+    expect(html).not.toContain("client_secret");
+  });
+
+  // 47. repository list search/filter behavior
+  it("47. filters repository list client-side based on search input", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-name-repo-uuid-1")).toBeInTheDocument();
+      expect(screen.getByTestId("repo-name-repo-uuid-2")).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByTestId("repo-search-input");
+    fireEvent.change(searchInput, { target: { value: "core" } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-name-repo-uuid-1")).toBeInTheDocument();
+      expect(screen.queryByTestId("repo-name-repo-uuid-2")).toBeNull();
+    });
+  });
+
+  // 48. selection toggle calls update selection API
+  it("48. toggling repository checkbox calls update selection API", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(mockConnectedStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: mockRepos,
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+    const updateSpy = vi.spyOn(apiClient, "updateGitHubRepositorySelection").mockResolvedValue({
+      ...mockRepos[0],
+      is_selected: true,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-checkbox-repo-uuid-1")).toBeInTheDocument();
+    });
+
+    const checkbox = screen.getByTestId("repo-checkbox-repo-uuid-1");
+    expect(checkbox).not.toBeChecked();
+
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith("repo-uuid-1", true);
+    });
+  });
+});
+

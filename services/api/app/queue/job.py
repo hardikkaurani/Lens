@@ -14,6 +14,8 @@ URL_INGEST_QUEUE = "lens:jobs:url_ingest"
 URL_INGEST_PROCESSING_QUEUE = "lens:jobs:url_ingest:processing"
 FILE_INGEST_QUEUE = "lens:jobs:file_ingest"
 FILE_INGEST_PROCESSING_QUEUE = "lens:jobs:file_ingest:processing"
+GITHUB_REPO_SYNC_QUEUE = "lens:jobs:github_repo_sync"
+GITHUB_REPO_SYNC_PROCESSING_QUEUE = "lens:jobs:github_repo_sync:processing"
 
 
 class URLIngestJob(BaseModel):
@@ -30,6 +32,14 @@ class FileIngestJob(BaseModel):
     type: str = Field(default="capture.file_ingest", description="Job type identifier.")
     version: int = Field(default=1, description="Schema contract version.")
     capture_id: uuid.UUID = Field(..., description="Target Capture UUID to process.")
+
+
+class GitHubRepoSyncJob(BaseModel):
+    """Explicit job contract for GitHub repository discovery and synchronization."""
+
+    type: str = Field(default="github.repositories_sync", description="Job type identifier.")
+    version: int = Field(default=1, description="Schema contract version.")
+    connection_id: uuid.UUID = Field(..., description="Target GitHubConnection UUID.")
 
 
 
@@ -180,4 +190,71 @@ async def ack_file_ingest_job(
         client = get_redis_client()
 
     await cast(Awaitable[int], client.lrem(FILE_INGEST_PROCESSING_QUEUE, 1, raw))
+
+
+async def enqueue_github_repo_sync_job(
+    connection_id: uuid.UUID,
+    client: Optional[Redis] = None,
+) -> bool:
+    """Enqueue a new GitHub repository synchronization job into Redis."""
+    if client is None:
+        client = get_redis_client()
+
+    job = GitHubRepoSyncJob(connection_id=connection_id)
+    payload = job.model_dump_json()
+
+    await cast(Awaitable[int], client.lpush(GITHUB_REPO_SYNC_QUEUE, payload))
+    logger.info("Enqueued GitHub repo sync job for connection %s", connection_id)
+    return True
+
+
+async def dequeue_github_repo_sync_job(
+    timeout: int = 2,
+    client: Optional[Redis] = None,
+) -> tuple[Optional[GitHubRepoSyncJob], Optional[str]]:
+    """Reliably dequeue a GitHub repo sync job from Redis using BLMOVE or LMOVE.
+
+    Atomically moves the oldest job from GITHUB_REPO_SYNC_QUEUE (RIGHT)
+    into GITHUB_REPO_SYNC_PROCESSING_QUEUE (LEFT).
+    """
+    if client is None:
+        client = get_redis_client()
+
+    if timeout <= 0:
+        raw = await client.lmove(
+            GITHUB_REPO_SYNC_QUEUE,
+            GITHUB_REPO_SYNC_PROCESSING_QUEUE,
+            src="RIGHT",
+            dest="LEFT",
+        )
+    else:
+        raw = await client.blmove(
+            GITHUB_REPO_SYNC_QUEUE,
+            GITHUB_REPO_SYNC_PROCESSING_QUEUE,
+            timeout,
+            src="RIGHT",
+            dest="LEFT",
+        )
+    if raw is None:
+        return None, None
+
+    try:
+        job = GitHubRepoSyncJob.model_validate_json(raw)
+        return job, raw
+    except Exception as e:
+        logger.error("Failed to parse GitHub repo sync job payload from queue: %s (payload=%r)", e, raw)
+        await cast(Awaitable[int], client.lrem(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 1, raw))
+        return None, None
+
+
+async def ack_github_repo_sync_job(
+    raw: str,
+    client: Optional[Redis] = None,
+) -> None:
+    """Acknowledge completion of a GitHub repo sync job by removing it from the processing queue."""
+    if client is None:
+        client = get_redis_client()
+
+    await cast(Awaitable[int], client.lrem(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 1, raw))
+
 

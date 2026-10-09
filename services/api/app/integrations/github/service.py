@@ -4,13 +4,26 @@ import logging
 import secrets
 import time
 from typing import Any, Optional
+import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import encrypt_secret
-from app.db.models import GitHubConnection
+from app.core.encryption import EncryptionError, decrypt_secret, encrypt_secret
+from app.db.models import GitHubConnection, GitHubRepository, RepositorySyncStatus
 from app.db.session import get_redis_client
+from app.integrations.github.client import (
+    GitHubAuthError,
+    GitHubClient,
+    GitHubClientError,
+    GitHubRateLimitError,
+    GitHubTimeoutError,
+    get_github_client,
+)
+from app.integrations.github.schemas import (
+    NormalizedGitHubRepository,
+    normalize_github_repository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +34,16 @@ OAUTH_COOKIE_NAME = "lens_oauth_session"
 OAUTH_STATE_KEY_PREFIX = "lens:oauth:github:state:"
 OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
-# In-memory fallback cache for OAuth states when Redis is unavailable (strictly for dev/test environments)
+# Repository discovery & sync constants
+DEFAULT_REPO_PAGE_SIZE = 100
+MAX_REPOSITORIES_PER_SYNC = 500
+MAX_PAGES_PER_SYNC = 10
+SYNC_LOCK_TTL_SECONDS = 60
+SYNC_LOCK_KEY_PREFIX = "lens:lock:github_sync:"
+
+# In-memory fallback caches when Redis is unavailable (strictly for dev/test environments)
 _memory_state_cache: dict[str, tuple[str, float]] = {}
+_memory_lock_cache: dict[str, float] = {}
 
 
 class OAuthStorageError(Exception):
@@ -211,4 +232,263 @@ async def delete_github_connection(db: AsyncSession) -> bool:
     rowcount = getattr(result, "rowcount", 0)
     await db.commit()
     return isinstance(rowcount, int) and rowcount > 0
+
+
+async def acquire_sync_lock(connection_id: uuid.UUID) -> bool:
+    """Acquire a temporary distributed lock for repository sync to prevent concurrent runs."""
+    key = f"{SYNC_LOCK_KEY_PREFIX}{connection_id}"
+    now = time.time()
+    try:
+        redis = get_redis_client()
+        res = await redis.set(key, "1", ex=SYNC_LOCK_TTL_SECONDS, nx=True)
+        return bool(res)
+    except Exception as exc:
+        logger.warning("Redis unavailable for sync lock; checking local memory cache: %s", exc)
+
+    # In-memory fallback
+    if key in _memory_lock_cache:
+        if _memory_lock_cache[key] > now:
+            return False
+    _memory_lock_cache[key] = now + SYNC_LOCK_TTL_SECONDS
+    return True
+
+
+async def release_sync_lock(connection_id: uuid.UUID) -> None:
+    """Release distributed lock for repository sync."""
+    key = f"{SYNC_LOCK_KEY_PREFIX}{connection_id}"
+    try:
+        redis = get_redis_client()
+        await redis.delete(key)
+    except Exception:
+        pass
+    _memory_lock_cache.pop(key, None)
+
+
+async def upsert_repositories(
+    db: AsyncSession,
+    connection_id: uuid.UUID,
+    normalized_repos: list[NormalizedGitHubRepository],
+) -> int:
+    """Idempotently persist or update GitHub repositories for a connection.
+
+    Protects against duplicates using external github_repository_id + connection_id.
+    Preserves internal UUID PK and is_selected preference on rename or update.
+    """
+    if not normalized_repos:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    stmt = select(GitHubRepository).where(GitHubRepository.connection_id == connection_id)
+    res = await db.execute(stmt)
+    existing_repos = res.scalars().all()
+    by_github_id: dict[str, GitHubRepository] = {
+        r.github_repository_id: r for r in existing_repos
+    }
+
+    count = 0
+    for repo_data in normalized_repos:
+        existing = by_github_id.get(repo_data.github_repository_id)
+        if existing:
+            # Update mutable fields, preserving internal PK and is_selected state
+            existing.name = repo_data.name
+            existing.full_name = repo_data.full_name
+            existing.owner_login = repo_data.owner_login
+            existing.owner_id = repo_data.owner_id
+            existing.is_private = repo_data.is_private
+            existing.is_fork = repo_data.is_fork
+            existing.is_archived = repo_data.is_archived
+            existing.is_disabled = repo_data.is_disabled
+            existing.html_url = repo_data.html_url
+            existing.description = repo_data.description
+            existing.default_branch = repo_data.default_branch
+            existing.language = repo_data.language
+            existing.visibility = repo_data.visibility
+            existing.license_name = repo_data.license_name
+            existing.github_created_at = repo_data.github_created_at
+            existing.github_updated_at = repo_data.github_updated_at
+            existing.github_pushed_at = repo_data.github_pushed_at
+            existing.sync_status = RepositorySyncStatus.SYNCED
+            existing.sync_error = None
+            existing.last_synced_at = now
+            existing.updated_at = now
+        else:
+            new_repo = GitHubRepository(
+                connection_id=connection_id,
+                github_repository_id=repo_data.github_repository_id,
+                name=repo_data.name,
+                full_name=repo_data.full_name,
+                owner_login=repo_data.owner_login,
+                owner_id=repo_data.owner_id,
+                is_private=repo_data.is_private,
+                is_fork=repo_data.is_fork,
+                is_archived=repo_data.is_archived,
+                is_disabled=repo_data.is_disabled,
+                is_selected=False,
+                html_url=repo_data.html_url,
+                description=repo_data.description,
+                default_branch=repo_data.default_branch,
+                language=repo_data.language,
+                visibility=repo_data.visibility,
+                license_name=repo_data.license_name,
+                sync_status=RepositorySyncStatus.SYNCED,
+                sync_error=None,
+                github_created_at=repo_data.github_created_at,
+                github_updated_at=repo_data.github_updated_at,
+                github_pushed_at=repo_data.github_pushed_at,
+                last_synced_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(new_repo)
+            by_github_id[repo_data.github_repository_id] = new_repo
+        count += 1
+
+    await db.commit()
+    return count
+
+
+async def discover_and_sync_repositories(
+    db: AsyncSession,
+    connection: GitHubConnection,
+    github_client: Optional[GitHubClient] = None,
+    max_repos: int = MAX_REPOSITORIES_PER_SYNC,
+    page_size: int = DEFAULT_REPO_PAGE_SIZE,
+) -> dict[str, Any]:
+    """Discover and synchronize repositories from GitHub API for an active connection.
+
+    Decrypts the access token server-side.
+    Performs bounded pagination and rate-limit aware fetching.
+    Upserts repositories idempotently.
+    """
+    client = github_client or get_github_client()
+
+    # 1. Decrypt token securely server-side
+    try:
+        access_token = decrypt_secret(connection.encrypted_access_token)
+    except EncryptionError as err:
+        logger.error("Failed to decrypt access token for connection %s: %s", connection.id, err)
+        raise
+
+    all_normalized: list[NormalizedGitHubRepository] = []
+    seen_ids: set[str] = set()
+
+    # 2. Bounded pagination loop
+    for page in range(1, MAX_PAGES_PER_SYNC + 1):
+        if len(all_normalized) >= max_repos:
+            break
+
+        # Fetch page of repositories
+        raw_items = await client.list_user_repositories(
+            access_token=access_token,
+            page=page,
+            per_page=min(page_size, max_repos - len(all_normalized)),
+        )
+
+        if not raw_items:
+            break
+
+        for item in raw_items:
+            normalized = normalize_github_repository(item)
+            if normalized and normalized.github_repository_id not in seen_ids:
+                seen_ids.add(normalized.github_repository_id)
+                all_normalized.append(normalized)
+                if len(all_normalized) >= max_repos:
+                    break
+
+        # Stop when returned items are fewer than requested page size
+        if len(raw_items) < page_size:
+            break
+
+    # 3. Upsert normalized records idempotently
+    synced_count = await upsert_repositories(db, connection.id, all_normalized)
+
+    # 4. Count total repositories in DB for this connection
+    count_stmt = select(func.count(GitHubRepository.id)).where(
+        GitHubRepository.connection_id == connection.id
+    )
+    total_in_db = (await db.execute(count_stmt)).scalar() or 0
+
+    return {
+        "status": "completed",
+        "synced_count": synced_count,
+        "total": total_in_db,
+    }
+
+
+async def list_connection_repositories(
+    db: AsyncSession,
+    connection_id: uuid.UUID,
+    limit: int = 50,
+    offset: int = 0,
+    search: Optional[str] = None,
+) -> tuple[list[GitHubRepository], int]:
+    """Retrieve paginated repository records belonging to a GitHub connection."""
+    safe_limit = min(max(1, limit), 100)
+    safe_offset = max(0, offset)
+
+    base_query = select(GitHubRepository).where(
+        GitHubRepository.connection_id == connection_id
+    )
+
+    if search and search.strip():
+        search_pattern = f"%{search.strip()}%"
+        base_query = base_query.where(
+            GitHubRepository.full_name.ilike(search_pattern)
+            | GitHubRepository.name.ilike(search_pattern)
+        )
+
+    # Total count matching filters
+    count_query = select(func.count(GitHubRepository.id)).where(
+        GitHubRepository.connection_id == connection_id
+    )
+    if search and search.strip():
+        search_pattern = f"%{search.strip()}%"
+        count_query = count_query.where(
+            GitHubRepository.full_name.ilike(search_pattern)
+            | GitHubRepository.name.ilike(search_pattern)
+        )
+
+    total = (await db.execute(count_query)).scalar() or 0
+
+    # Ordered deterministically: selected first, then recent push, then name
+    ordered_query = (
+        base_query.order_by(
+            GitHubRepository.is_selected.desc(),
+            GitHubRepository.github_pushed_at.desc().nullslast(),
+            GitHubRepository.name.asc(),
+        )
+        .limit(safe_limit)
+        .offset(safe_offset)
+    )
+
+    result = await db.execute(ordered_query)
+    items = list(result.scalars().all())
+    return items, total
+
+
+async def update_repository_selection(
+    db: AsyncSession,
+    connection_id: uuid.UUID,
+    repository_id: uuid.UUID,
+    is_selected: bool,
+) -> Optional[GitHubRepository]:
+    """Update UI repository selection preference for future stage synchronization.
+
+    Verifies connection ownership.
+    """
+    stmt = select(GitHubRepository).where(
+        GitHubRepository.id == repository_id,
+        GitHubRepository.connection_id == connection_id,
+    )
+    result = await db.execute(stmt)
+    repo = result.scalar_one_or_none()
+    if not repo:
+        return None
+
+    repo.is_selected = is_selected
+    repo.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(repo)
+    return repo
+
 

@@ -5,6 +5,9 @@ import {
   type CaptureListResponse,
   type GitHubConnectionStatus,
   type GitHubDisconnectResponse,
+  type GitHubRepoListResponse,
+  type GitHubRepoSyncResponse,
+  type GitHubRepository,
   type HealthResponse,
   type SearchResponse,
   type UploadCaptureOptions,
@@ -368,5 +371,53 @@ export const apiClient = {
    */
   getGitHubConnectUrl(): string {
     return `${getApiBaseUrl()}/integrations/github/connect`;
+  },
+
+  /**
+   * Retrieve discovered GitHub repositories for the connected account.
+   */
+  async getGitHubRepositories(params: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    signal?: AbortSignal;
+  } = {}): Promise<GitHubRepoListResponse> {
+    const query = new URLSearchParams();
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+    if (params.search && params.search.trim()) query.set("search", params.search.trim());
+
+    const queryString = query.toString();
+    const endpoint = `/integrations/github/repositories${queryString ? `?${queryString}` : ""}`;
+    return request<GitHubRepoListResponse>(endpoint, {
+      method: "GET",
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Trigger discovery and synchronization of GitHub repositories.
+   */
+  async syncGitHubRepositories(params: { signal?: AbortSignal } = {}): Promise<GitHubRepoSyncResponse> {
+    return request<GitHubRepoSyncResponse>("/integrations/github/repositories/sync", {
+      method: "POST",
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Update repository selection preference for future indexing.
+   */
+  async updateGitHubRepositorySelection(
+    repositoryId: string,
+    isSelected: boolean,
+    params: { signal?: AbortSignal } = {}
+  ): Promise<GitHubRepository> {
+    return request<GitHubRepository>(`/integrations/github/repositories/${encodeURIComponent(repositoryId)}/selection`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_selected: isSelected }),
+      signal: params.signal,
+    });
   },
 };
