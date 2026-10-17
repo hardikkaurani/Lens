@@ -4,7 +4,7 @@ import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import { formatDate } from "@/lib/format";
-import type { GitHubConnectionStatus } from "@/types/api";
+import type { GitHubConnectionStatus, GitHubRepository } from "@/types/api";
 import { ErrorMessage } from "@/components/ErrorMessage";
 
 export function SettingsContent() {
@@ -14,6 +14,14 @@ export function SettingsContent() {
   const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState<number>(0);
+
+  // Repository state
+  const [repositories, setRepositories] = useState<GitHubRepository[]>([]);
+  const [totalRepos, setTotalRepos] = useState<number>(0);
+  const [isLoadingRepos, setIsLoadingRepos] = useState<boolean>(true);
+  const [isSyncingRepos, setIsSyncingRepos] = useState<boolean>(false);
+  const [repoError, setRepoError] = useState<string | null>(null);
+  const [repoSearch, setRepoSearch] = useState<string>("");
 
   const [dismissedNotification, setDismissedNotification] = useState<boolean>(false);
   const [actionNotification, setActionNotification] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -71,6 +79,115 @@ export function SettingsContent() {
     };
   }, [refreshKey]);
 
+  // Fetch repositories whenever account is connected
+  useEffect(() => {
+    if (!status?.connected) {
+      return;
+    }
+
+    let isMounted = true;
+    const controller = new AbortController();
+
+    apiClient
+      .getGitHubRepositories({ signal: controller.signal })
+      .then((res) => {
+        if (isMounted) {
+          setRepositories(res.items);
+          setTotalRepos(res.total);
+          setIsLoadingRepos(false);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!isMounted) return;
+        const message = err instanceof ApiClientError ? err.detail : "Could not load repositories.";
+        setRepoError(message);
+        setIsLoadingRepos(false);
+      });
+
+    return () => {
+      isMounted = false;
+      controller.abort();
+    };
+  }, [status?.connected, refreshKey]);
+
+  // Handle repository sync
+  const handleSyncRepositories = async () => {
+    if (isSyncingRepos) return;
+    setIsSyncingRepos(true);
+    setRepoError(null);
+
+    try {
+      const syncRes = await apiClient.syncGitHubRepositories();
+      if (syncRes.status === "enqueued") {
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "success",
+          message: "Repository synchronization job enqueued in background worker.",
+        });
+      } else if (syncRes.status === "already_syncing") {
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "error",
+          message: "Repository synchronization is already in progress for this connection.",
+        });
+      } else {
+        const listRes = await apiClient.getGitHubRepositories();
+        setRepositories(listRes.items);
+        setTotalRepos(listRes.total);
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "success",
+          message: `Successfully discovered and synchronized ${syncRes.synced_count} repositories.`,
+        });
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiClientError) {
+        if (err.status === 429) {
+          setRepoError("GitHub API rate limit exceeded. Please try again later.");
+        } else {
+          setRepoError(err.detail);
+        }
+      } else if (
+        (typeof err === "object" && err !== null && "status" in err && (err as { status: unknown }).status === 429) ||
+        (err instanceof Error && err.message.toLowerCase().includes("rate limit"))
+      ) {
+        setRepoError("GitHub API rate limit exceeded. Please try again later.");
+      } else {
+        setRepoError("Failed to synchronize repositories. Please check your network connection.");
+      }
+    } finally {
+      setIsSyncingRepos(false);
+    }
+  };
+
+  // Handle repository selection toggle
+  const handleToggleSelect = async (repo: GitHubRepository) => {
+    const nextSelected = !repo.is_selected;
+    setRepositories((prev) =>
+      prev.map((r) => (r.id === repo.id ? { ...r, is_selected: nextSelected } : r))
+    );
+
+    try {
+      await apiClient.updateGitHubRepositorySelection(repo.id, nextSelected);
+    } catch (err: unknown) {
+      // Revert optimistic update on failure
+      setRepositories((prev) =>
+        prev.map((r) => (r.id === repo.id ? { ...r, is_selected: repo.is_selected } : r))
+      );
+      const msg = err instanceof ApiClientError ? err.detail : "Failed to update repository selection.";
+      setRepoError(msg);
+    }
+  };
+
+  // Filter repositories client-side
+  const filteredRepos = useMemo(() => {
+    if (!repoSearch.trim()) return repositories;
+    const q = repoSearch.toLowerCase().trim();
+    return repositories.filter(
+      (r) => r.name.toLowerCase().includes(q) || r.full_name.toLowerCase().includes(q)
+    );
+  }, [repositories, repoSearch]);
+
   // Handle disconnect action
   const handleDisconnect = async () => {
     if (!confirm("Are you sure you want to disconnect your GitHub account?")) {
@@ -82,6 +199,8 @@ export function SettingsContent() {
     try {
       await apiClient.disconnectGitHub();
       setStatus({ connected: false });
+      setRepositories([]);
+      setTotalRepos(0);
       setDismissedNotification(false);
       setActionNotification({
         type: "success",
@@ -168,7 +287,8 @@ export function SettingsContent() {
           </div>
         ) : status?.connected ? (
           /* CONNECTED STATE */
-          <div className="lens-card p-6 space-y-5 bg-[#0d121e]" data-testid="github-connected-card">
+          <div className="lens-card p-6 space-y-6 bg-[#0d121e]" data-testid="github-connected-card">
+            {/* Account Info Header */}
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3.5">
                 <div className="w-11 h-11 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-white">
@@ -201,6 +321,7 @@ export function SettingsContent() {
               </button>
             </div>
 
+            {/* Connection Details Metadata */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-white/5 text-xs">
               <div>
                 <span className="text-slate-500 block font-mono text-[11px]">Authorized Scope</span>
@@ -214,6 +335,166 @@ export function SettingsContent() {
                 <span className="text-slate-500 block font-mono text-[11px]">Last Verified</span>
                 <span className="text-slate-300 font-mono">{formatDate(status.last_verified_at)}</span>
               </div>
+            </div>
+
+            {/* REPOSITORY DISCOVERY & SELECTION SECTION */}
+            <div className="border-t border-white/10 pt-5 space-y-4" data-testid="repositories-section">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <h4 className="text-sm font-semibold text-white">Discovered Repositories</h4>
+                  <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                    {totalRepos}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  <input
+                    type="text"
+                    value={repoSearch}
+                    onChange={(e) => setRepoSearch(e.target.value)}
+                    placeholder="Search repositories..."
+                    className="px-2.5 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors w-44 sm:w-56"
+                    data-testid="repo-search-input"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={handleSyncRepositories}
+                    disabled={isSyncingRepos}
+                    className="lens-button-primary text-xs px-3.5 py-1.5 font-medium flex items-center gap-1.5 disabled:opacity-50"
+                    data-testid="sync-repos-btn"
+                  >
+                    {isSyncingRepos ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <span>Syncing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        <span>Sync Repositories</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Repository Error Banner */}
+              {repoError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-lg text-xs bg-rose-950/40 border border-rose-500/30 text-rose-200 flex items-center gap-2"
+                  data-testid="repo-error-message"
+                >
+                  <svg className="w-4 h-4 shrink-0 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>{repoError}</span>
+                </div>
+              )}
+
+              {/* Repository Content Area */}
+              {isLoadingRepos ? (
+                <div className="space-y-2 animate-pulse" data-testid="repos-loading">
+                  {[1, 2, 3].map((i) => (
+                    <div key={i} className="h-16 rounded-lg bg-slate-900/60 border border-slate-800" />
+                  ))}
+                </div>
+              ) : filteredRepos.length === 0 ? (
+                <div
+                  className="p-8 text-center rounded-xl border border-dashed border-slate-800 bg-slate-900/20 text-slate-400 space-y-2"
+                  data-testid="repo-empty-state"
+                >
+                  <svg className="w-8 h-8 mx-auto text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                  </svg>
+                  <p className="text-xs font-medium text-slate-300">
+                    {repositories.length === 0
+                      ? "No repositories discovered yet. Click 'Sync Repositories' to discover your GitHub repositories."
+                      : "No repositories match your search filter."}
+                  </p>
+                  <p className="text-[11px] text-slate-500">
+                    Discovering repositories imports metadata and prepares selection for future ingestion.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto pr-1" data-testid="repo-list">
+                  {filteredRepos.map((repo) => (
+                    <div
+                      key={repo.id}
+                      className="p-3 rounded-lg border border-slate-800/80 bg-slate-900/40 hover:bg-slate-900/80 transition-colors flex items-start justify-between gap-3"
+                      data-testid={`repo-item-${repo.id}`}
+                    >
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <input
+                          type="checkbox"
+                          checked={repo.is_selected}
+                          onChange={() => handleToggleSelect(repo)}
+                          className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-900 text-cyan-600 focus:ring-cyan-500 cursor-pointer"
+                          data-testid={`repo-checkbox-${repo.id}`}
+                          aria-label={`Select ${repo.full_name}`}
+                        />
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <a
+                              href={repo.html_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-semibold text-white hover:text-cyan-400 transition-colors truncate font-mono"
+                              data-testid={`repo-name-${repo.id}`}
+                            >
+                              {repo.full_name}
+                            </a>
+
+                            {/* Badges */}
+                            <span
+                              className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                                repo.is_private
+                                  ? "bg-amber-950/30 text-amber-300 border-amber-800/40"
+                                  : "bg-slate-800 text-slate-300 border-slate-700"
+                              }`}
+                            >
+                              {repo.is_private ? "Private" : "Public"}
+                            </span>
+
+                            {repo.is_archived && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-rose-950/30 text-rose-300 border border-rose-800/40">
+                                Archived
+                              </span>
+                            )}
+
+                            {repo.is_fork && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-purple-950/30 text-purple-300 border border-purple-800/40">
+                                Fork
+                              </span>
+                            )}
+
+                            {repo.language && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-blue-950/30 text-blue-300 border border-blue-800/40">
+                                {repo.language}
+                              </span>
+                            )}
+                          </div>
+
+                          {repo.description && (
+                            <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                              {repo.description}
+                            </p>
+                          )}
+
+                          <div className="flex flex-wrap items-center gap-4 mt-1.5 text-[10px] text-slate-500 font-mono">
+                            {repo.default_branch && <span>Branch: {repo.default_branch}</span>}
+                            {repo.last_synced_at && <span>Synced: {formatDate(repo.last_synced_at)}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         ) : (

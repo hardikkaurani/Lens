@@ -65,10 +65,57 @@ export interface GitHubConnectionStatus {
   scope?: string | null;
   connected_at?: string | null;
   last_verified_at?: string | null;
+  sync_status?: string | null;
+  last_synced_at?: string | null;
+  sync_error?: string | null;
 }
 
 export interface GitHubDisconnectResponse {
   status: string;
+  message: string;
+}
+
+export type RepositorySyncStatus = "discovered" | "syncing" | "synced" | "failed";
+
+export interface GitHubRepository {
+  id: string;
+  github_repository_id: string;
+  name: string;
+  full_name: string;
+  owner_login: string;
+  owner_id?: string | null;
+  is_private: boolean;
+  is_fork: boolean;
+  is_archived: boolean;
+  is_disabled: boolean;
+  is_selected: boolean;
+  html_url: string;
+  description?: string | null;
+  default_branch?: string | null;
+  language?: string | null;
+  visibility?: string | null;
+  license_name?: string | null;
+  sync_status: RepositorySyncStatus;
+  sync_error?: string | null;
+  github_created_at?: string | null;
+  github_updated_at?: string | null;
+  github_pushed_at?: string | null;
+  last_synced_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubRepoListResponse {
+  items: GitHubRepository[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface GitHubRepoSyncResponse {
+  status: string;
+  synced_count: number;
+  total: number;
   message: string;
 }
 

@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 import logging
 from urllib.parse import urlencode, urlparse
 from typing import Optional
+import uuid
 
 from fastapi import (
     APIRouter,
@@ -14,31 +16,44 @@ from fastapi import (
 )
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import Settings, get_settings
+from app.core.encryption import EncryptionError
 from app.db.session import get_db
 from app.integrations.github.client import (
     GitHubAuthError,
     GitHubClient,
     GitHubClientError,
+    GitHubRateLimitError,
     GitHubTimeoutError,
     get_github_client,
 )
 from app.integrations.github.schemas import (
     GitHubConnectionStatus,
     GitHubDisconnectResponse,
+    GitHubRepoListResponse,
+    GitHubRepoSyncResponse,
+    GitHubRepositoryResponse,
+    GitHubRepositorySelectRequest,
 )
 from app.integrations.github.service import (
     OAUTH_COOKIE_NAME,
     OAuthStorageError,
+    acquire_sync_lock,
     delete_github_connection,
+    discover_and_sync_repositories,
     generate_oauth_state,
     generate_session_binding,
     get_github_connection,
+    list_connection_repositories,
+    release_sync_lock,
     store_oauth_state,
+    update_repository_selection,
     upsert_github_connection,
     validate_and_consume_oauth_state,
 )
+from app.queue.job import enqueue_github_repo_sync_job
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +292,14 @@ async def get_github_status(
     if not connection:
         return GitHubConnectionStatus(connected=False)
 
+    sync_info = (connection.token_metadata or {}).get("sync", {})
+    last_synced = None
+    if sync_info.get("last_synced_at"):
+        try:
+            last_synced = datetime.fromisoformat(sync_info["last_synced_at"])
+        except Exception:
+            pass
+
     return GitHubConnectionStatus(
         connected=True,
         github_username=connection.github_username,
@@ -284,6 +307,9 @@ async def get_github_status(
         scope=connection.scope,
         connected_at=connection.created_at,
         last_verified_at=connection.last_verified_at,
+        sync_status=sync_info.get("status", "idle"),
+        last_synced_at=last_synced,
+        sync_error=sync_info.get("error"),
     )
 
 
@@ -302,3 +328,169 @@ async def disconnect_github(
         status="disconnected",
         message="GitHub connection disconnected successfully.",
     )
+
+
+@router.post(
+    "/repositories/sync",
+    response_model=GitHubRepoSyncResponse,
+    summary="Synchronize GitHub repositories",
+    description="Discovers and synchronizes accessible repositories from GitHub for the connected account.",
+)
+async def sync_github_repositories(
+    async_sync: bool = Query(False, description="Enqueue in background worker instead of synchronous discovery."),
+    db: AsyncSession = Depends(get_db),
+    github_client: GitHubClient = Depends(get_github_client),
+) -> GitHubRepoSyncResponse:
+    """Trigger repository synchronization for the authenticated GitHub user."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found. Please connect your GitHub account first.",
+        )
+
+    if async_sync:
+        sync_info = (connection.token_metadata or {}).get("sync", {})
+        if sync_info.get("status") == "syncing":
+            return GitHubRepoSyncResponse(
+                status="already_syncing",
+                message="Repository synchronization is already in progress for this connection.",
+            )
+        await enqueue_github_repo_sync_job(connection.id)
+        # Update connection metadata to syncing
+        sync_meta = dict(connection.token_metadata or {})
+        sync_meta["sync"] = {
+            "status": "syncing",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
+        connection.token_metadata = sync_meta
+        flag_modified(connection, "token_metadata")
+        await db.commit()
+        return GitHubRepoSyncResponse(
+            status="enqueued",
+            message="Repository synchronization job enqueued in background worker.",
+        )
+
+    # Concurrency guard: acquire lock with unique ownership token
+    lock_token = await acquire_sync_lock(connection.id)
+    if not lock_token:
+        return GitHubRepoSyncResponse(
+            status="already_syncing",
+            message="Repository synchronization is already in progress for this connection.",
+        )
+
+    try:
+        result = await discover_and_sync_repositories(
+            db=db,
+            connection=connection,
+            github_client=github_client,
+        )
+        return GitHubRepoSyncResponse(
+            status=result["status"],
+            synced_count=result["synced_count"],
+            total=result["total"],
+            message=f"Successfully synchronized {result['synced_count']} repositories.",
+        )
+    except GitHubRateLimitError as rate_err:
+        headers = {}
+        if rate_err.retry_after is not None:
+            headers["Retry-After"] = str(rate_err.retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="GitHub API rate limit exceeded. Please try again later.",
+            headers=headers,
+        )
+    except GitHubAuthError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="GitHub access token rejected. Please reconnect your account.",
+        )
+    except GitHubTimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout communicating with GitHub API while synchronizing repositories.",
+        )
+    except GitHubClientError as client_err:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GitHub API error during synchronization: {client_err.message}",
+        )
+    except EncryptionError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decrypt stored GitHub access token.",
+        )
+    finally:
+        await release_sync_lock(connection.id, lock_token)
+
+
+@router.get(
+    "/repositories",
+    response_model=GitHubRepoListResponse,
+    summary="List discovered GitHub repositories",
+    description="Returns normalized repository records for the connected GitHub account.",
+)
+async def list_github_repositories(
+    limit: int = Query(50, ge=1, le=100, description="Page limit."),
+    offset: int = Query(0, ge=0, description="Page offset."),
+    search: Optional[str] = Query(None, max_length=100, description="Filter by repository name."),
+    db: AsyncSession = Depends(get_db),
+) -> GitHubRepoListResponse:
+    """Retrieve discovered GitHub repositories with pagination and filtering."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found.",
+        )
+
+    items, total = await list_connection_repositories(
+        db=db,
+        connection_id=connection.id,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+
+    return GitHubRepoListResponse(
+        items=[GitHubRepositoryResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.patch(
+    "/repositories/{repository_id}/selection",
+    response_model=GitHubRepositoryResponse,
+    summary="Update repository selection state",
+    description="Updates whether a repository is selected for future synchronization or indexing.",
+)
+async def update_github_repository_selection(
+    repository_id: uuid.UUID,
+    payload: GitHubRepositorySelectRequest,
+    db: AsyncSession = Depends(get_db),
+) -> GitHubRepositoryResponse:
+    """Toggle repository selection state without triggering content ingestion."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found.",
+        )
+
+    updated_repo = await update_repository_selection(
+        db=db,
+        connection_id=connection.id,
+        repository_id=repository_id,
+        is_selected=payload.is_selected,
+    )
+    if not updated_repo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Repository not found or does not belong to this connection.",
+        )
+
+    return GitHubRepositoryResponse.model_validate(updated_repo)
+

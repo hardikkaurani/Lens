@@ -32,6 +32,21 @@ class GitHubTimeoutError(GitHubClientError):
     pass
 
 
+class GitHubRateLimitError(GitHubClientError):
+    """Raised when GitHub API rate limits the request (HTTP 403 / 429)."""
+
+    def __init__(
+        self,
+        message: str = "GitHub API rate limit exceeded.",
+        status_code: int = 429,
+        retry_after: Optional[int] = None,
+        reset_at: Optional[int] = None,
+    ):
+        super().__init__(message, status_code=status_code)
+        self.retry_after = retry_after
+        self.reset_at = reset_at
+
+
 class GitHubClient:
     """Backend-only HTTP client interacting directly with GitHub's OAuth and REST API."""
 
@@ -168,6 +183,107 @@ class GitHubClient:
             "id": str(user_id),
             "login": sanitized_username,
         }
+
+    async def list_user_repositories(
+        self,
+        access_token: str,
+        page: int = 1,
+        per_page: int = 100,
+        affiliation: str = "owner,collaborator,organization_member",
+        visibility: str = "all",
+        sort: str = "updated",
+        direction: str = "desc",
+    ) -> list[dict[str, Any]]:
+        """Fetch a paginated list of repositories accessible to the authenticated user.
+
+        Never logs access tokens or sensitive request headers.
+        """
+        if not access_token or not access_token.strip():
+            raise GitHubAuthError("Cannot fetch repositories without valid access token.")
+
+        # Bound pagination bounds defensibly
+        safe_page = max(1, page)
+        safe_per_page = min(max(1, per_page), 100)
+
+        url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/user/repos"
+        params = {
+            "page": safe_page,
+            "per_page": safe_per_page,
+            "affiliation": affiliation,
+            "visibility": visibility,
+            "sort": sort,
+            "direction": direction,
+        }
+        headers = {
+            "Authorization": f"Bearer {access_token.strip()}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "LENS-Integration-Service/1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url, params=params, headers=headers)
+        except httpx.TimeoutException:
+            logger.error("Timeout occurred while fetching repositories from GitHub (page=%s).", safe_page)
+            raise GitHubTimeoutError("Connection to GitHub timed out while fetching repositories.") from None
+        except httpx.RequestError as exc:
+            logger.error("Network error fetching GitHub repositories: %s", type(exc).__name__)
+            raise GitHubApiError("Network error while connecting to GitHub API.") from None
+
+        # Check for rate limiting (HTTP 429 or HTTP 403 with rate limit headers)
+        if response.status_code == 429 or response.status_code == 403:
+            remaining = response.headers.get("X-RateLimit-Remaining")
+            is_rate_limited = (
+                response.status_code == 429
+                or remaining == "0"
+                or "rate limit" in response.text.lower()
+            )
+            if is_rate_limited:
+                retry_after_hdr = response.headers.get("Retry-After")
+                reset_hdr = response.headers.get("X-RateLimit-Reset")
+                retry_after: Optional[int] = None
+                reset_at: Optional[int] = None
+
+                if retry_after_hdr and retry_after_hdr.isdigit():
+                    retry_after = int(retry_after_hdr)
+                if reset_hdr and reset_hdr.isdigit():
+                    reset_at = int(reset_hdr)
+
+                logger.warning(
+                    "GitHub API rate limit encountered (status=%s, remaining=%s, reset=%s, retry_after=%s)",
+                    response.status_code,
+                    remaining,
+                    reset_at,
+                    retry_after,
+                )
+                raise GitHubRateLimitError(
+                    "GitHub API rate limit exceeded.",
+                    status_code=response.status_code,
+                    retry_after=retry_after,
+                    reset_at=reset_at,
+                )
+
+        if response.status_code == 401:
+            logger.warning("GitHub API rejected access token when listing repositories (status=401)")
+            raise GitHubAuthError("GitHub rejected access token when accessing repositories.", status_code=401)
+
+        if response.status_code != 200:
+            logger.error("GitHub repos endpoint returned status %s", response.status_code)
+            raise GitHubApiError(
+                f"GitHub API returned error status {response.status_code}.",
+                status_code=response.status_code,
+            )
+
+        try:
+            data = response.json()
+        except Exception:
+            raise GitHubApiError("Malformed JSON response received from GitHub repositories API.") from None
+
+        if not isinstance(data, list):
+            raise GitHubApiError("Unexpected response shape from GitHub repositories API (expected list).")
+
+        return data
 
 
 _github_client: Optional[GitHubClient] = None

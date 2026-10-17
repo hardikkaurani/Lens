@@ -6,6 +6,8 @@ from app.db.models import (
     Capture,
     ContentChunk,
     GitHubConnection,
+    GitHubRepository,
+    RepositorySyncStatus,
     SourceMetadata,
     SourceType,
 )
@@ -25,6 +27,8 @@ __all__ = [
     "Capture",
     "ContentChunk",
     "GitHubConnection",
+    "GitHubRepository",
+    "RepositorySyncStatus",
     "SourceMetadata",
     "DEFAULT_EMBEDDING_DIMENSION",
     "engine",

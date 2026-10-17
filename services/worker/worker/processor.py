@@ -375,3 +375,50 @@ async def process_file_capture(
 
         return False
 
+
+async def process_github_repo_sync(
+    connection_id: uuid.UUID,
+    session_factory=AsyncSessionLocal,
+) -> bool:
+    """Worker task executing GitHub repository discovery & sync for a connection."""
+    from app.db.models import GitHubConnection
+    from app.integrations.github.service import (
+        acquire_sync_lock,
+        discover_and_sync_repositories,
+        release_sync_lock,
+    )
+
+    logger.info("Worker beginning GitHub repository sync for connection %s", connection_id)
+    lock_token = await acquire_sync_lock(connection_id)
+    if not lock_token:
+        logger.warning(
+            "Repository sync already in progress for connection %s; skipping duplicate worker job",
+            connection_id,
+        )
+        return False
+
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(GitHubConnection).where(GitHubConnection.id == connection_id)
+            )
+            connection = result.scalar_one_or_none()
+            if not connection:
+                logger.warning("GitHub connection %s not found; skipping sync", connection_id)
+                return False
+
+            res = await discover_and_sync_repositories(session, connection)
+            logger.info(
+                "Worker completed GitHub repo sync for connection %s: %s repos synced (total: %s)",
+                connection_id,
+                res.get("synced_count", 0),
+                res.get("total", 0),
+            )
+            return True
+    except Exception as exc:
+        logger.error("GitHub repo sync worker failed for connection %s: %s", connection_id, exc)
+        return False
+    finally:
+        await release_sync_lock(connection_id, lock_token)
+
+
