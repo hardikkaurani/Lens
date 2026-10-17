@@ -41,7 +41,7 @@ Covers all 37 backend scenarios:
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
@@ -54,7 +54,10 @@ import httpx
 import pytest
 from sqlalchemy import delete, func, select
 
-# Ensure services/worker is in sys.path
+# Ensure services/api and services/worker are in sys.path
+api_path = str(Path(__file__).resolve().parents[1])
+if api_path not in sys.path:
+    sys.path.insert(0, api_path)
 worker_path = str(Path(__file__).resolve().parents[2] / "worker")
 if worker_path not in sys.path:
     sys.path.insert(0, worker_path)
@@ -73,14 +76,17 @@ from app.integrations.github.client import (
 )
 from app.integrations.github.schemas import (
     NormalizedGitHubRepository,
+    check_sufficient_repo_scope,
     normalize_github_repository,
 )
 from app.integrations.github.service import (
+    GENERIC_SYNC_ERROR_MESSAGE,
     LockStorageError,
     MAX_REPOSITORIES_PER_SYNC,
     _memory_lock_cache,
     acquire_sync_lock,
     discover_and_sync_repositories,
+    is_sync_metadata_active,
     list_connection_repositories,
     release_sync_lock,
     update_repository_selection,
@@ -662,7 +668,7 @@ async def run_all_stage14_tests() -> None:
         print("Test 36: queue crash recovery -> PASS")
 
         # ----------------------------------------------------------------------
-        # Test 37: Connection sync state visibility
+        # Test 37: Connection sync state visibility & unexpected error masking (Finding 3)
         # ----------------------------------------------------------------------
         status_resp = await client.get("/integrations/github")
         assert status_resp.status_code == 200
@@ -670,24 +676,147 @@ async def run_all_stage14_tests() -> None:
         assert "sync_status" in status_data
         assert "last_synced_at" in status_data
         assert "sync_error" in status_data
-        # After previous syncs, status should be 'synced'
         assert status_data["sync_status"] == "synced"
         assert status_data["last_synced_at"] is not None
         assert status_data["sync_error"] is None
 
-        # Verify failed sync sets status to 'failed' and records error
+        # Verify unexpected sync failure masks raw error text and returns curated generic error
         with patch.object(GitHubClient, "list_user_repositories", side_effect=RuntimeError("Fatal API sync boom")):
-            try:
-                await client.post("/integrations/github/repositories/sync")
-            except Exception:
-                pass
+            sync_fail_resp = await client.post("/integrations/github/repositories/sync")
+            assert sync_fail_resp.status_code == 500
+            assert sync_fail_resp.json()["detail"] == GENERIC_SYNC_ERROR_MESSAGE
+            assert "Fatal API sync boom" not in sync_fail_resp.text
+
         failed_status = await client.get("/integrations/github")
         assert failed_status.status_code == 200
         assert failed_status.json()["sync_status"] == "failed"
-        assert "Fatal API sync boom" in (failed_status.json()["sync_error"] or "")
-        print("Test 37: connection sync state visibility -> PASS")
+        assert failed_status.json()["sync_error"] == GENERIC_SYNC_ERROR_MESSAGE
+        assert "Fatal API sync boom" not in (failed_status.json()["sync_error"] or "")
+        print("Test 37: connection sync state visibility & unexpected error masking -> PASS")
 
-    print("\n--- ALL 37 STAGE 14 BACKEND TESTS PASSED SUCCESSFULLY ---")
+        # ----------------------------------------------------------------------
+        # Test 38: OAuth scope disclosure & missing scope protection (Finding 1)
+        # ----------------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn_res = await session.execute(select(GitHubConnection))
+            current_conn = conn_res.scalars().first()
+            assert current_conn is not None
+            current_conn.scope = "read:user"  # Missing repo/public_repo
+            await session.commit()
+
+        # Check status detects insufficient scope
+        scope_status_resp = await client.get("/integrations/github")
+        assert scope_status_resp.status_code == 200
+        scope_data = scope_status_resp.json()
+        assert scope_data["has_required_scope"] is False
+        assert scope_data["missing_scope_reason"] is not None
+        assert "repo or public_repo" in scope_data["missing_scope_reason"]
+        assert "reconnect" in scope_data["missing_scope_reason"].lower()
+
+        # Attempting sync with insufficient scope returns 403 Forbidden
+        insufficient_sync = await client.post("/integrations/github/repositories/sync")
+        assert insufficient_sync.status_code == 403
+        assert "repo or public_repo" in insufficient_sync.json()["detail"]
+        assert "reconnect" in insufficient_sync.json()["detail"].lower()
+
+        # Reconnect / restore sufficient scope
+        async with AsyncSessionLocal() as session:
+            conn_res = await session.execute(select(GitHubConnection))
+            current_conn = conn_res.scalars().first()
+            assert current_conn is not None
+            current_conn.scope = "read:user,repo"
+            await session.commit()
+
+        restored_status_resp = await client.get("/integrations/github")
+        assert restored_status_resp.status_code == 200
+        assert restored_status_resp.json()["has_required_scope"] is True
+        assert restored_status_resp.json()["missing_scope_reason"] is None
+        print("Test 38: OAuth scope disclosure & missing scope protection -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 39: Async sync pre-enqueue persistence & failure rollback (Finding 2)
+        # ----------------------------------------------------------------------
+        with patch("app.integrations.github.router.enqueue_github_repo_sync_job", side_effect=RuntimeError("Redis queue failure")):
+            async_fail_resp = await client.post("/integrations/github/repositories/sync?async_sync=true")
+            assert async_fail_resp.status_code == 503
+            assert "Failed to queue repository sync" in async_fail_resp.json()["detail"]
+
+        # Ensure connection was not left permanently stuck in syncing state
+        post_fail_status = await client.get("/integrations/github")
+        assert post_fail_status.status_code == 200
+        assert post_fail_status.json()["sync_status"] == "failed"
+        assert post_fail_status.json()["sync_error"] == "Failed to enqueue synchronization job."
+        print("Test 39: async sync pre-enqueue persistence & failure rollback -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 40: Stale syncing state recovery after TTL expiry (Finding 2)
+        # ----------------------------------------------------------------------
+        from sqlalchemy.orm.attributes import flag_modified
+
+        async with AsyncSessionLocal() as session:
+            conn_res = await session.execute(select(GitHubConnection))
+            current_conn = conn_res.scalars().first()
+            assert current_conn is not None
+            meta = dict(current_conn.token_metadata or {})
+            stale_time = (datetime.now(timezone.utc) - timedelta(seconds=350)).isoformat()
+            meta["sync"] = {"status": "syncing", "started_at": stale_time, "error": None}
+            current_conn.token_metadata = meta
+            flag_modified(current_conn, "token_metadata")
+            await session.commit()
+
+        with patch("app.integrations.github.router.enqueue_github_repo_sync_job", new_callable=AsyncMock) as mock_enq:
+            stale_recover_resp = await client.post("/integrations/github/repositories/sync?async_sync=true")
+            assert stale_recover_resp.status_code == 200
+            assert stale_recover_resp.json()["status"] == "enqueued"
+            mock_enq.assert_awaited_once()
+        print("Test 40: stale syncing state recovery after TTL expiry -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 41: Malformed timestamp syncing recovery (Finding 2)
+        # ----------------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn_res = await session.execute(select(GitHubConnection))
+            current_conn = conn_res.scalars().first()
+            assert current_conn is not None
+            meta = dict(current_conn.token_metadata or {})
+            meta["sync"] = {"status": "syncing", "started_at": "invalid-garbage-date", "error": None}
+            current_conn.token_metadata = meta
+            flag_modified(current_conn, "token_metadata")
+            await session.commit()
+
+        with patch("app.integrations.github.router.enqueue_github_repo_sync_job", new_callable=AsyncMock) as mock_enq:
+            invalid_ts_resp = await client.post("/integrations/github/repositories/sync?async_sync=true")
+            assert invalid_ts_resp.status_code == 200
+            assert invalid_ts_resp.json()["status"] == "enqueued"
+            mock_enq.assert_awaited_once()
+        print("Test 41: malformed timestamp syncing recovery -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 42: Duplicate concurrent async sync requests return already_syncing (Finding 2)
+        # ----------------------------------------------------------------------
+        # Connection is currently in fresh 'syncing' state from Test 41
+        duplicate_async_resp = await client.post("/integrations/github/repositories/sync?async_sync=true")
+        assert duplicate_async_resp.status_code == 200
+        assert duplicate_async_resp.json()["status"] == "already_syncing"
+        print("Test 42: duplicate concurrent async request protection -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 43: Failure state persistence DB commit error resilience (Finding 3)
+        # ----------------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn_res = await session.execute(select(GitHubConnection))
+            test_conn = conn_res.scalars().first()
+            assert test_conn is not None
+
+            with patch.object(session, "commit", side_effect=[None, RuntimeError("Database connection lost")]), \
+                 patch.object(session, "rollback", new_callable=AsyncMock) as mock_rollback, \
+                 patch.object(GitHubClient, "list_user_repositories", side_effect=RuntimeError("API failure")):
+                with pytest.raises(RuntimeError, match="API failure"):
+                    await discover_and_sync_repositories(session, test_conn)
+                mock_rollback.assert_awaited()
+        print("Test 43: failure persistence DB commit error resilience -> PASS")
+
+    print("\n--- ALL 43 STAGE 14 BACKEND TESTS PASSED SUCCESSFULLY ---")
 
 
 @pytest.mark.asyncio
