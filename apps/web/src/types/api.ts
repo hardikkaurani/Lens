@@ -103,6 +103,10 @@ export interface GitHubRepository {
   github_updated_at?: string | null;
   github_pushed_at?: string | null;
   last_synced_at?: string | null;
+  activity_sync_status?: string;
+  activity_sync_error?: string | null;
+  activity_sync_metadata?: Record<string, unknown> | null;
+  activity_last_synced_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -120,6 +124,56 @@ export interface GitHubRepoSyncResponse {
   total: number;
   message: string;
 }
+
+export type GitHubActivityType = "pull_request" | "issue" | "commit" | "review";
+
+export interface GitHubActivity {
+  id: string;
+  repository_id: string;
+  activity_type: GitHubActivityType;
+  external_id: string;
+  title?: string | null;
+  body?: string | null;
+  html_url?: string | null;
+  author_login?: string | null;
+  state?: string | null;
+  source_created_at?: string | null;
+  source_updated_at?: string | null;
+  ingested_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface GitHubActivityListResponse {
+  items: GitHubActivity[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface GitHubActivitySyncResponse {
+  status: string;
+  synced_repositories: number;
+  synced_activities: number;
+  message: string;
+  details?: Record<string, unknown> | null;
+}
+
+export interface GitHubActivityStatusResponse {
+  status: string;
+  last_synced_at?: string | null;
+  synced_repositories: number;
+  synced_activities: number;
+  error?: string | null;
+  repositories: Array<{
+    id: string;
+    full_name: string;
+    activity_sync_status: string;
+    activity_sync_error?: string | null;
+    activity_last_synced_at?: string | null;
+    activity_sync_metadata?: Record<string, unknown> | null;
+  }>;
+}
+
 
 export function isCaptureDetail(data: unknown): data is CaptureDetail {
   if (!data || typeof data !== "object") return false;

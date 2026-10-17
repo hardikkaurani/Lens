@@ -13,15 +13,19 @@ import worker  # noqa: F401
 from app.db.session import close_connections
 from app.queue.job import (
     ack_file_ingest_job,
+    ack_github_activity_sync_job,
     ack_github_repo_sync_job,
     ack_url_ingest_job,
     dequeue_file_ingest_job,
+    dequeue_github_activity_sync_job,
     dequeue_github_repo_sync_job,
     dequeue_url_ingest_job,
+    recover_stranded_github_activity_sync_jobs,
     recover_stranded_github_repo_sync_jobs,
 )
 from worker.processor import (
     process_file_capture,
+    process_github_activity_sync,
     process_github_repo_sync,
     process_url_capture,
 )
@@ -76,7 +80,18 @@ async def process_one_job(
             logger.debug("Acknowledged repo sync job for connection %s", repo_job.connection_id)
         return True
 
-    # 4. If none had an immediate job and timeout > 0, wait on URL queue
+    # 4. Non-blocking check on GitHub activity sync queue
+    act_job, act_raw = await dequeue_github_activity_sync_job(timeout=0)
+    if act_job is not None and act_raw is not None:
+        logger.info("Worker picked up job %s for connection %s", act_job.type, act_job.connection_id)
+        try:
+            await process_github_activity_sync(act_job.connection_id, repository_ids=act_job.repository_ids)
+        finally:
+            await ack_github_activity_sync_job(act_raw)
+            logger.debug("Acknowledged activity sync job for connection %s", act_job.connection_id)
+        return True
+
+    # 5. If none had an immediate job and timeout > 0, wait on URL queue
     if timeout > 0:
         url_job, url_raw = await dequeue_url_ingest_job(timeout=timeout)
         if url_job is not None and url_raw is not None:
@@ -110,6 +125,17 @@ async def process_one_job(
                 logger.debug("Acknowledged repo sync job for connection %s", repo_job.connection_id)
             return True
 
+        # Quick check on activity sync queue in case one arrived during wait
+        act_job, act_raw = await dequeue_github_activity_sync_job(timeout=0)
+        if act_job is not None and act_raw is not None:
+            logger.info("Worker picked up job %s for connection %s", act_job.type, act_job.connection_id)
+            try:
+                await process_github_activity_sync(act_job.connection_id, repository_ids=act_job.repository_ids)
+            finally:
+                await ack_github_activity_sync_job(act_raw)
+                logger.debug("Acknowledged activity sync job for connection %s", act_job.connection_id)
+            return True
+
     return False
 
 
@@ -126,13 +152,21 @@ async def run_worker(
     if stop_event is None:
         stop_event = asyncio.Event()
 
-    # Recover any stranded repo sync jobs left in processing queue from previous crashes
+    # Recover any stranded repo and activity sync jobs left in processing queue from previous crashes
     try:
-        recovered = await recover_stranded_github_repo_sync_jobs()
-        if recovered > 0:
-            logger.info("Worker recovered %d stranded GitHub repo sync jobs on startup", recovered)
+        recovered_repos = await recover_stranded_github_repo_sync_jobs()
+        if recovered_repos > 0:
+            logger.info("Worker recovered %d stranded GitHub repo sync jobs on startup", recovered_repos)
     except Exception as rec_err:
         logger.warning("Could not execute startup recovery for stranded repo sync jobs: %s", rec_err)
+
+    try:
+        recovered_acts = await recover_stranded_github_activity_sync_jobs()
+        if recovered_acts > 0:
+            logger.info("Worker recovered %d stranded GitHub activity sync jobs on startup", recovered_acts)
+    except Exception as act_rec_err:
+        logger.warning("Could not execute startup recovery for stranded activity sync jobs: %s", act_rec_err)
+
 
     while not stop_event.is_set():
         try:

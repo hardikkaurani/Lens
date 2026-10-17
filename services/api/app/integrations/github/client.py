@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import random
 from typing import Any, Optional
 
 import httpx
@@ -284,6 +286,227 @@ class GitHubClient:
             raise GitHubApiError("Unexpected response shape from GitHub repositories API (expected list).")
 
         return data
+
+    async def _get_request(
+        self,
+        url: str,
+        access_token: str,
+        params: Optional[dict[str, Any]] = None,
+        max_retries: int = 3,
+        backoff_base: float = 0.5,
+    ) -> Any:
+        """Internal bounded HTTP GET request with retries, backoff, and rate limit awareness."""
+        if not access_token or not access_token.strip():
+            raise GitHubAuthError("Cannot perform request without valid access token.")
+
+        headers = {
+            "Authorization": f"Bearer {access_token.strip()}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "LENS-Integration-Service/1.0",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.get(url, params=params, headers=headers)
+
+                # Rate limiting check (HTTP 429 or 403 with remaining=0 or rate limit message)
+                if response.status_code in (429, 403):
+                    remaining = response.headers.get("X-RateLimit-Remaining")
+                    is_rate_limited = (
+                        response.status_code == 429
+                        or remaining == "0"
+                        or "rate limit" in response.text.lower()
+                    )
+                    if is_rate_limited:
+                        retry_after_hdr = response.headers.get("Retry-After")
+                        reset_hdr = response.headers.get("X-RateLimit-Reset")
+                        retry_after = int(retry_after_hdr) if retry_after_hdr and retry_after_hdr.isdigit() else None
+                        reset_at = int(reset_hdr) if reset_hdr and reset_hdr.isdigit() else None
+                        logger.warning(
+                            "GitHub API rate limit encountered (status=%s, remaining=%s, reset=%s, retry_after=%s)",
+                            response.status_code,
+                            remaining,
+                            reset_at,
+                            retry_after,
+                        )
+                        raise GitHubRateLimitError(
+                            "GitHub API rate limit exceeded.",
+                            status_code=response.status_code,
+                            retry_after=retry_after,
+                            reset_at=reset_at,
+                        )
+
+                # Authentication check
+                if response.status_code == 401:
+                    logger.warning("GitHub API rejected access token (status=401)")
+                    raise GitHubAuthError("GitHub rejected access token.", status_code=401)
+
+                # Transient server errors (500, 502, 503, 504) -> retry with exponential backoff & jitter
+                if response.status_code in (500, 502, 503, 504):
+                    logger.warning(
+                        "GitHub API returned transient error %s (attempt %d/%d)",
+                        response.status_code,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    if attempt < max_retries - 1:
+                        delay = backoff_base * (2 ** attempt) + random.uniform(0.01, 0.1)
+                        await asyncio.sleep(delay)
+                        continue
+                    raise GitHubApiError(
+                        f"GitHub API returned transient server error {response.status_code}.",
+                        status_code=response.status_code,
+                    )
+
+                if response.status_code != 200:
+                    logger.error("GitHub API returned error status %s", response.status_code)
+                    raise GitHubApiError(
+                        f"GitHub API returned error status {response.status_code}.",
+                        status_code=response.status_code,
+                    )
+
+                try:
+                    data = response.json()
+                except Exception:
+                    raise GitHubApiError("Malformed JSON response received from GitHub API.") from None
+
+                return data
+
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                logger.warning("Timeout occurred during GitHub request (attempt %d/%d)", attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    delay = backoff_base * (2 ** attempt) + random.uniform(0.01, 0.1)
+                    await asyncio.sleep(delay)
+                    continue
+                raise GitHubTimeoutError("Connection to GitHub timed out.") from None
+            except httpx.RequestError as exc:
+                last_exc = exc
+                logger.warning(
+                    "Network error during GitHub request: %s (attempt %d/%d)",
+                    type(exc).__name__,
+                    attempt + 1,
+                    max_retries,
+                )
+                if attempt < max_retries - 1:
+                    delay = backoff_base * (2 ** attempt) + random.uniform(0.01, 0.1)
+                    await asyncio.sleep(delay)
+                    continue
+                raise GitHubApiError("Network error while connecting to GitHub API.") from None
+
+        if last_exc:
+            raise GitHubApiError(f"Request failed after {max_retries} retries.") from last_exc
+
+    async def list_repository_pull_requests(
+        self,
+        access_token: str,
+        owner: str,
+        repo: str,
+        state: str = "all",
+        sort: str = "updated",
+        direction: str = "desc",
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch paginated pull requests for a repository."""
+        safe_page = max(1, page)
+        safe_per_page = min(max(1, per_page), 100)
+        url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/repos/{owner}/{repo}/pulls"
+        params = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "page": safe_page,
+            "per_page": safe_per_page,
+        }
+        data = await self._get_request(url, access_token=access_token, params=params)
+        if not isinstance(data, list):
+            raise GitHubApiError("Unexpected response shape from GitHub pull requests API (expected list).")
+        return data
+
+    async def list_repository_issues(
+        self,
+        access_token: str,
+        owner: str,
+        repo: str,
+        state: str = "all",
+        sort: str = "updated",
+        direction: str = "desc",
+        since: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch paginated issues for a repository, excluding pull requests."""
+        safe_page = max(1, page)
+        safe_per_page = min(max(1, per_page), 100)
+        url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/repos/{owner}/{repo}/issues"
+        params: dict[str, Any] = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "page": safe_page,
+            "per_page": safe_per_page,
+        }
+        if since:
+            params["since"] = since
+        data = await self._get_request(url, access_token=access_token, params=params)
+        if not isinstance(data, list):
+            raise GitHubApiError("Unexpected response shape from GitHub issues API (expected list).")
+        # Important: Filter out pull requests which GitHub includes in issues response
+        return [item for item in data if isinstance(item, dict) and "pull_request" not in item]
+
+    async def list_repository_commits(
+        self,
+        access_token: str,
+        owner: str,
+        repo: str,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch paginated commits for a repository."""
+        safe_page = max(1, page)
+        safe_per_page = min(max(1, per_page), 100)
+        url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/repos/{owner}/{repo}/commits"
+        params: dict[str, Any] = {
+            "page": safe_page,
+            "per_page": safe_per_page,
+        }
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        data = await self._get_request(url, access_token=access_token, params=params)
+        if not isinstance(data, list):
+            raise GitHubApiError("Unexpected response shape from GitHub commits API (expected list).")
+        return data
+
+    async def list_pull_request_reviews(
+        self,
+        access_token: str,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch paginated reviews associated with a pull request."""
+        safe_page = max(1, page)
+        safe_per_page = min(max(1, per_page), 100)
+        url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
+        params = {
+            "page": safe_page,
+            "per_page": safe_per_page,
+        }
+        data = await self._get_request(url, access_token=access_token, params=params)
+        if not isinstance(data, list):
+            raise GitHubApiError("Unexpected response shape from GitHub PR reviews API (expected list).")
+        return data
+
 
 
 _github_client: Optional[GitHubClient] = None

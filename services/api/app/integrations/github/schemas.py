@@ -178,6 +178,10 @@ class GitHubRepositoryResponse(BaseModel):
     github_updated_at: Optional[datetime] = None
     github_pushed_at: Optional[datetime] = None
     last_synced_at: Optional[datetime] = None
+    activity_sync_status: str = "idle"
+    activity_sync_error: Optional[str] = None
+    activity_sync_metadata: Optional[dict[str, Any]] = None
+    activity_last_synced_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -204,3 +208,244 @@ class GitHubRepositorySelectRequest(BaseModel):
     """Payload to update repository selection UI state."""
 
     is_selected: bool = Field(..., description="Whether repository is selected for future sync/ingestion.")
+
+
+class NormalizedGitHubActivity(BaseModel):
+    """Defensively typed and sanitized representation of a GitHub activity entity."""
+
+    activity_type: str
+    external_id: str
+    title: Optional[str] = None
+    body: Optional[str] = None
+    html_url: Optional[str] = None
+    author_login: Optional[str] = None
+    state: Optional[str] = None
+    source_created_at: Optional[datetime] = None
+    source_updated_at: Optional[datetime] = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def normalize_github_pull_request(data: dict[str, Any]) -> Optional[NormalizedGitHubActivity]:
+    """Normalize raw GitHub PR payload into NormalizedGitHubActivity."""
+    raw_id = data.get("id")
+    if raw_id is None:
+        return None
+    external_id = str(raw_id).strip()
+    if not external_id:
+        return None
+
+    raw_user = data.get("user") or {}
+    author_login = sanitize_string(raw_user.get("login"), 255) if isinstance(raw_user, dict) else None
+
+    # State: differentiate merged from closed
+    state = "merged" if data.get("merged_at") else sanitize_string(data.get("state"), 64)
+
+    # Bounded payload with useful non-secret metadata
+    head = data.get("head") or {}
+    base = data.get("base") or {}
+    payload = {
+        "number": data.get("number"),
+        "draft": bool(data.get("draft", False)),
+        "merged": bool(data.get("merged_at") is not None),
+        "merged_at": data.get("merged_at"),
+        "head_ref": sanitize_string(head.get("ref"), 128) if isinstance(head, dict) else None,
+        "base_ref": sanitize_string(base.get("ref"), 128) if isinstance(base, dict) else None,
+    }
+
+    return NormalizedGitHubActivity(
+        activity_type="pull_request",
+        external_id=external_id,
+        title=sanitize_string(data.get("title"), 512),
+        body=sanitize_string(data.get("body"), 32768),
+        html_url=sanitize_string(data.get("html_url"), 1024),
+        author_login=author_login,
+        state=state,
+        source_created_at=parse_iso_datetime(data.get("created_at")),
+        source_updated_at=parse_iso_datetime(data.get("updated_at")),
+        payload=payload,
+    )
+
+
+def normalize_github_issue(data: dict[str, Any]) -> Optional[NormalizedGitHubActivity]:
+    """Normalize raw GitHub issue payload into NormalizedGitHubActivity.
+
+    IMPORTANT: Detects and excludes pull-request objects returned by GitHub's Issues endpoint.
+    """
+    if "pull_request" in data:
+        # Exclude PRs returned by the issues endpoint to avoid duplication/misclassification
+        return None
+
+    raw_id = data.get("id")
+    if raw_id is None:
+        return None
+    external_id = str(raw_id).strip()
+    if not external_id:
+        return None
+
+    raw_user = data.get("user") or {}
+    author_login = sanitize_string(raw_user.get("login"), 255) if isinstance(raw_user, dict) else None
+
+    payload = {
+        "number": data.get("number"),
+        "comments_count": data.get("comments", 0),
+        "labels": [
+            sanitize_string(lbl.get("name"), 64)
+            for lbl in data.get("labels", [])
+            if isinstance(lbl, dict) and lbl.get("name")
+        ][:10],
+    }
+
+    return NormalizedGitHubActivity(
+        activity_type="issue",
+        external_id=external_id,
+        title=sanitize_string(data.get("title"), 512),
+        body=sanitize_string(data.get("body"), 32768),
+        html_url=sanitize_string(data.get("html_url"), 1024),
+        author_login=author_login,
+        state=sanitize_string(data.get("state"), 64),
+        source_created_at=parse_iso_datetime(data.get("created_at")),
+        source_updated_at=parse_iso_datetime(data.get("updated_at")),
+        payload=payload,
+    )
+
+
+def normalize_github_commit(data: dict[str, Any]) -> Optional[NormalizedGitHubActivity]:
+    """Normalize raw GitHub commit payload into NormalizedGitHubActivity.
+
+    Commits MUST use the full commit SHA as their stable external identity.
+    """
+    sha = data.get("sha")
+    if not sha or not isinstance(sha, str) or len(sha.strip()) < 7:
+        return None
+    external_id = sha.strip()
+
+    commit_data = data.get("commit") or {}
+    author_data = data.get("author") or {}
+    commit_author = commit_data.get("author") or {}
+
+    author_login = None
+    if isinstance(author_data, dict) and author_data.get("login"):
+        author_login = sanitize_string(author_data.get("login"), 255)
+    elif isinstance(commit_author, dict) and commit_author.get("name"):
+        author_login = sanitize_string(commit_author.get("name"), 255)
+
+    raw_msg = commit_data.get("message") if isinstance(commit_data, dict) else ""
+    if raw_msg:
+        parts = str(raw_msg).split("\n", 1)
+        title = sanitize_string(parts[0], 512)
+        body = sanitize_string(parts[1] if len(parts) > 1 else parts[0], 32768)
+    else:
+        title = f"Commit {external_id[:7]}"
+        body = None
+
+    date_str = None
+    if isinstance(commit_author, dict):
+        date_str = commit_author.get("date")
+
+    source_dt = parse_iso_datetime(date_str)
+
+    payload = {
+        "sha": external_id,
+        "author_name": sanitize_string(commit_author.get("name"), 128) if isinstance(commit_author, dict) else None,
+        "author_email": sanitize_string(commit_author.get("email"), 128) if isinstance(commit_author, dict) else None,
+    }
+
+    return NormalizedGitHubActivity(
+        activity_type="commit",
+        external_id=external_id,
+        title=title,
+        body=body,
+        html_url=sanitize_string(data.get("html_url"), 1024),
+        author_login=author_login,
+        state=None,
+        source_created_at=source_dt,
+        source_updated_at=source_dt,
+        payload=payload,
+    )
+
+
+def normalize_github_review(
+    data: dict[str, Any],
+    pull_number: int,
+) -> Optional[NormalizedGitHubActivity]:
+    """Normalize raw GitHub PR review payload into NormalizedGitHubActivity."""
+    raw_id = data.get("id")
+    if raw_id is None:
+        return None
+    external_id = str(raw_id).strip()
+    if not external_id:
+        return None
+
+    raw_user = data.get("user") or {}
+    author_login = sanitize_string(raw_user.get("login"), 255) if isinstance(raw_user, dict) else None
+    state = sanitize_string(data.get("state"), 64)
+
+    title = f"Review on PR #{pull_number}: {state or 'SUBMITTED'}"
+    source_dt = parse_iso_datetime(data.get("submitted_at"))
+
+    payload = {
+        "pull_number": pull_number,
+        "commit_id": sanitize_string(data.get("commit_id"), 64),
+    }
+
+    return NormalizedGitHubActivity(
+        activity_type="review",
+        external_id=external_id,
+        title=title,
+        body=sanitize_string(data.get("body"), 32768),
+        html_url=sanitize_string(data.get("html_url"), 1024),
+        author_login=author_login,
+        state=state,
+        source_created_at=source_dt,
+        source_updated_at=source_dt,
+        payload=payload,
+    )
+
+
+class GitHubActivityResponse(BaseModel):
+    """Public representation of an ingested GitHub activity."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    repository_id: uuid.UUID
+    activity_type: str
+    external_id: str
+    title: Optional[str] = None
+    body: Optional[str] = None
+    html_url: Optional[str] = None
+    author_login: Optional[str] = None
+    state: Optional[str] = None
+    source_created_at: Optional[datetime] = None
+    source_updated_at: Optional[datetime] = None
+    ingested_at: datetime
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class GitHubActivityListResponse(BaseModel):
+    """Paginated list response of ingested GitHub activities."""
+
+    items: list[GitHubActivityResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class GitHubActivitySyncRequest(BaseModel):
+    """Request payload to trigger GitHub activity synchronization."""
+
+    repository_ids: Optional[list[uuid.UUID]] = Field(
+        default=None,
+        description="Optional list of selected repository IDs to synchronize. Defaults to all selected repositories.",
+    )
+
+
+class GitHubActivitySyncResponse(BaseModel):
+    """Response returned when GitHub activity synchronization is initiated or completed."""
+
+    status: str = Field(..., description="Sync status: 'enqueued', 'completed', 'partial', 'already_syncing', or 'failed'.")
+    synced_repositories: int = Field(default=0, description="Number of repositories synced.")
+    synced_activities: int = Field(default=0, description="Total activity records persisted.")
+    message: str = Field(default="GitHub activity synchronization completed.")
+    details: Optional[dict[str, Any]] = Field(default=None, description="Per-repository sync breakdown.")
+

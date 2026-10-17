@@ -422,3 +422,61 @@ async def process_github_repo_sync(
         await release_sync_lock(connection_id, lock_token)
 
 
+async def process_github_activity_sync(
+    connection_id: uuid.UUID,
+    repository_ids: Optional[list[uuid.UUID]] = None,
+    session_factory=AsyncSessionLocal,
+) -> bool:
+    """Worker task executing GitHub activity ingestion for selected repositories."""
+    from app.db.models import GitHubConnection
+    from app.integrations.github.service import (
+        acquire_activity_sync_lock,
+        release_activity_sync_lock,
+        sync_selected_repositories_activities,
+    )
+
+    if isinstance(connection_id, str):
+        connection_id = uuid.UUID(connection_id)
+    if repository_ids:
+        repository_ids = [uuid.UUID(r) if isinstance(r, str) else r for r in repository_ids]
+
+    logger.info("Worker beginning GitHub activity sync for connection %s", connection_id)
+    lock_token = await acquire_activity_sync_lock(connection_id)
+    if not lock_token:
+        logger.warning(
+            "Activity sync already in progress for connection %s; skipping duplicate worker job",
+            connection_id,
+        )
+        return False
+
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(GitHubConnection).where(GitHubConnection.id == connection_id)
+            )
+            connection = result.scalar_one_or_none()
+            if not connection:
+                logger.warning("GitHub connection %s not found; skipping activity sync", connection_id)
+                return False
+
+            res = await sync_selected_repositories_activities(
+                db=session,
+                connection_id=connection_id,
+                repository_ids=repository_ids,
+            )
+            logger.info(
+                "Worker completed GitHub activity sync for connection %s: %s repos, %s activities (status: %s)",
+                connection_id,
+                res.get("synced_repositories", 0),
+                res.get("synced_activities", 0),
+                res.get("status"),
+            )
+            return res.get("status") in ("completed", "partial")
+    except Exception as exc:
+        logger.error("GitHub activity sync worker failed for connection %s: %s", connection_id, exc)
+        return False
+    finally:
+        await release_activity_sync_lock(connection_id, lock_token)
+
+
+
