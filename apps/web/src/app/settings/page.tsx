@@ -567,7 +567,7 @@ export function SettingsContent() {
             </div>
 
             <p className="text-[11px] text-slate-500 pt-2 border-t border-white/5">
-              Permissions requested: <code className="text-slate-400 font-mono">read:user, repo</code> (read-only profile verification and discovering public and private repositories for knowledge indexing). No code modification or write permissions are requested.
+              Permissions requested: <code className="text-slate-400 font-mono">read:user, repo</code>. GitHub&apos;s <code className="text-slate-400 font-mono">repo</code> scope grants full read and write access to your public and private repositories.
             </p>
           </div>
         )}

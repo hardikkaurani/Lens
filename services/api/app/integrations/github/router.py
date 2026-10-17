@@ -392,6 +392,7 @@ async def sync_github_repositories(
 
         try:
             # Re-verify under enqueue lock to prevent race condition
+            await db.refresh(connection, attribute_names=["token_metadata"])
             sync_info_fresh = (connection.token_metadata or {}).get("sync", {})
             if is_sync_metadata_active(sync_info_fresh) or await is_sync_locked(connection.id):
                 return GitHubRepoSyncResponse(

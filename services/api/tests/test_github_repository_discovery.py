@@ -52,6 +52,7 @@ import uuid
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import delete, func, select
 
 # Ensure services/api and services/worker are in sys.path
@@ -79,6 +80,7 @@ from app.integrations.github.schemas import (
     check_sufficient_repo_scope,
     normalize_github_repository,
 )
+from app.integrations.github.router import sync_github_repositories
 from app.integrations.github.service import (
     GENERIC_SYNC_ERROR_MESSAGE,
     LockStorageError,
@@ -130,6 +132,109 @@ async def create_test_connection(user_id: str = "gh_user_test", username: str = 
         await session.commit()
         await session.refresh(conn)
         return conn.id
+
+
+@pytest.mark.asyncio
+async def test_async_sync_refreshes_stale_metadata_after_enqueue_lock() -> None:
+    """A second session must observe sync state committed by the first request."""
+    await clean_database()
+    connection_id = await create_test_connection()
+
+    try:
+        async with AsyncSessionLocal() as first_session, AsyncSessionLocal() as second_session:
+            # Load the idle connection into session B before request A commits its sync state.
+            stale_connection = await second_session.get(GitHubConnection, connection_id)
+            assert stale_connection is not None
+            assert stale_connection.token_metadata == {}
+
+            with (
+                patch(
+                    "app.integrations.github.router.acquire_enqueue_lock",
+                    new=AsyncMock(side_effect=["first-lock", "second-lock"]),
+                ) as acquire_lock,
+                patch(
+                    "app.integrations.github.router.release_enqueue_lock",
+                    new=AsyncMock(return_value=True),
+                ) as release_lock,
+                patch(
+                    "app.integrations.github.router.is_sync_locked",
+                    new=AsyncMock(return_value=False),
+                ),
+                patch(
+                    "app.integrations.github.router.enqueue_github_repo_sync_job",
+                    new=AsyncMock(),
+                ) as enqueue_job,
+            ):
+                first_response = await sync_github_repositories(
+                    async_sync=True,
+                    db=first_session,
+                    github_client=cast(GitHubClient, AsyncMock()),
+                )
+                second_response = await sync_github_repositories(
+                    async_sync=True,
+                    db=second_session,
+                    github_client=cast(GitHubClient, AsyncMock()),
+                )
+
+            assert first_response.status == "enqueued"
+            assert second_response.status == "already_syncing"
+            enqueue_job.assert_awaited_once_with(connection_id)
+            assert acquire_lock.await_count == 2
+            assert release_lock.await_args_list == [
+                ((connection_id, "first-lock"),),
+                ((connection_id, "second-lock"),),
+            ]
+    finally:
+        await clean_database()
+        await close_connections()
+
+
+@pytest.mark.asyncio
+async def test_async_sync_enqueue_failure_persists_failure_and_releases_lock() -> None:
+    """Enqueue failures leave a safe state and release the enqueue lock."""
+    await clean_database()
+    connection_id = await create_test_connection()
+
+    try:
+        async with AsyncSessionLocal() as session:
+            with (
+                patch(
+                    "app.integrations.github.router.acquire_enqueue_lock",
+                    new=AsyncMock(return_value="enqueue-lock"),
+                ),
+                patch(
+                    "app.integrations.github.router.release_enqueue_lock",
+                    new=AsyncMock(return_value=True),
+                ) as release_lock,
+                patch(
+                    "app.integrations.github.router.is_sync_locked",
+                    new=AsyncMock(return_value=False),
+                ),
+                patch(
+                    "app.integrations.github.router.enqueue_github_repo_sync_job",
+                    new=AsyncMock(side_effect=RuntimeError("queue unavailable")),
+                ),
+            ):
+                with pytest.raises(HTTPException) as response:
+                    await sync_github_repositories(
+                        async_sync=True,
+                        db=session,
+                        github_client=cast(GitHubClient, AsyncMock()),
+                    )
+
+            assert response.value.status_code == 503
+            assert response.value.detail == "Failed to queue repository sync. Please retry."
+            release_lock.assert_awaited_once_with(connection_id, "enqueue-lock")
+
+        async with AsyncSessionLocal() as verification_session:
+            connection = await verification_session.get(GitHubConnection, connection_id)
+            assert connection is not None
+            sync_info = (connection.token_metadata or {}).get("sync", {})
+            assert sync_info["status"] == "failed"
+            assert sync_info["error"] == "Failed to enqueue synchronization job."
+    finally:
+        await clean_database()
+        await close_connections()
 
 
 def make_mock_github_repo(

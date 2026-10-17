@@ -637,8 +637,8 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     expect(reconnectBtn.getAttribute("href")).toContain("/integrations/github/connect");
   });
 
-  // 50. disconnected state accurately discloses read:user, repo permissions
-  it("50. accurately discloses read:user, repo scope in disconnected permission explanation", async () => {
+  // 50. disconnected state accurately discloses repo's full GitHub access
+  it("50. accurately discloses repo scope grants full read and write access", async () => {
     vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
       connected: false,
     });
@@ -651,7 +651,9 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
 
     const card = screen.getByTestId("github-disconnected-card");
     expect(card).toHaveTextContent("read:user, repo");
-    expect(card).toHaveTextContent("discovering public and private repositories");
+    expect(card).toHaveTextContent("full read and write access");
+    expect(card).toHaveTextContent("public and private repositories");
+    expect(card).not.toHaveTextContent("No code modification or write permissions are requested");
   });
 });
 
