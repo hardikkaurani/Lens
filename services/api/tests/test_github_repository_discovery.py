@@ -1,6 +1,6 @@
 """Integration and forensic security tests for GitHub Repository Discovery & Import Foundation (Stage 14).
 
-Covers all 33 backend scenarios:
+Covers all 37 backend scenarios:
 1. no GitHub connection -> 404
 2. authenticated repository discovery -> 200
 3. GitHub API request headers validated
@@ -34,6 +34,10 @@ Covers all 33 backend scenarios:
 31. unauthorized repository access -> 404
 32. database rollback on transaction error
 33. Redis failure / fallback lock handling
+34. token-checked atomic lock release
+35. production mode lock failure (fail closed)
+36. queue crash recovery (stranded processing queue)
+37. connection sync state visibility & error tracking
 """
 
 import asyncio
@@ -42,7 +46,7 @@ import json
 from pathlib import Path
 import sys
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional, cast
 from unittest.mock import AsyncMock, patch
 import uuid
 
@@ -72,6 +76,7 @@ from app.integrations.github.schemas import (
     normalize_github_repository,
 )
 from app.integrations.github.service import (
+    LockStorageError,
     MAX_REPOSITORIES_PER_SYNC,
     _memory_lock_cache,
     acquire_sync_lock,
@@ -80,6 +85,11 @@ from app.integrations.github.service import (
     release_sync_lock,
     update_repository_selection,
     upsert_repositories,
+)
+from app.queue.job import (
+    GITHUB_REPO_SYNC_PROCESSING_QUEUE,
+    GITHUB_REPO_SYNC_QUEUE,
+    recover_stranded_github_repo_sync_jobs,
 )
 from app.main import app
 from worker.processor import process_github_repo_sync
@@ -472,12 +482,12 @@ async def run_all_stage14_tests() -> None:
         # Test 24: concurrent sync protection
         # ----------------------------------------------------------------------
         locked = await acquire_sync_lock(conn_id)
-        assert locked is True
+        assert locked is not None
         # While locked, sync should return already_syncing
         res_locked = await client.post("/integrations/github/repositories/sync")
         assert res_locked.status_code == 200
         assert res_locked.json()["status"] == "already_syncing"
-        await release_sync_lock(conn_id)
+        await release_sync_lock(conn_id, locked)
         print("Test 24: concurrent sync protection -> PASS")
 
         # ----------------------------------------------------------------------
@@ -506,8 +516,8 @@ async def run_all_stage14_tests() -> None:
                 pass
         # Verify lock was released
         can_acquire = await acquire_sync_lock(conn_id)
-        assert can_acquire is True
-        await release_sync_lock(conn_id)
+        assert can_acquire is not None
+        await release_sync_lock(conn_id, can_acquire)
         print("Test 26: sync failure releases lock -> PASS")
 
         # ----------------------------------------------------------------------
@@ -527,10 +537,10 @@ async def run_all_stage14_tests() -> None:
         # ----------------------------------------------------------------------
         # Test 28: stuck sync recovery
         # ----------------------------------------------------------------------
-        _memory_lock_cache[f"lens:lock:github_sync:{conn_id}"] = time.time() - 1  # simulated expired lock
+        _memory_lock_cache[f"lens:lock:github_sync:{conn_id}"] = ("expired_token", time.time() - 1)
         res_rec = await acquire_sync_lock(conn_id)
-        assert res_rec is True
-        await release_sync_lock(conn_id)
+        assert res_rec is not None
+        await release_sync_lock(conn_id, res_rec)
         print("Test 28: stuck sync recovery -> PASS")
 
         # ----------------------------------------------------------------------
@@ -586,13 +596,98 @@ async def run_all_stage14_tests() -> None:
         # ----------------------------------------------------------------------
         with patch("app.integrations.github.service.get_redis_client", side_effect=Exception("Redis down")):
             lock1 = await acquire_sync_lock(conn_id)
-            assert lock1 is True
+            assert lock1 is not None
             lock2 = await acquire_sync_lock(conn_id)
-            assert lock2 is False  # Memory lock rejected duplicate concurrent
-            await release_sync_lock(conn_id)
+            assert lock2 is None  # Memory lock rejected duplicate concurrent
+            await release_sync_lock(conn_id, lock1)
         print("Test 33: Redis failure handling -> PASS")
 
-    print("\n--- ALL 33 STAGE 14 BACKEND TESTS PASSED SUCCESSFULLY ---")
+        # ----------------------------------------------------------------------
+        # Test 34: Token-checked atomic release
+        # ----------------------------------------------------------------------
+        tok = await acquire_sync_lock(conn_id)
+        assert tok is not None
+        # Attempt to release with wrong token
+        wrong_released = await release_sync_lock(conn_id, "wrong-token-12345")
+        assert wrong_released is False
+        # Verify lock is still held
+        assert await acquire_sync_lock(conn_id) is None
+        # Release with correct token
+        correct_released = await release_sync_lock(conn_id, tok)
+        assert correct_released is True
+        # Now can be acquired again
+        reacquired = await acquire_sync_lock(conn_id)
+        assert reacquired is not None
+        await release_sync_lock(conn_id, reacquired)
+        print("Test 34: token-checked atomic lock release -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 35: Production mode lock failure (fail closed)
+        # ----------------------------------------------------------------------
+        mock_prod_settings = get_settings().model_copy(update={"APP_ENV": "production"})
+        with patch("app.core.config.get_settings", return_value=mock_prod_settings):
+            with patch("app.integrations.github.service.get_redis_client", side_effect=Exception("Redis connection pool exhausted")):
+                with pytest.raises(LockStorageError):
+                    await acquire_sync_lock(conn_id)
+        print("Test 35: production mode lock failure fail-closed -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 36: Queue crash recovery
+        # ----------------------------------------------------------------------
+        from app.queue.job import GitHubRepoSyncJob
+        from app.db.session import get_redis_client
+        redis_conn = get_redis_client()
+        # Clean test queue keys
+        await redis_conn.delete(GITHUB_REPO_SYNC_QUEUE)
+        await redis_conn.delete(GITHUB_REPO_SYNC_PROCESSING_QUEUE)
+
+        # 1. Normal recoverable stranded job
+        valid_job = GitHubRepoSyncJob(connection_id=conn_id, retry_count=0, max_retries=3)
+        await cast(Awaitable[int], redis_conn.rpush(GITHUB_REPO_SYNC_PROCESSING_QUEUE, valid_job.model_dump_json()))
+
+        # 2. Poison pill job exceeding max_retries
+        poison_job = GitHubRepoSyncJob(connection_id=conn_id, retry_count=3, max_retries=3)
+        await cast(Awaitable[int], redis_conn.rpush(GITHUB_REPO_SYNC_PROCESSING_QUEUE, poison_job.model_dump_json()))
+
+        recovered_count = await recover_stranded_github_repo_sync_jobs()
+        assert recovered_count == 1
+        # Check that valid_job was moved back to main queue with incremented retry_count
+        main_queue_item = await cast(Awaitable[Any], redis_conn.lpop(GITHUB_REPO_SYNC_QUEUE))
+        assert main_queue_item is not None
+        item_str = main_queue_item if isinstance(main_queue_item, str) else str(main_queue_item)
+        recovered_job = GitHubRepoSyncJob.model_validate_json(item_str)
+        assert recovered_job.retry_count == 1
+        # Processing queue should now be empty
+        assert await cast(Awaitable[int], redis_conn.llen(GITHUB_REPO_SYNC_PROCESSING_QUEUE)) == 0
+        print("Test 36: queue crash recovery -> PASS")
+
+        # ----------------------------------------------------------------------
+        # Test 37: Connection sync state visibility
+        # ----------------------------------------------------------------------
+        status_resp = await client.get("/integrations/github")
+        assert status_resp.status_code == 200
+        status_data = status_resp.json()
+        assert "sync_status" in status_data
+        assert "last_synced_at" in status_data
+        assert "sync_error" in status_data
+        # After previous syncs, status should be 'synced'
+        assert status_data["sync_status"] == "synced"
+        assert status_data["last_synced_at"] is not None
+        assert status_data["sync_error"] is None
+
+        # Verify failed sync sets status to 'failed' and records error
+        with patch.object(GitHubClient, "list_user_repositories", side_effect=RuntimeError("Fatal API sync boom")):
+            try:
+                await client.post("/integrations/github/repositories/sync")
+            except Exception:
+                pass
+        failed_status = await client.get("/integrations/github")
+        assert failed_status.status_code == 200
+        assert failed_status.json()["sync_status"] == "failed"
+        assert "Fatal API sync boom" in (failed_status.json()["sync_error"] or "")
+        print("Test 37: connection sync state visibility -> PASS")
+
+    print("\n--- ALL 37 STAGE 14 BACKEND TESTS PASSED SUCCESSFULLY ---")
 
 
 @pytest.mark.asyncio
