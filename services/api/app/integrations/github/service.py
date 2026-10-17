@@ -41,6 +41,9 @@ MAX_REPOSITORIES_PER_SYNC = 1000
 MAX_PAGES_PER_SYNC = 10
 SYNC_LOCK_TTL_SECONDS = 300  # 5 minutes bounded operation deadline
 SYNC_LOCK_KEY_PREFIX = "lens:lock:github_sync:"
+ENQUEUE_LOCK_TTL_SECONDS = 10  # Brief lock to guard async sync enqueue
+ENQUEUE_LOCK_KEY_PREFIX = "lens:lock:github_enqueue:"
+GENERIC_SYNC_ERROR_MESSAGE = "An unexpected error occurred during repository synchronization."
 
 # In-memory fallback caches when Redis is unavailable (strictly for dev/test environments)
 _memory_state_cache: dict[str, tuple[str, float]] = {}
@@ -317,6 +320,114 @@ async def release_sync_lock(connection_id: uuid.UUID, token: Optional[str] = Non
     return released
 
 
+async def is_sync_locked(connection_id: uuid.UUID) -> bool:
+    """Check if repository sync distributed lock is currently held."""
+    key = f"{SYNC_LOCK_KEY_PREFIX}{connection_id}"
+    try:
+        redis = get_redis_client()
+        val = await redis.get(key)
+        if val is not None:
+            return True
+    except Exception as exc:
+        logger.warning("Redis unavailable for is_sync_locked check: %s", exc)
+
+    # Check memory fallback
+    if key in _memory_lock_cache:
+        val = _memory_lock_cache[key]
+        expires_at = val[1] if isinstance(val, tuple) else float(val)
+        if expires_at > time.time():
+            return True
+        else:
+            _memory_lock_cache.pop(key, None)
+    return False
+
+
+def is_sync_metadata_active(
+    sync_info: Optional[dict[str, Any]],
+    max_age_seconds: int = SYNC_LOCK_TTL_SECONDS,
+) -> bool:
+    """Check if the persisted sync metadata indicates an active in-progress sync.
+
+    Treats 'syncing' status as active only while its timestamp is valid and fresh
+    within max_age_seconds. Permits recovery from stale or invalid timestamps.
+    """
+    if not sync_info or not isinstance(sync_info, dict):
+        return False
+    if sync_info.get("status") != "syncing":
+        return False
+    started_at_str = sync_info.get("started_at")
+    if not started_at_str or not isinstance(started_at_str, str):
+        # Missing or non-string timestamp -> stale/invalid, allow recovery
+        return False
+    try:
+        clean = started_at_str.strip().replace("Z", "+00:00")
+        started_dt = datetime.fromisoformat(clean)
+        if started_dt.tzinfo is None:
+            started_dt = started_dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age = (now - started_dt).total_seconds()
+        # Fresh within max_age_seconds (and tolerate clock skew up to max_age_seconds)
+        return 0 <= age <= max_age_seconds
+    except Exception:
+        # Malformed timestamp -> allow recovery
+        return False
+
+
+async def acquire_enqueue_lock(connection_id: uuid.UUID) -> Optional[str]:
+    """Acquire a brief distributed lock to serialize async enqueue requests."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    is_production = settings.APP_ENV == "production"
+
+    token = secrets.token_hex(16)
+    key = f"{ENQUEUE_LOCK_KEY_PREFIX}{connection_id}"
+    now = time.time()
+    try:
+        redis = get_redis_client()
+        res = await redis.set(key, token, ex=ENQUEUE_LOCK_TTL_SECONDS, nx=True)
+        return token if res else None
+    except Exception as exc:
+        if is_production:
+            logger.error("Redis unavailable for enqueue lock in production: %s", exc)
+            raise LockStorageError("Distributed enqueue lock service unavailable.") from exc
+        logger.warning("Redis unavailable for enqueue lock; falling back to memory: %s", exc)
+
+    if key in _memory_lock_cache:
+        val = _memory_lock_cache[key]
+        expires_at = val[1] if isinstance(val, tuple) else float(val)
+        if expires_at > now:
+            return None
+    _memory_lock_cache[key] = (token, now + ENQUEUE_LOCK_TTL_SECONDS)
+    return token
+
+
+async def release_enqueue_lock(connection_id: uuid.UUID, token: Optional[str] = None) -> bool:
+    """Release distributed lock for async enqueue."""
+    key = f"{ENQUEUE_LOCK_KEY_PREFIX}{connection_id}"
+    released = False
+
+    try:
+        redis = get_redis_client()
+        if token:
+            res = await cast(Awaitable[Any], redis.eval(RELEASE_LOCK_LUA_SCRIPT, 1, key, token))
+            released = bool(res)
+        else:
+            await redis.delete(key)
+            released = True
+    except Exception as exc:
+        logger.warning("Redis enqueue lock release failed: %s", exc)
+
+    if key in _memory_lock_cache:
+        val = _memory_lock_cache[key]
+        stored_token = val[0] if isinstance(val, tuple) else None
+        if token is None or stored_token == token:
+            _memory_lock_cache.pop(key, None)
+            released = True
+
+    return released
+
+
 async def upsert_repositories(
     db: AsyncSession,
     connection_id: uuid.UUID,
@@ -495,7 +606,16 @@ async def discover_and_sync_repositories(
         }
     except Exception as exc:
         err_time = datetime.now(timezone.utc)
-        safe_msg = str(exc)
+        if isinstance(exc, (GitHubClientError, EncryptionError)):
+            safe_msg = str(exc)
+        else:
+            logger.exception(
+                "Unexpected failure during repository sync for connection %s: %s",
+                connection.id,
+                type(exc).__name__,
+            )
+            safe_msg = GENERIC_SYNC_ERROR_MESSAGE
+
         token_meta = dict(connection.token_metadata or {})
         token_meta["sync"] = {
             "status": "failed",
@@ -506,7 +626,8 @@ async def discover_and_sync_repositories(
         flag_modified(connection, "token_metadata")
         try:
             await db.commit()
-        except Exception:
+        except Exception as db_exc:
+            logger.error("Failed to persist sync error state to database: %s", db_exc)
             await db.rollback()
         raise
 

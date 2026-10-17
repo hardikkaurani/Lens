@@ -17,6 +17,20 @@ class GitHubConnectionStatus(BaseModel):
     sync_status: Optional[str] = Field(default="idle", description="Connection sync status: idle, syncing, synced, or failed.")
     last_synced_at: Optional[datetime] = Field(default=None, description="Timestamp when repositories were last synced.")
     sync_error: Optional[str] = Field(default=None, description="Error message from last failed sync attempt.")
+    has_required_scope: bool = Field(default=True, description="Whether the connection has required repository scopes.")
+    missing_scope_reason: Optional[str] = Field(default=None, description="Explanation and reconnect guidance if required scope is missing.")
+
+
+def check_sufficient_repo_scope(scope: Optional[str]) -> bool:
+    """Check if the granted OAuth scopes include repository discovery access.
+
+    Matches 'repo' (full access to private/public repositories) or
+    'public_repo' (access to public repositories).
+    """
+    if not scope:
+        return False
+    scopes = set(s.strip() for s in scope.replace(",", " ").split())
+    return bool({"repo", "public_repo"} & scopes)
 
 
 class GitHubDisconnectResponse(BaseModel):
