@@ -14,6 +14,9 @@ class GitHubConnectionStatus(BaseModel):
     scope: Optional[str] = Field(default=None, description="Authorized OAuth scopes.")
     connected_at: Optional[datetime] = Field(default=None, description="Timestamp when connection was established.")
     last_verified_at: Optional[datetime] = Field(default=None, description="Timestamp when connection was last verified.")
+    sync_status: Optional[str] = Field(default="idle", description="Connection sync status: idle, syncing, synced, or failed.")
+    last_synced_at: Optional[datetime] = Field(default=None, description="Timestamp when repositories were last synced.")
+    sync_error: Optional[str] = Field(default=None, description="Error message from last failed sync attempt.")
 
 
 class GitHubDisconnectResponse(BaseModel):

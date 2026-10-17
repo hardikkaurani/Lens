@@ -3,11 +3,12 @@ import json
 import logging
 import secrets
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional, cast
 import uuid
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.encryption import EncryptionError, decrypt_secret, encrypt_secret
 from app.db.models import GitHubConnection, GitHubRepository, RepositorySyncStatus
@@ -36,18 +37,32 @@ OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
 # Repository discovery & sync constants
 DEFAULT_REPO_PAGE_SIZE = 100
-MAX_REPOSITORIES_PER_SYNC = 500
+MAX_REPOSITORIES_PER_SYNC = 1000
 MAX_PAGES_PER_SYNC = 10
-SYNC_LOCK_TTL_SECONDS = 60
+SYNC_LOCK_TTL_SECONDS = 300  # 5 minutes bounded operation deadline
 SYNC_LOCK_KEY_PREFIX = "lens:lock:github_sync:"
 
 # In-memory fallback caches when Redis is unavailable (strictly for dev/test environments)
 _memory_state_cache: dict[str, tuple[str, float]] = {}
-_memory_lock_cache: dict[str, float] = {}
+_memory_lock_cache: dict[str, tuple[str, float]] = {}
+
+# Atomic lock release via Lua script (ensures lock is only deleted if token matches ownership)
+RELEASE_LOCK_LUA_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
 
 
 class OAuthStorageError(Exception):
     """Raised when OAuth state storage is unavailable or fails."""
+    pass
+
+
+class LockStorageError(Exception):
+    """Raised when distributed lock storage is unavailable in production."""
     pass
 
 
@@ -234,34 +249,72 @@ async def delete_github_connection(db: AsyncSession) -> bool:
     return isinstance(rowcount, int) and rowcount > 0
 
 
-async def acquire_sync_lock(connection_id: uuid.UUID) -> bool:
-    """Acquire a temporary distributed lock for repository sync to prevent concurrent runs."""
+async def acquire_sync_lock(connection_id: uuid.UUID) -> Optional[str]:
+    """Acquire a temporary distributed lock for repository sync to prevent concurrent runs.
+
+    Returns a unique lock ownership token (str) if successfully acquired,
+    or None if the lock is already held.
+    In production mode (APP_ENV == 'production'), Redis is mandatory; if Redis fails,
+    raises LockStorageError to fail closed and prevent split-brain race conditions.
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    is_production = settings.APP_ENV == "production"
+
+    token = secrets.token_hex(16)
     key = f"{SYNC_LOCK_KEY_PREFIX}{connection_id}"
     now = time.time()
     try:
         redis = get_redis_client()
-        res = await redis.set(key, "1", ex=SYNC_LOCK_TTL_SECONDS, nx=True)
-        return bool(res)
+        res = await redis.set(key, token, ex=SYNC_LOCK_TTL_SECONDS, nx=True)
+        return token if res else None
     except Exception as exc:
+        if is_production:
+            logger.error("Redis unavailable for sync lock in production: %s", exc)
+            raise LockStorageError("Distributed sync lock service unavailable.") from exc
         logger.warning("Redis unavailable for sync lock; checking local memory cache: %s", exc)
 
-    # In-memory fallback
+    # In-memory fallback (strictly for development/testing)
     if key in _memory_lock_cache:
-        if _memory_lock_cache[key] > now:
-            return False
-    _memory_lock_cache[key] = now + SYNC_LOCK_TTL_SECONDS
-    return True
+        val = _memory_lock_cache[key]
+        expires_at = val[1] if isinstance(val, tuple) else float(val)
+        if expires_at > now:
+            return None
+    _memory_lock_cache[key] = (token, now + SYNC_LOCK_TTL_SECONDS)
+    return token
 
 
-async def release_sync_lock(connection_id: uuid.UUID) -> None:
-    """Release distributed lock for repository sync."""
+async def release_sync_lock(connection_id: uuid.UUID, token: Optional[str] = None) -> bool:
+    """Release distributed lock for repository sync using ownership-checked atomic release.
+
+    Verifies that the lock still belongs to the calling process via `token`.
+    Returns True if successfully deleted, False if lock was missing or owned by another process.
+    """
     key = f"{SYNC_LOCK_KEY_PREFIX}{connection_id}"
+    released = False
+
     try:
         redis = get_redis_client()
-        await redis.delete(key)
-    except Exception:
-        pass
-    _memory_lock_cache.pop(key, None)
+        if token:
+            res = await cast(Awaitable[Any], redis.eval(RELEASE_LOCK_LUA_SCRIPT, 1, key, token))
+            released = bool(res)
+        else:
+            # Fallback unconditional delete only if no token provided (legacy compat)
+            await redis.delete(key)
+            released = True
+    except Exception as exc:
+        logger.warning("Redis lock release failed: %s", exc)
+
+    # Clean up memory fallback
+    if key in _memory_lock_cache:
+        val = _memory_lock_cache[key]
+        stored_token = val[0] if isinstance(val, tuple) else None
+        if token is None or stored_token == token:
+            _memory_lock_cache.pop(key, None)
+            released = True
+
+    return released
 
 
 async def upsert_repositories(
@@ -369,50 +422,93 @@ async def discover_and_sync_repositories(
         logger.error("Failed to decrypt access token for connection %s: %s", connection.id, err)
         raise
 
+    # Record sync starting state on connection
+    now = datetime.now(timezone.utc)
+    token_meta = dict(connection.token_metadata or {})
+    token_meta["sync"] = {
+        "status": "syncing",
+        "started_at": now.isoformat(),
+        "error": None,
+    }
+    connection.token_metadata = token_meta
+    flag_modified(connection, "token_metadata")
+    await db.commit()
+
     all_normalized: list[NormalizedGitHubRepository] = []
     seen_ids: set[str] = set()
 
-    # 2. Bounded pagination loop
-    for page in range(1, MAX_PAGES_PER_SYNC + 1):
-        if len(all_normalized) >= max_repos:
-            break
+    try:
+        # 2. Bounded pagination loop
+        for page in range(1, MAX_PAGES_PER_SYNC + 1):
+            if len(all_normalized) >= max_repos:
+                break
 
-        # Fetch page of repositories
-        raw_items = await client.list_user_repositories(
-            access_token=access_token,
-            page=page,
-            per_page=min(page_size, max_repos - len(all_normalized)),
+            # Fetch page of repositories
+            raw_items = await client.list_user_repositories(
+                access_token=access_token,
+                page=page,
+                per_page=min(page_size, max_repos - len(all_normalized)),
+            )
+
+            if not raw_items:
+                break
+
+            for item in raw_items:
+                normalized = normalize_github_repository(item)
+                if normalized and normalized.github_repository_id not in seen_ids:
+                    seen_ids.add(normalized.github_repository_id)
+                    all_normalized.append(normalized)
+                    if len(all_normalized) >= max_repos:
+                        break
+
+            # Stop when returned items are fewer than requested page size
+            if len(raw_items) < page_size:
+                break
+
+        # 3. Upsert normalized records idempotently
+        synced_count = await upsert_repositories(db, connection.id, all_normalized)
+
+        # 4. Count total repositories in DB for this connection
+        count_stmt = select(func.count(GitHubRepository.id)).where(
+            GitHubRepository.connection_id == connection.id
         )
+        total_in_db = (await db.execute(count_stmt)).scalar() or 0
 
-        if not raw_items:
-            break
+        # Record successful completion state on connection
+        finish_time = datetime.now(timezone.utc)
+        token_meta = dict(connection.token_metadata or {})
+        token_meta["sync"] = {
+            "status": "synced",
+            "last_synced_at": finish_time.isoformat(),
+            "synced_count": synced_count,
+            "total": total_in_db,
+            "error": None,
+        }
+        connection.token_metadata = token_meta
+        flag_modified(connection, "token_metadata")
+        await db.commit()
 
-        for item in raw_items:
-            normalized = normalize_github_repository(item)
-            if normalized and normalized.github_repository_id not in seen_ids:
-                seen_ids.add(normalized.github_repository_id)
-                all_normalized.append(normalized)
-                if len(all_normalized) >= max_repos:
-                    break
-
-        # Stop when returned items are fewer than requested page size
-        if len(raw_items) < page_size:
-            break
-
-    # 3. Upsert normalized records idempotently
-    synced_count = await upsert_repositories(db, connection.id, all_normalized)
-
-    # 4. Count total repositories in DB for this connection
-    count_stmt = select(func.count(GitHubRepository.id)).where(
-        GitHubRepository.connection_id == connection.id
-    )
-    total_in_db = (await db.execute(count_stmt)).scalar() or 0
-
-    return {
-        "status": "completed",
-        "synced_count": synced_count,
-        "total": total_in_db,
-    }
+        return {
+            "status": "completed",
+            "synced_count": synced_count,
+            "total": total_in_db,
+        }
+    except Exception as exc:
+        err_time = datetime.now(timezone.utc)
+        safe_msg = str(exc)
+        token_meta = dict(connection.token_metadata or {})
+        token_meta["sync"] = {
+            "status": "failed",
+            "failed_at": err_time.isoformat(),
+            "error": safe_msg,
+        }
+        connection.token_metadata = token_meta
+        flag_modified(connection, "token_metadata")
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+        raise
 
 
 async def list_connection_repositories(

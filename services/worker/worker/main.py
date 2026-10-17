@@ -18,6 +18,7 @@ from app.queue.job import (
     dequeue_file_ingest_job,
     dequeue_github_repo_sync_job,
     dequeue_url_ingest_job,
+    recover_stranded_github_repo_sync_jobs,
 )
 from worker.processor import (
     process_file_capture,
@@ -124,6 +125,14 @@ async def run_worker(
 
     if stop_event is None:
         stop_event = asyncio.Event()
+
+    # Recover any stranded repo sync jobs left in processing queue from previous crashes
+    try:
+        recovered = await recover_stranded_github_repo_sync_jobs()
+        if recovered > 0:
+            logger.info("Worker recovered %d stranded GitHub repo sync jobs on startup", recovered)
+    except Exception as rec_err:
+        logger.warning("Could not execute startup recovery for stranded repo sync jobs: %s", rec_err)
 
     while not stop_event.is_set():
         try:

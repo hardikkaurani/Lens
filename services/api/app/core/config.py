@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_SECRET: Optional[str] = None
     GITHUB_WEBHOOK_SECRET: Optional[str] = None
     GITHUB_REDIRECT_URI: Optional[str] = None
-    GITHUB_OAUTH_SCOPES: str = "read:user"
+    GITHUB_OAUTH_SCOPES: str = "read:user,repo"
     GITHUB_OAUTH_AUTHORIZE_URL: str = "https://github.com/login/oauth/authorize"
     GITHUB_OAUTH_TOKEN_URL: str = "https://github.com/login/oauth/access_token"
     GITHUB_API_BASE_URL: str = "https://api.github.com"

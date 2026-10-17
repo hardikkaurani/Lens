@@ -65,6 +65,9 @@ export interface GitHubConnectionStatus {
   scope?: string | null;
   connected_at?: string | null;
   last_verified_at?: string | null;
+  sync_status?: string | null;
+  last_synced_at?: string | null;
+  sync_error?: string | null;
 }
 
 export interface GitHubDisconnectResponse {

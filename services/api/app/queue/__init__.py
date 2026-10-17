@@ -13,6 +13,13 @@ from app.queue.job import (
     dequeue_url_ingest_job,
     enqueue_file_ingest_job,
     enqueue_url_ingest_job,
+    GITHUB_REPO_SYNC_PROCESSING_QUEUE,
+    GITHUB_REPO_SYNC_QUEUE,
+    GitHubRepoSyncJob,
+    ack_github_repo_sync_job,
+    dequeue_github_repo_sync_job,
+    enqueue_github_repo_sync_job,
+    recover_stranded_github_repo_sync_jobs,
 )
 
 __all__ = [
@@ -28,5 +35,12 @@ __all__ = [
     "enqueue_file_ingest_job",
     "dequeue_file_ingest_job",
     "ack_file_ingest_job",
+    "GitHubRepoSyncJob",
+    "GITHUB_REPO_SYNC_QUEUE",
+    "GITHUB_REPO_SYNC_PROCESSING_QUEUE",
+    "enqueue_github_repo_sync_job",
+    "dequeue_github_repo_sync_job",
+    "ack_github_repo_sync_job",
+    "recover_stranded_github_repo_sync_jobs",
 ]
 

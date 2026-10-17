@@ -118,14 +118,28 @@ export function SettingsContent() {
 
     try {
       const syncRes = await apiClient.syncGitHubRepositories();
-      const listRes = await apiClient.getGitHubRepositories();
-      setRepositories(listRes.items);
-      setTotalRepos(listRes.total);
-      setDismissedNotification(false);
-      setActionNotification({
-        type: "success",
-        message: `Successfully discovered and synchronized ${syncRes.synced_count} repositories.`,
-      });
+      if (syncRes.status === "enqueued") {
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "success",
+          message: "Repository synchronization job enqueued in background worker.",
+        });
+      } else if (syncRes.status === "already_syncing") {
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "error",
+          message: "Repository synchronization is already in progress for this connection.",
+        });
+      } else {
+        const listRes = await apiClient.getGitHubRepositories();
+        setRepositories(listRes.items);
+        setTotalRepos(listRes.total);
+        setDismissedNotification(false);
+        setActionNotification({
+          type: "success",
+          message: `Successfully discovered and synchronized ${syncRes.synced_count} repositories.`,
+        });
+      }
     } catch (err: unknown) {
       if (err instanceof ApiClientError) {
         if (err.status === 429) {

@@ -1,6 +1,7 @@
+import json
 import logging
 import uuid
-from typing import Awaitable, Optional, cast
+from typing import Any, Awaitable, Optional, cast
 
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -40,6 +41,8 @@ class GitHubRepoSyncJob(BaseModel):
     type: str = Field(default="github.repositories_sync", description="Job type identifier.")
     version: int = Field(default=1, description="Schema contract version.")
     connection_id: uuid.UUID = Field(..., description="Target GitHubConnection UUID.")
+    retry_count: int = Field(default=0, description="Current retry attempt.")
+    max_retries: int = Field(default=3, description="Maximum allowed retry attempts.")
 
 
 
@@ -256,5 +259,61 @@ async def ack_github_repo_sync_job(
         client = get_redis_client()
 
     await cast(Awaitable[int], client.lrem(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 1, raw))
+
+
+async def recover_stranded_github_repo_sync_jobs(
+    client: Optional[Redis] = None,
+    max_retries: int = 3,
+) -> int:
+    """Recover jobs stranded in GITHUB_REPO_SYNC_PROCESSING_QUEUE after worker crashes.
+
+    Atomically inspects items in the processing queue.
+    If retry_count < max_retries, moves the job back to GITHUB_REPO_SYNC_QUEUE with incremented retry count.
+    If retry_count >= max_retries, drops the dead job and logs an error to prevent poison pill loops.
+
+    Returns the number of jobs recovered.
+    """
+    if client is None:
+        client = get_redis_client()
+
+    recovered_count = 0
+    try:
+        items = await cast(Awaitable[list[Any]], client.lrange(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 0, -1))
+        if not items:
+            return 0
+
+        for raw_item in items:
+            raw_str = raw_item if isinstance(raw_item, str) else raw_item.decode("utf-8")
+            try:
+                job_data = json.loads(raw_str)
+                retry_count = int(job_data.get("retry_count", 0)) + 1
+                job_data["retry_count"] = retry_count
+
+                await cast(Awaitable[int], client.lrem(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 1, raw_str))
+
+                if retry_count <= max_retries:
+                    updated_payload = json.dumps(job_data)
+                    await cast(Awaitable[int], client.lpush(GITHUB_REPO_SYNC_QUEUE, updated_payload))
+                    logger.warning(
+                        "Recovered stranded GitHub repo sync job for connection %s (retry %d/%d)",
+                        job_data.get("connection_id"),
+                        retry_count,
+                        max_retries,
+                    )
+                    recovered_count += 1
+                else:
+                    logger.error(
+                        "Discarded unrecoverable GitHub repo sync job for connection %s after %d failed attempts",
+                        job_data.get("connection_id"),
+                        max_retries,
+                    )
+            except Exception as item_err:
+                logger.error("Failed to recover processing item %r: %s", raw_str, item_err)
+                await cast(Awaitable[int], client.lrem(GITHUB_REPO_SYNC_PROCESSING_QUEUE, 1, raw_str))
+    except Exception as exc:
+        logger.error("Failed to inspect stranded GitHub repo sync jobs: %s", exc)
+
+    return recovered_count
+
 
 
