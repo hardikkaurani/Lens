@@ -36,17 +36,23 @@ from app.integrations.github.schemas import (
     GitHubRepoSyncResponse,
     GitHubRepositoryResponse,
     GitHubRepositorySelectRequest,
+    check_sufficient_repo_scope,
 )
 from app.integrations.github.service import (
+    GENERIC_SYNC_ERROR_MESSAGE,
     OAUTH_COOKIE_NAME,
     OAuthStorageError,
+    acquire_enqueue_lock,
     acquire_sync_lock,
     delete_github_connection,
     discover_and_sync_repositories,
     generate_oauth_state,
     generate_session_binding,
     get_github_connection,
+    is_sync_locked,
+    is_sync_metadata_active,
     list_connection_repositories,
+    release_enqueue_lock,
     release_sync_lock,
     store_oauth_state,
     update_repository_selection,
@@ -300,6 +306,14 @@ async def get_github_status(
         except Exception:
             pass
 
+    has_required_scope = check_sufficient_repo_scope(connection.scope)
+    missing_scope_reason = None
+    if not has_required_scope:
+        missing_scope_reason = (
+            "Your GitHub connection is missing repository permissions (repo or public_repo scope). "
+            "Please reconnect your GitHub account to grant repository access."
+        )
+
     return GitHubConnectionStatus(
         connected=True,
         github_username=connection.github_username,
@@ -310,6 +324,8 @@ async def get_github_status(
         sync_status=sync_info.get("status", "idle"),
         last_synced_at=last_synced,
         sync_error=sync_info.get("error"),
+        has_required_scope=has_required_scope,
+        missing_scope_reason=missing_scope_reason,
     )
 
 
@@ -349,27 +365,95 @@ async def sync_github_repositories(
             detail="No active GitHub connection found. Please connect your GitHub account first.",
         )
 
+    # 1. Enforce sufficient repository discovery OAuth scope
+    if not check_sufficient_repo_scope(connection.scope):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub connection lacks required repository permissions (repo or public_repo scope). Please reconnect your GitHub account to grant repository access.",
+        )
+
+    # 2. Async background sync path
     if async_sync:
         sync_info = (connection.token_metadata or {}).get("sync", {})
-        if sync_info.get("status") == "syncing":
+        # Treat persisted syncing metadata as active only if fresh within TTL, or if worker lock held
+        if is_sync_metadata_active(sync_info) or await is_sync_locked(connection.id):
             return GitHubRepoSyncResponse(
                 status="already_syncing",
                 message="Repository synchronization is already in progress for this connection.",
             )
-        await enqueue_github_repo_sync_job(connection.id)
-        # Update connection metadata to syncing
-        sync_meta = dict(connection.token_metadata or {})
-        sync_meta["sync"] = {
-            "status": "syncing",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "error": None,
-        }
-        connection.token_metadata = sync_meta
-        flag_modified(connection, "token_metadata")
-        await db.commit()
+
+        # Concurrency guard: serialize duplicate enqueue requests
+        enqueue_token = await acquire_enqueue_lock(connection.id)
+        if not enqueue_token:
+            return GitHubRepoSyncResponse(
+                status="already_syncing",
+                message="Repository synchronization is already in progress for this connection.",
+            )
+
+        try:
+            # Re-verify under enqueue lock to prevent race condition
+            await db.refresh(connection, attribute_names=["token_metadata"])
+            sync_info_fresh = (connection.token_metadata or {}).get("sync", {})
+            if is_sync_metadata_active(sync_info_fresh) or await is_sync_locked(connection.id):
+                return GitHubRepoSyncResponse(
+                    status="already_syncing",
+                    message="Repository synchronization is already in progress for this connection.",
+                )
+
+            # Persist syncing state BEFORE enqueueing the background job
+            now = datetime.now(timezone.utc)
+            sync_meta = dict(connection.token_metadata or {})
+            sync_meta["sync"] = {
+                "status": "syncing",
+                "started_at": now.isoformat(),
+                "error": None,
+            }
+            connection.token_metadata = sync_meta
+            flag_modified(connection, "token_metadata")
+            await db.commit()
+
+            # Enqueue background job with failure rollback
+            try:
+                await enqueue_github_repo_sync_job(connection.id)
+            except Exception as enqueue_exc:
+                logger.exception(
+                    "Failed to enqueue GitHub repository sync job for connection %s: %s",
+                    connection.id,
+                    enqueue_exc,
+                )
+                # Handle enqueue failure without leaving a permanently stuck syncing state
+                fail_time = datetime.now(timezone.utc)
+                fail_meta = dict(connection.token_metadata or {})
+                fail_meta["sync"] = {
+                    "status": "failed",
+                    "failed_at": fail_time.isoformat(),
+                    "error": "Failed to enqueue synchronization job.",
+                }
+                connection.token_metadata = fail_meta
+                flag_modified(connection, "token_metadata")
+                try:
+                    await db.commit()
+                except Exception as db_exc:
+                    logger.error("Failed to commit failed state after enqueue error: %s", db_exc)
+                    await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Failed to queue repository sync. Please retry.",
+                )
+
+            return GitHubRepoSyncResponse(
+                status="enqueued",
+                message="Repository synchronization job enqueued in background worker.",
+            )
+        finally:
+            await release_enqueue_lock(connection.id, enqueue_token)
+
+    # 3. Synchronous sync path
+    sync_info = (connection.token_metadata or {}).get("sync", {})
+    if is_sync_metadata_active(sync_info):
         return GitHubRepoSyncResponse(
-            status="enqueued",
-            message="Repository synchronization job enqueued in background worker.",
+            status="already_syncing",
+            message="Repository synchronization is already in progress for this connection.",
         )
 
     # Concurrency guard: acquire lock with unique ownership token
@@ -420,6 +504,12 @@ async def sync_github_repositories(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to decrypt stored GitHub access token.",
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error during repository sync: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_SYNC_ERROR_MESSAGE,
         )
     finally:
         await release_sync_lock(connection.id, lock_token)

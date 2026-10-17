@@ -113,6 +113,13 @@ export function SettingsContent() {
   // Handle repository sync
   const handleSyncRepositories = async () => {
     if (isSyncingRepos) return;
+    if (status?.has_required_scope === false) {
+      setRepoError(
+        status.missing_scope_reason ||
+          "Your GitHub connection is missing repository permissions. Please reconnect your account."
+      );
+      return;
+    }
     setIsSyncingRepos(true);
     setRepoError(null);
 
@@ -337,6 +344,35 @@ export function SettingsContent() {
               </div>
             </div>
 
+            {/* Missing Required Scope Warning Banner */}
+            {status.has_required_scope === false && (
+              <div
+                role="alert"
+                className="p-4 rounded-xl text-xs bg-amber-950/40 border border-amber-500/40 text-amber-200 flex flex-wrap items-center justify-between gap-3"
+                data-testid="missing-scope-warning"
+              >
+                <div className="flex items-center gap-2.5">
+                  <svg className="w-5 h-5 shrink-0 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <div>
+                    <span className="font-semibold block text-amber-300">Repository Discovery Permission Required</span>
+                    <span className="text-[11px] text-amber-200/90">
+                      {status.missing_scope_reason ||
+                        "Your GitHub connection is missing repository permissions (repo or public_repo scope). Please reconnect your account to grant access."}
+                    </span>
+                  </div>
+                </div>
+                <a
+                  href={apiClient.getGitHubConnectUrl()}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors shrink-0"
+                  data-testid="reconnect-github-btn"
+                >
+                  Reconnect GitHub
+                </a>
+              </div>
+            )}
+
             {/* REPOSITORY DISCOVERY & SELECTION SECTION */}
             <div className="border-t border-white/10 pt-5 space-y-4" data-testid="repositories-section">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -531,7 +567,7 @@ export function SettingsContent() {
             </div>
 
             <p className="text-[11px] text-slate-500 pt-2 border-t border-white/5">
-              Permissions requested: <code className="text-slate-400 font-mono">read:user</code> (read-only profile verification). No repository or write permissions are required at this stage.
+              Permissions requested: <code className="text-slate-400 font-mono">read:user, repo</code>. GitHub&apos;s <code className="text-slate-400 font-mono">repo</code> scope grants full read and write access to your public and private repositories.
             </p>
           </div>
         )}

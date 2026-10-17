@@ -603,5 +603,57 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
       expect(updateSpy).toHaveBeenCalledWith("repo-uuid-1", true);
     });
   });
+
+  // 49. missing required scope displays warning banner and reconnect action
+  it("49. displays warning banner and reconnect action when connection lacks repository scope", async () => {
+    const insufficientScopeStatus: GitHubConnectionStatus = {
+      connected: true,
+      github_username: "legacy_user",
+      github_user_id: "654321",
+      scope: "read:user",
+      connected_at: "2026-10-01T10:00:00Z",
+      last_verified_at: "2026-10-01T10:00:00Z",
+      has_required_scope: false,
+      missing_scope_reason: "Your GitHub connection is missing repository permissions (repo or public_repo scope). Please reconnect your account.",
+    };
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue(insufficientScopeStatus);
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("missing-scope-warning")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("missing-scope-warning")).toHaveTextContent("Repository Discovery Permission Required");
+    expect(screen.getByTestId("missing-scope-warning")).toHaveTextContent("missing repository permissions");
+    const reconnectBtn = screen.getByTestId("reconnect-github-btn");
+    expect(reconnectBtn).toBeInTheDocument();
+    expect(reconnectBtn.getAttribute("href")).toContain("/integrations/github/connect");
+  });
+
+  // 50. disconnected state accurately discloses repo's full GitHub access
+  it("50. accurately discloses repo scope grants full read and write access", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: false,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("github-disconnected-card")).toBeInTheDocument();
+    });
+
+    const card = screen.getByTestId("github-disconnected-card");
+    expect(card).toHaveTextContent("read:user, repo");
+    expect(card).toHaveTextContent("full read and write access");
+    expect(card).toHaveTextContent("public and private repositories");
+    expect(card).not.toHaveTextContent("No code modification or write permissions are requested");
+  });
 });
 
