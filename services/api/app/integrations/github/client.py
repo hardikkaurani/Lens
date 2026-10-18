@@ -480,7 +480,17 @@ class GitHubClient:
             params["since"] = since
         if until:
             params["until"] = until
-        data = await self._get_request(url, access_token=access_token, params=params)
+        try:
+            data = await self._get_request(url, access_token=access_token, params=params)
+        except GitHubApiError as exc:
+            if exc.status_code == 409:
+                logger.info(
+                    "Repository %s/%s has no commits (HTTP 409 Conflict returned by GitHub); returning empty commit list",
+                    owner,
+                    repo,
+                )
+                return []
+            raise
         if not isinstance(data, list):
             raise GitHubApiError("Unexpected response shape from GitHub commits API (expected list).")
         return data

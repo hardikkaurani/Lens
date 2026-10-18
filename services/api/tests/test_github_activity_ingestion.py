@@ -50,7 +50,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 # Ensure services/api and services/worker are in sys.path
 api_path = str(Path(__file__).resolve().parents[1])
@@ -88,7 +88,9 @@ from app.integrations.github.schemas import (
     normalize_github_review,
 )
 from app.integrations.github.service import (
+    GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE,
     _memory_lock_cache,
+    _safe_activity_error,
     acquire_activity_sync_lock,
     is_activity_sync_locked,
     list_connection_activities,
@@ -849,10 +851,6 @@ async def run_all_stage15_integration_scenarios() -> None:
         assert "encrypted_access_token" not in full_text
         print("Scenario 15: No tokens or secrets leaked -> PASS")
 
-        # Dispose engine pool so connections are not leaked across test loops
-        from app.db.session import engine
-        await engine.dispose()
-
     print("\n--- ALL STAGE 15 INTEGRATION SCENARIOS PASSED SUCCESSFULLY ---")
 
 
@@ -860,3 +858,472 @@ async def run_all_stage15_integration_scenarios() -> None:
 async def test_stage15_integration_scenarios() -> None:
     """Pytest entrypoint executing the complete Stage 15 integration suite."""
     await run_all_stage15_integration_scenarios()
+
+
+# ==============================================================================
+# STAGE 15.1 REGRESSION TESTS — PR #7 REVIEW FINDINGS REMEDIATION
+# ==============================================================================
+
+
+def test_finding_4_no_duplicate_index_on_activity_sync_status() -> None:
+    """Finding 4: Verify that GitHubRepository has exactly one index on activity_sync_status."""
+    table: Any = GitHubRepository.__table__
+    index_names = [idx.name for idx in table.indexes if idx.name]
+    sync_status_indexes = [name for name in index_names if "activity_sync_status" in name]
+    assert len(sync_status_indexes) == 1, (
+        f"Expected exactly 1 index on activity_sync_status, found {len(sync_status_indexes)}: {sync_status_indexes}"
+    )
+    assert table.c.activity_sync_status.index is True
+
+
+@pytest.mark.asyncio
+async def test_finding_5_empty_repo_409_returns_empty_commits() -> None:
+    """Finding 5: Verify that HTTP 409 Conflict from commits endpoint returns empty list,
+    while other endpoints and statuses retain normal error handling.
+    """
+    client = GitHubClient()
+
+    # 1. HTTP 409 from commits endpoint -> empty list
+    with patch.object(client, "_get_request", side_effect=GitHubApiError("Conflict: Git Repository is empty.", status_code=409)):
+        commits = await client.list_repository_commits(
+            access_token="test_token",
+            owner="test_owner",
+            repo="empty_repo",
+        )
+        assert commits == []
+
+    # 2. HTTP 404 from commits endpoint -> raises GitHubApiError
+    with patch.object(client, "_get_request", side_effect=GitHubApiError("Not found", status_code=404)):
+        with pytest.raises(GitHubApiError) as exc_info:
+            await client.list_repository_commits(
+                access_token="test_token",
+                owner="test_owner",
+                repo="missing_repo",
+            )
+        assert exc_info.value.status_code == 404
+
+    # 3. HTTP 409 on another endpoint (e.g., pull requests) -> does NOT return empty list, raises error
+    with patch.object(client, "_get_request", side_effect=GitHubApiError("Conflict", status_code=409)):
+        with pytest.raises(GitHubApiError) as exc_info:
+            await client.list_repository_pull_requests(
+                access_token="test_token",
+                owner="test_owner",
+                repo="some_repo",
+            )
+        assert exc_info.value.status_code == 409
+
+
+def test_finding_6_commit_author_email_not_persisted() -> None:
+    """Finding 6: Verify normalize_github_commit does NOT persist author_email in payload."""
+    raw_commit = {
+        "sha": "abcdef1234567890abcdef1234567890abcdef12",
+        "commit": {
+            "message": "feat: add secure pipeline\n\nDetailed body",
+            "author": {
+                "name": "Jane Developer",
+                "email": "jane.dev@private-company.com",
+                "date": "2026-05-01T12:00:00Z",
+            },
+        },
+        "author": {
+            "login": "janedev",
+        },
+        "html_url": "https://github.com/org/repo/commit/abcdef1234567890abcdef1234567890abcdef12",
+    }
+    norm = normalize_github_commit(raw_commit)
+    assert norm is not None
+    assert norm.author_login == "janedev"
+    assert norm.payload is not None
+    assert "author_email" not in norm.payload
+    assert "email" not in str(norm.payload)
+    assert norm.payload.get("author_name") == "Jane Developer"
+    assert norm.payload.get("sha") == "abcdef1234567890abcdef1234567890abcdef12"
+
+
+@pytest.mark.asyncio
+async def test_finding_7_checkpoints_never_skip_unfetched_activities_and_track_truncation() -> None:
+    """Finding 7: Comprehensive regression tests for bounded pagination and checkpoints:
+    1. Truncated PR pagination preserves prior checkpoint and reports partial.
+    2. Truncated commits pagination preserves prior checkpoint and reports partial.
+    3. Ascending issue pagination advances checkpoint safely to frontier, subsequent run recovers data.
+    4. Request budget exhaustion marks category truncated without skipping unfetched items.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="trunc-repo", full_name="activity_user/trunc-repo")
+
+    # Mock client with truncated responses (page_size=2, but 4 items available)
+    mock_client = AsyncMock()
+
+    # PRs: Page 1 returns 2 PRs (full page => truncated under max_pages=1)
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[
+        {
+            "id": 101,
+            "number": 1,
+            "title": "PR 1",
+            "body": "PR 1 body",
+            "html_url": "https://github.com/activity_user/trunc-repo/pull/1",
+            "state": "open",
+            "created_at": "2026-05-01T10:00:00Z",
+            "updated_at": "2026-05-10T10:00:00Z",
+            "user": {"login": "dev1"},
+        },
+        {
+            "id": 102,
+            "number": 2,
+            "title": "PR 2",
+            "body": "PR 2 body",
+            "html_url": "https://github.com/activity_user/trunc-repo/pull/2",
+            "state": "open",
+            "created_at": "2026-05-01T09:00:00Z",
+            "updated_at": "2026-05-09T10:00:00Z",
+            "user": {"login": "dev2"},
+        },
+    ])
+
+    # Issues: Returns 2 issues in ascending order (sort="updated", direction="asc")
+    mock_client.list_repository_issues = AsyncMock(return_value=[
+        {
+            "id": 201,
+            "number": 10,
+            "title": "Issue 10",
+            "body": "Issue 10 body",
+            "html_url": "https://github.com/activity_user/trunc-repo/issues/10",
+            "state": "open",
+            "created_at": "2026-05-01T08:00:00Z",
+            "updated_at": "2026-05-05T08:00:00Z",
+            "user": {"login": "dev1"},
+        },
+        {
+            "id": 202,
+            "number": 11,
+            "title": "Issue 11",
+            "body": "Issue 11 body",
+            "html_url": "https://github.com/activity_user/trunc-repo/issues/11",
+            "state": "open",
+            "created_at": "2026-05-01T09:00:00Z",
+            "updated_at": "2026-05-06T09:00:00Z",
+            "user": {"login": "dev2"},
+        },
+    ])
+
+    # Commits: returns 2 commits (truncated under max_pages=1)
+    mock_client.list_repository_commits = AsyncMock(return_value=[
+        {
+            "sha": "1" * 40,
+            "commit": {"message": "Commit 1", "author": {"name": "Dev", "date": "2026-05-10T12:00:00Z"}},
+            "author": {"login": "dev1"},
+            "html_url": "https://github.com/activity_user/trunc-repo/commit/" + "1" * 40,
+        },
+        {
+            "sha": "2" * 40,
+            "commit": {"message": "Commit 2", "author": {"name": "Dev", "date": "2026-05-09T12:00:00Z"}},
+            "author": {"login": "dev2"},
+            "html_url": "https://github.com/activity_user/trunc-repo/commit/" + "2" * 40,
+        },
+    ])
+
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    with patch("app.core.config.get_settings") as mock_settings:
+        settings_obj = get_settings()
+        mock_settings.return_value = settings_obj
+        orig_pages = settings_obj.GITHUB_ACTIVITY_MAX_PAGES_PER_RUN
+        orig_page_size = settings_obj.GITHUB_ACTIVITY_PAGE_SIZE
+        orig_budget = settings_obj.GITHUB_ACTIVITY_REQUEST_BUDGET
+        try:
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", 1)
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", 2)
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_REQUEST_BUDGET", 10)
+
+            # -------------------------------------------------------------
+            # RUN 1: Truncated pagination run
+            # -------------------------------------------------------------
+            async with AsyncSessionLocal() as session:
+                conn = await session.get(GitHubConnection, conn_id)
+                repo = await session.get(GitHubRepository, repo_id)
+                assert conn is not None
+                assert repo is not None
+                res1 = await sync_repository_activities(
+                    db=session,
+                    connection=conn,
+                    repository=repo,
+                    access_token="dummy_token",
+                    github_client=mock_client,
+                )
+
+                # Verification of Run 1:
+                meta = repo.activity_sync_metadata
+                assert meta is not None
+                checkpoints = meta.get("checkpoints", {})
+
+                # 1. PR checkpoint MUST NOT advance
+                assert "pull_requests" not in checkpoints, "PR checkpoint must not advance when truncated!"
+                assert meta["categories"]["pull_requests"]["status"] == "partial"
+                assert meta["categories"]["pull_requests"]["truncated"] is True
+
+                # 2. Commits checkpoint MUST NOT advance
+                assert "commits" not in checkpoints, "Commits checkpoint must not advance when truncated!"
+                assert meta["categories"]["commits"]["status"] == "partial"
+                assert meta["categories"]["commits"]["truncated"] is True
+
+                # 3. Issues was fetched ascending; checkpoint advances to max_issue_updated (2026-05-06T09:00:00)
+                assert "issues" in checkpoints
+                assert "2026-05-06T09:00:00" in checkpoints["issues"]
+                assert meta["categories"]["issues"]["status"] == "partial"
+                assert meta["categories"]["issues"]["truncated"] is True
+
+                # Overall repo status is partial
+                assert repo.activity_sync_status == "partial"
+                assert repo.activity_sync_error is not None
+                assert "pagination or budget limits" in repo.activity_sync_error
+
+            # -------------------------------------------------------------
+            # RUN 2: Recovery run (normal pagination completes)
+            # -------------------------------------------------------------
+            # PRs now return 1 PR (< page_size=2) -> completes normally!
+            mock_client.list_repository_pull_requests = AsyncMock(return_value=[
+                {
+                    "id": 103,
+                    "number": 3,
+                    "title": "PR 3 (final)",
+                    "body": "PR 3 body",
+                    "html_url": "https://github.com/activity_user/trunc-repo/pull/3",
+                    "state": "open",
+                    "created_at": "2026-05-01T10:00:00Z",
+                    "updated_at": "2026-05-11T10:00:00Z",
+                    "user": {"login": "dev1"},
+                }
+            ])
+            # Issues: returns 1 remaining issue (< page_size=2) -> completes normally!
+            mock_client.list_repository_issues = AsyncMock(return_value=[
+                {
+                    "id": 203,
+                    "number": 12,
+                    "title": "Issue 12 (recovered)",
+                    "body": "Issue 12 body",
+                    "html_url": "https://github.com/activity_user/trunc-repo/issues/12",
+                    "state": "open",
+                    "created_at": "2026-05-01T09:00:00Z",
+                    "updated_at": "2026-05-12T09:00:00Z",
+                    "user": {"login": "dev2"},
+                }
+            ])
+            # Commits: returns 1 commit (< page_size=2) -> completes normally!
+            mock_client.list_repository_commits = AsyncMock(return_value=[
+                {
+                    "sha": "3" * 40,
+                    "commit": {"message": "Commit 3", "author": {"name": "Dev", "date": "2026-05-11T12:00:00Z"}},
+                    "author": {"login": "dev1"},
+                    "html_url": "https://github.com/activity_user/trunc-repo/commit/" + "3" * 40,
+                }
+            ])
+
+            async with AsyncSessionLocal() as session:
+                conn = await session.get(GitHubConnection, conn_id)
+                repo = await session.get(GitHubRepository, repo_id)
+                assert conn is not None
+                assert repo is not None
+                res2 = await sync_repository_activities(
+                    db=session,
+                    connection=conn,
+                    repository=repo,
+                    access_token="dummy_token",
+                    github_client=mock_client,
+                )
+
+                # Verification of Run 2:
+                meta2 = repo.activity_sync_metadata
+                assert meta2 is not None
+                checkpoints2 = meta2.get("checkpoints", {})
+
+                # Now all categories completed normally, so all checkpoints advanced!
+                assert "pull_requests" in checkpoints2
+                assert "2026-05-11T10:00:00" in checkpoints2["pull_requests"]
+                assert meta2["categories"]["pull_requests"]["status"] == "synced"
+                assert meta2["categories"]["pull_requests"]["truncated"] is False
+
+                assert "commits" in checkpoints2
+                assert "2026-05-11T12:00:00" in checkpoints2["commits"]
+                assert meta2["categories"]["commits"]["status"] == "synced"
+                assert meta2["categories"]["commits"]["truncated"] is False
+
+                assert "issues" in checkpoints2
+                assert "2026-05-12T09:00:00" in checkpoints2["issues"]
+                assert meta2["categories"]["issues"]["status"] == "synced"
+                assert meta2["categories"]["issues"]["truncated"] is False
+
+                # Overall repo status is now fully synced!
+                assert repo.activity_sync_status == "synced"
+                assert repo.activity_sync_error is None
+
+            # -------------------------------------------------------------
+            # RUN 3: Request budget exhaustion simulation
+            # -------------------------------------------------------------
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_REQUEST_BUDGET", 1)
+            async with AsyncSessionLocal() as session:
+                conn = await session.get(GitHubConnection, conn_id)
+                repo = await session.get(GitHubRepository, repo_id)
+                assert conn is not None
+                assert repo is not None
+                res3 = await sync_repository_activities(
+                    db=session,
+                    connection=conn,
+                    repository=repo,
+                    access_token="dummy_token",
+                    github_client=mock_client,
+                )
+                # Budget was 1: PR consumed it (budget=0). Issues/Commits/Reviews see budget<=0.
+                meta3 = repo.activity_sync_metadata
+                assert meta3 is not None
+                assert meta3["categories"]["issues"]["truncated"] is True
+                assert meta3["categories"]["commits"]["truncated"] is True
+                assert meta3["categories"]["issues"]["status"] == "partial"
+                assert meta3["categories"]["commits"]["status"] == "partial"
+                assert repo.activity_sync_status == "partial"
+        finally:
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", orig_pages)
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", orig_page_size)
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_REQUEST_BUDGET", orig_budget)
+
+
+@pytest.mark.asyncio
+async def test_finding_8_rollback_on_failed_transaction_allows_subsequent_categories() -> None:
+    """Finding 8: A failed transaction in one category rolls back, preserves previous state,
+    and allows subsequent categories and final status persistence to succeed without PendingRollbackError.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="rollback-repo", full_name="activity_user/rollback-repo")
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[
+        {
+            "id": 501,
+            "number": 51,
+            "title": "PR to fail",
+            "html_url": "https://github.com/activity_user/rollback-repo/pull/51",
+            "state": "open",
+            "created_at": "2026-05-01T10:00:00Z",
+            "updated_at": "2026-05-01T10:00:00Z",
+            "user": {"login": "dev1"},
+        }
+    ])
+    mock_client.list_repository_issues = AsyncMock(return_value=[
+        {
+            "id": 601,
+            "number": 61,
+            "title": "Issue to succeed",
+            "html_url": "https://github.com/activity_user/rollback-repo/issues/61",
+            "state": "open",
+            "created_at": "2026-05-01T10:00:00Z",
+            "updated_at": "2026-05-01T10:00:00Z",
+            "user": {"login": "dev1"},
+        }
+    ])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    original_upsert = upsert_activities
+    call_count = 0
+
+    async def flaky_upsert(db, repository_id, activities):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Simulate database constraint or flush failure on PRs
+            raise OperationalError("INSERT INTO activities", {}, Exception("Simulated DB connection or flush error"))
+        return await original_upsert(db, repository_id, activities)
+
+    with patch("app.integrations.github.service.upsert_activities", side_effect=flaky_upsert):
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None
+            assert repo is not None
+            res = await sync_repository_activities(
+                db=session,
+                connection=conn,
+                repository=repo,
+                access_token="dummy_token",
+                github_client=mock_client,
+            )
+
+            # Verification:
+            # 1. PR category failed
+            assert res["categories"]["pull_requests"]["status"] == "failed"
+            # 2. Issues category SUCCEEDED despite PR failure (session rolled back cleanly)
+            assert res["categories"]["issues"]["status"] == "synced"
+            assert res["categories"]["issues"]["count"] == 1
+            # 3. Final repo status is "partial", NOT stuck indefinitely in "syncing"!
+            assert repo.activity_sync_status == "partial"
+            assert repo.activity_sync_metadata is not None
+            # 4. Checkpoint for PR was NOT advanced
+            assert "pull_requests" not in repo.activity_sync_metadata.get("checkpoints", {})
+            # 5. Checkpoint for issues WAS advanced
+            assert "issues" in repo.activity_sync_metadata.get("checkpoints", {})
+
+
+@pytest.mark.asyncio
+async def test_finding_9_sanitizes_unexpected_exception_details() -> None:
+    """Finding 9: Raw SQL statements, table names, and internal exception details
+    are never leaked into activity_sync_error, category error, or API response details.
+    Safe, actionable GitHub errors remain preserved.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="sanitize-repo", full_name="activity_user/sanitize-repo")
+
+    mock_client = AsyncMock()
+    sensitive_db_err = OperationalError(
+        "SELECT secret_token, password_hash FROM internal_credentials WHERE user_id = 'leak'",
+        {"user_id": "leak"},
+        Exception("connection terminated abnormally"),
+    )
+    mock_client.list_repository_pull_requests = AsyncMock(side_effect=sensitive_db_err)
+    mock_client.list_repository_issues = AsyncMock(return_value=[])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    async with AsyncSessionLocal() as session:
+        conn = await session.get(GitHubConnection, conn_id)
+        repo = await session.get(GitHubRepository, repo_id)
+        assert conn is not None
+        assert repo is not None
+        res = await sync_repository_activities(
+            db=session,
+            connection=conn,
+            repository=repo,
+            access_token="dummy_token",
+            github_client=mock_client,
+        )
+
+        # Ensure raw SQL / sensitive details are NOT in categories_status or repo.activity_sync_error
+        pr_err = res["categories"]["pull_requests"]["error"]
+        assert "secret_token" not in pr_err
+        assert "password_hash" not in pr_err
+        assert "SELECT" not in pr_err
+        assert pr_err == GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE
+
+        # Also check repo level
+        assert "secret_token" not in (repo.activity_sync_error or "")
+        assert "password_hash" not in (repo.activity_sync_error or "")
+
+    # Now verify trusted GitHubClientError retains its actionable message
+    mock_client.list_repository_pull_requests = AsyncMock(
+        side_effect=GitHubRateLimitError("GitHub API rate limit exceeded.", status_code=403, retry_after=60)
+    )
+    async with AsyncSessionLocal() as session:
+        conn = await session.get(GitHubConnection, conn_id)
+        repo = await session.get(GitHubRepository, repo_id)
+        assert conn is not None
+        assert repo is not None
+        res2 = await sync_repository_activities(
+            db=session,
+            connection=conn,
+            repository=repo,
+            access_token="dummy_token",
+            github_client=mock_client,
+        )
+        assert "GitHub API rate limit exceeded." in res2["categories"]["pull_requests"]["error"]
+

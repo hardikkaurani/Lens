@@ -753,17 +753,16 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     render(<SettingsContent />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("sync-activities-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("sync-activities-btn")).toHaveTextContent("Sync Activities (1)");
     });
 
     const syncActivitiesBtn = screen.getByTestId("sync-activities-btn");
     expect(syncActivitiesBtn).not.toBeDisabled();
-    expect(syncActivitiesBtn).toHaveTextContent("Sync Activities (1)");
 
     fireEvent.click(syncActivitiesBtn);
 
     await waitFor(() => {
-      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-1"] });
+      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-1"], async_sync: true });
     });
 
     await waitFor(() => {
@@ -859,11 +858,11 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
           sync_error: null,
           activity_sync_status: "synced",
           activity_sync_metadata: {
-            counts: {
-              pull_request: 12,
-              issue: 4,
-              commit: 45,
-              review: 8,
+            categories: {
+              pull_requests: { status: "synced", count: 12, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              issues: { status: "synced", count: 4, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              commits: { status: "synced", count: 45, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              reviews: { status: "synced", count: 8, last_synced_at: "2026-10-03T12:00:00Z", error: null },
             },
           },
           activity_last_synced_at: "2026-10-03T12:00:00Z",
@@ -885,10 +884,10 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
 
     expect(screen.getByTestId("activity-status-repo-1")).toHaveTextContent("Synced");
     const countsEl = screen.getByTestId("repo-counts-repo-1");
-    expect(countsEl).toHaveTextContent("pull_request: 12");
-    expect(countsEl).toHaveTextContent("issue: 4");
-    expect(countsEl).toHaveTextContent("commit: 45");
-    expect(countsEl).toHaveTextContent("review: 8");
+    expect(countsEl).toHaveTextContent("pull_requests: 12");
+    expect(countsEl).toHaveTextContent("issues: 4");
+    expect(countsEl).toHaveTextContent("commits: 45");
+    expect(countsEl).toHaveTextContent("reviews: 8");
     expect(screen.getByTestId("repo-activity-synced-at-repo-1")).toBeInTheDocument();
   });
 
@@ -952,7 +951,7 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     fireEvent.click(retryBtn);
 
     await waitFor(() => {
-      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-fail"] });
+      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-fail"], async_sync: true });
     });
   });
 
@@ -1070,6 +1069,60 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     await waitFor(() => {
       expect(screen.getByTestId("activity-item-act-1")).toBeInTheDocument();
       expect(screen.getByTestId("activity-title-act-1")).toHaveTextContent("Add feature X");
+    });
+  });
+
+  // 58. selecting category filter and then selecting 'All' removes category filter
+  it("58. selecting category filter and then selecting 'All' removes category filter", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    const getActivitiesSpy = vi.spyOn(apiClient, "getGitHubActivities").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 25,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("toggle-activities-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("toggle-activities-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("activities-drawer")).toBeInTheDocument();
+    });
+
+    // Select "issue" filter
+    const issueBtn = screen.getByTestId("activity-filter-issue");
+    fireEvent.click(issueBtn);
+
+    await waitFor(() => {
+      expect(getActivitiesSpy).toHaveBeenLastCalledWith({ activity_type: "issue", limit: 25 });
+    });
+
+    // Select "All" filter
+    const allBtn = screen.getByTestId("activity-filter-all");
+    fireEvent.click(allBtn);
+
+    await waitFor(() => {
+      expect(getActivitiesSpy).toHaveBeenLastCalledWith({ activity_type: undefined, limit: 25 });
     });
   });
 });

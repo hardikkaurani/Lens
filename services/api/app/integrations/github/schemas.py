@@ -347,7 +347,6 @@ def normalize_github_commit(data: dict[str, Any]) -> Optional[NormalizedGitHubAc
     payload = {
         "sha": external_id,
         "author_name": sanitize_string(commit_author.get("name"), 128) if isinstance(commit_author, dict) else None,
-        "author_email": sanitize_string(commit_author.get("email"), 128) if isinstance(commit_author, dict) else None,
     }
 
     return NormalizedGitHubActivity(

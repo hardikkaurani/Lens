@@ -7,6 +7,31 @@ import { formatDate } from "@/lib/format";
 import type { GitHubActivity, GitHubConnectionStatus, GitHubRepository } from "@/types/api";
 import { ErrorMessage } from "@/components/ErrorMessage";
 
+function getCategoryCounts(repo: GitHubRepository): Array<[string, number]> {
+  const meta = repo.activity_sync_metadata;
+  if (!meta || typeof meta !== "object") return [];
+
+  // Backend contract stores counts inside meta.categories[category].count
+  if (meta.categories && typeof meta.categories === "object") {
+    const entries: Array<[string, number]> = [];
+    for (const [type, data] of Object.entries(meta.categories as Record<string, { count?: number }>)) {
+      if (data && typeof data === "object" && typeof data.count === "number") {
+        entries.push([type, data.count]);
+      }
+    }
+    if (entries.length > 0) return entries;
+  }
+
+  // Fallback if direct counts dictionary is present
+  if (meta.counts && typeof meta.counts === "object") {
+    return Object.entries(meta.counts as Record<string, number>).filter(
+      ([, count]) => typeof count === "number"
+    );
+  }
+
+  return [];
+}
+
 export function SettingsContent() {
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<GitHubConnectionStatus | null>(null);
@@ -231,6 +256,7 @@ export function SettingsContent() {
     try {
       const syncRes = await apiClient.syncGitHubActivities({
         repository_ids: targetIds,
+        async_sync: true,
       });
 
       if (syncRes.status === "enqueued") {
@@ -279,8 +305,9 @@ export function SettingsContent() {
   const handleLoadActivities = async (typeFilter?: string) => {
     setIsLoadingActivities(true);
     try {
+      const filterToUse = typeFilter !== undefined ? (typeFilter || undefined) : (activityTypeFilter || undefined);
       const res = await apiClient.getGitHubActivities({
-        activity_type: typeFilter || (activityTypeFilter ? activityTypeFilter : undefined),
+        activity_type: filterToUse,
         limit: 25,
       });
       setActivities(res.items);
@@ -739,15 +766,18 @@ export function SettingsContent() {
                             </div>
                           )}
 
-                          {Boolean(repo.activity_sync_metadata?.counts) && typeof repo.activity_sync_metadata?.counts === "object" && (
-                            <div className="text-[10px] font-mono text-slate-400 flex flex-wrap items-center gap-1.5" data-testid={`repo-counts-${repo.id}`}>
-                              {Object.entries(repo.activity_sync_metadata.counts as Record<string, number>).map(([type, count]) => (
-                                <span key={type} className="bg-slate-800/90 px-1.5 py-0.5 rounded text-slate-300 border border-slate-700/50">
-                                  {type}: {String(count)}
-                                </span>
-                              ))}
-                            </div>
-                          )}
+                          {(() => {
+                            const categoryCounts = getCategoryCounts(repo);
+                            return categoryCounts.length > 0 ? (
+                              <div className="text-[10px] font-mono text-slate-400 flex flex-wrap items-center gap-1.5" data-testid={`repo-counts-${repo.id}`}>
+                                {categoryCounts.map(([type, count]) => (
+                                  <span key={type} className="bg-slate-800/90 px-1.5 py-0.5 rounded text-slate-300 border border-slate-700/50">
+                                    {type}: {String(count)}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null;
+                          })()}
 
                           {repo.activity_last_synced_at && (
                             <span className="text-[10px] text-slate-500 font-mono ml-auto" data-testid={`repo-activity-synced-at-${repo.id}`}>

@@ -526,10 +526,6 @@ class GitHubRepository(Base):
             "connection_id",
             "sync_status",
         ),
-        sa.Index(
-            "ix_github_repositories_activity_sync_status",
-            "activity_sync_status",
-        ),
     )
 
     def __repr__(self) -> str:

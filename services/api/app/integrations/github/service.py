@@ -891,6 +891,19 @@ async def update_repository_selection(
     return repo
 
 
+def _safe_activity_error(exc: Exception) -> str:
+    """Sanitize error messages exposed to API responses, DB columns, and metadata.
+
+    Exposes specific error text ONLY for trusted, sanitized client exceptions.
+    For unexpected database, ORM, network, or internal exceptions, returns
+    GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE to prevent exposing SQL statements,
+    table schemas, parameters, or internal infrastructure details.
+    """
+    if isinstance(exc, (GitHubClientError, EncryptionError)):
+        return str(exc)
+    return GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE
+
+
 async def upsert_activities(
     db: AsyncSession,
     repository_id: uuid.UUID,
@@ -904,54 +917,58 @@ async def upsert_activities(
     if not activities:
         return 0
 
-    stmt = select(GitHubActivity).where(GitHubActivity.repository_id == repository_id)
-    res = await db.execute(stmt)
-    existing_all = res.scalars().all()
-    existing_map: dict[tuple[str, str], GitHubActivity] = {
-        (act.activity_type.value, act.external_id): act for act in existing_all
-    }
+    try:
+        stmt = select(GitHubActivity).where(GitHubActivity.repository_id == repository_id)
+        res = await db.execute(stmt)
+        existing_all = res.scalars().all()
+        existing_map: dict[tuple[str, str], GitHubActivity] = {
+            (act.activity_type.value, act.external_id): act for act in existing_all
+        }
 
-    now = datetime.now(timezone.utc)
-    count = 0
-    seen_in_batch: set[tuple[str, str]] = set()
+        now = datetime.now(timezone.utc)
+        count = 0
+        seen_in_batch: set[tuple[str, str]] = set()
 
-    for item in activities:
-        key = (item.activity_type, item.external_id)
-        if key in seen_in_batch:
-            continue
-        seen_in_batch.add(key)
+        for item in activities:
+            key = (item.activity_type, item.external_id)
+            if key in seen_in_batch:
+                continue
+            seen_in_batch.add(key)
 
-        existing = existing_map.get(key)
-        if existing:
-            existing.title = item.title
-            existing.body = item.body
-            existing.html_url = item.html_url
-            existing.author_login = item.author_login
-            existing.state = item.state
-            existing.source_updated_at = item.source_updated_at
-            existing.payload = item.payload
-            existing.ingested_at = now
-        else:
-            new_act = GitHubActivity(
-                repository_id=repository_id,
-                activity_type=GitHubActivityType(item.activity_type),
-                external_id=item.external_id,
-                title=item.title,
-                body=item.body,
-                html_url=item.html_url,
-                author_login=item.author_login,
-                state=item.state,
-                source_created_at=item.source_created_at,
-                source_updated_at=item.source_updated_at,
-                ingested_at=now,
-                payload=item.payload,
-            )
-            db.add(new_act)
-            existing_map[key] = new_act
-        count += 1
+            existing = existing_map.get(key)
+            if existing:
+                existing.title = item.title
+                existing.body = item.body
+                existing.html_url = item.html_url
+                existing.author_login = item.author_login
+                existing.state = item.state
+                existing.source_updated_at = item.source_updated_at
+                existing.payload = item.payload
+                existing.ingested_at = now
+            else:
+                new_act = GitHubActivity(
+                    repository_id=repository_id,
+                    activity_type=GitHubActivityType(item.activity_type),
+                    external_id=item.external_id,
+                    title=item.title,
+                    body=item.body,
+                    html_url=item.html_url,
+                    author_login=item.author_login,
+                    state=item.state,
+                    source_created_at=item.source_created_at,
+                    source_updated_at=item.source_updated_at,
+                    ingested_at=now,
+                    payload=item.payload,
+                )
+                db.add(new_act)
+                existing_map[key] = new_act
+            count += 1
 
-    await db.commit()
-    return count
+        await db.commit()
+        return count
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def sync_repository_activities(
@@ -967,6 +984,8 @@ async def sync_repository_activities(
     settings = get_settings()
     client = github_client or get_github_client()
 
+    repo_id = repository.id
+    repo_full_name = repository.full_name
     owner = repository.owner_login
     repo_name = repository.name
     now = datetime.now(timezone.utc)
@@ -996,15 +1015,27 @@ async def sync_repository_activities(
         return since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # 1. PULL REQUESTS
-    if budget > 0:
+    is_pr_truncated = False
+    if budget <= 0:
+        is_pr_truncated = True
+        categories_status["pull_requests"] = {
+            "status": "partial",
+            "truncated": True,
+            "count": 0,
+            "last_synced_at": now.isoformat(),
+            "error": "Request budget exhausted before pull requests sync started.",
+        }
+    else:
         pr_checkpoint_str = checkpoints.get("pull_requests")
-        pr_cutoff = (parse_iso_datetime(pr_checkpoint_str) - overlap_delta) if pr_checkpoint_str else None
+        pr_parsed = parse_iso_datetime(pr_checkpoint_str) if pr_checkpoint_str else None
+        pr_cutoff = (pr_parsed - overlap_delta) if pr_parsed else None
         pr_activities: list[NormalizedGitHubActivity] = []
         max_pr_updated: Optional[datetime] = None
 
         try:
             for page in range(1, max_pages + 1):
                 if budget <= 0:
+                    is_pr_truncated = True
                     break
                 budget -= 1
 
@@ -1034,35 +1065,66 @@ async def sync_repository_activities(
 
                     pr_activities.append(norm)
 
-                if stop_pr_pagination or len(raw_prs) < page_size:
+                if stop_pr_pagination:
                     break
+                if len(raw_prs) < page_size:
+                    break
+                if page == max_pages:
+                    is_pr_truncated = True
 
             # Persist and advance checkpoint only upon success
-            synced_prs = await upsert_activities(db, repository.id, pr_activities)
+            synced_prs = await upsert_activities(db, repo_id, pr_activities)
             total_persisted_for_repo += synced_prs
 
-            if max_pr_updated:
-                checkpoints["pull_requests"] = max_pr_updated.isoformat()
-            elif not pr_checkpoint_str:
-                checkpoints["pull_requests"] = now.isoformat()
+            if is_pr_truncated:
+                categories_status["pull_requests"] = {
+                    "status": "partial",
+                    "truncated": True,
+                    "count": synced_prs,
+                    "last_synced_at": now.isoformat(),
+                    "error": None,
+                }
+            else:
+                if max_pr_updated:
+                    checkpoints["pull_requests"] = max_pr_updated.isoformat()
+                elif not pr_checkpoint_str:
+                    checkpoints["pull_requests"] = now.isoformat()
 
-            categories_status["pull_requests"] = {
-                "status": "synced",
-                "count": synced_prs,
-                "last_synced_at": now.isoformat(),
-                "error": None,
-            }
+                categories_status["pull_requests"] = {
+                    "status": "synced",
+                    "truncated": False,
+                    "count": synced_prs,
+                    "last_synced_at": now.isoformat(),
+                    "error": None,
+                }
         except Exception as exc:
-            logger.warning("Failed to sync pull requests for repo %s: %s", repository.full_name, exc)
-            category_failures["pull_requests"] = str(exc)
+            await db.rollback()
+            safe_err = _safe_activity_error(exc)
+            logger.warning("Failed to sync pull requests for repo %s: %s", repo_full_name, exc)
+            category_failures["pull_requests"] = safe_err
             categories_status["pull_requests"] = {
                 "status": "failed",
-                "error": str(exc),
+                "truncated": False,
+                "count": 0,
+                "error": safe_err,
                 "failed_at": now.isoformat(),
             }
+            refreshed = await db.get(GitHubRepository, repo_id)
+            if refreshed is not None:
+                repository = refreshed
 
     # 2. ISSUES (Excludes PRs)
-    if budget > 0:
+    is_issue_truncated = False
+    if budget <= 0:
+        is_issue_truncated = True
+        categories_status["issues"] = {
+            "status": "partial",
+            "truncated": True,
+            "count": 0,
+            "last_synced_at": now.isoformat(),
+            "error": "Request budget exhausted before issues sync started.",
+        }
+    else:
         issue_since = _format_since(checkpoints.get("issues"))
         issue_activities: list[NormalizedGitHubActivity] = []
         max_issue_updated: Optional[datetime] = None
@@ -1070,6 +1132,7 @@ async def sync_repository_activities(
         try:
             for page in range(1, max_pages + 1):
                 if budget <= 0:
+                    is_issue_truncated = True
                     break
                 budget -= 1
 
@@ -1078,6 +1141,8 @@ async def sync_repository_activities(
                     owner=owner,
                     repo=repo_name,
                     since=issue_since,
+                    sort="updated",
+                    direction="asc",
                     page=page,
                     per_page=page_size,
                 )
@@ -1095,32 +1160,54 @@ async def sync_repository_activities(
 
                 if len(raw_issues) < page_size:
                     break
+                if page == max_pages:
+                    is_issue_truncated = True
 
-            synced_issues = await upsert_activities(db, repository.id, issue_activities)
+            synced_issues = await upsert_activities(db, repo_id, issue_activities)
             total_persisted_for_repo += synced_issues
 
+            # Because issues are fetched in ascending update-time order with since,
+            # max_issue_updated safely advances the checkpoint to the frontier fetched so far.
             if max_issue_updated:
                 checkpoints["issues"] = max_issue_updated.isoformat()
             elif not checkpoints.get("issues"):
                 checkpoints["issues"] = now.isoformat()
 
             categories_status["issues"] = {
-                "status": "synced",
+                "status": "partial" if is_issue_truncated else "synced",
+                "truncated": is_issue_truncated,
                 "count": synced_issues,
                 "last_synced_at": now.isoformat(),
                 "error": None,
             }
         except Exception as exc:
-            logger.warning("Failed to sync issues for repo %s: %s", repository.full_name, exc)
-            category_failures["issues"] = str(exc)
+            await db.rollback()
+            safe_err = _safe_activity_error(exc)
+            logger.warning("Failed to sync issues for repo %s: %s", repo_full_name, exc)
+            category_failures["issues"] = safe_err
             categories_status["issues"] = {
                 "status": "failed",
-                "error": str(exc),
+                "truncated": False,
+                "count": 0,
+                "error": safe_err,
                 "failed_at": now.isoformat(),
             }
+            refreshed = await db.get(GitHubRepository, repo_id)
+            if refreshed is not None:
+                repository = refreshed
 
     # 3. COMMITS
-    if budget > 0:
+    is_commit_truncated = False
+    if budget <= 0:
+        is_commit_truncated = True
+        categories_status["commits"] = {
+            "status": "partial",
+            "truncated": True,
+            "count": 0,
+            "last_synced_at": now.isoformat(),
+            "error": "Request budget exhausted before commits sync started.",
+        }
+    else:
         commit_since = _format_since(checkpoints.get("commits"))
         commit_activities: list[NormalizedGitHubActivity] = []
         max_commit_date: Optional[datetime] = None
@@ -1128,6 +1215,7 @@ async def sync_repository_activities(
         try:
             for page in range(1, max_pages + 1):
                 if budget <= 0:
+                    is_commit_truncated = True
                     break
                 budget -= 1
 
@@ -1153,39 +1241,73 @@ async def sync_repository_activities(
 
                 if len(raw_commits) < page_size:
                     break
+                if page == max_pages:
+                    is_commit_truncated = True
 
-            synced_commits = await upsert_activities(db, repository.id, commit_activities)
+            synced_commits = await upsert_activities(db, repo_id, commit_activities)
             total_persisted_for_repo += synced_commits
 
-            if max_commit_date:
-                checkpoints["commits"] = max_commit_date.isoformat()
-            elif not checkpoints.get("commits"):
-                checkpoints["commits"] = now.isoformat()
+            if is_commit_truncated:
+                # Commits are in reverse DAG order (newest first). If pagination truncated
+                # before reaching commit_since or the end, do not advance checkpoint past unfetched commits.
+                categories_status["commits"] = {
+                    "status": "partial",
+                    "truncated": True,
+                    "count": synced_commits,
+                    "last_synced_at": now.isoformat(),
+                    "error": None,
+                }
+            else:
+                if max_commit_date:
+                    checkpoints["commits"] = max_commit_date.isoformat()
+                elif not checkpoints.get("commits"):
+                    checkpoints["commits"] = now.isoformat()
 
-            categories_status["commits"] = {
-                "status": "synced",
-                "count": synced_commits,
-                "last_synced_at": now.isoformat(),
-                "error": None,
-            }
+                categories_status["commits"] = {
+                    "status": "synced",
+                    "truncated": False,
+                    "count": synced_commits,
+                    "last_synced_at": now.isoformat(),
+                    "error": None,
+                }
         except Exception as exc:
-            logger.warning("Failed to sync commits for repo %s: %s", repository.full_name, exc)
-            category_failures["commits"] = str(exc)
+            await db.rollback()
+            safe_err = _safe_activity_error(exc)
+            logger.warning("Failed to sync commits for repo %s: %s", repo_full_name, exc)
+            category_failures["commits"] = safe_err
             categories_status["commits"] = {
                 "status": "failed",
-                "error": str(exc),
+                "truncated": False,
+                "count": 0,
+                "error": safe_err,
                 "failed_at": now.isoformat(),
             }
+            refreshed = await db.get(GitHubRepository, repo_id)
+            if refreshed is not None:
+                repository = refreshed
 
     # 4. REVIEWS (for PRs fetched in this batch)
-    if budget > 0 and processed_pr_numbers:
+    is_review_truncated = False
+    if budget <= 0 and processed_pr_numbers:
+        is_review_truncated = True
+        categories_status["reviews"] = {
+            "status": "partial",
+            "truncated": True,
+            "count": 0,
+            "last_synced_at": now.isoformat(),
+            "error": "Request budget exhausted before reviews sync started.",
+        }
+    elif processed_pr_numbers:
         review_activities: list[NormalizedGitHubActivity] = []
         max_prs_to_review = settings.GITHUB_ACTIVITY_MAX_PRS_FOR_REVIEWS
         prs_to_inspect = processed_pr_numbers[:max_prs_to_review]
+        if len(processed_pr_numbers) > max_prs_to_review:
+            is_review_truncated = True
 
         try:
             for pr_num in prs_to_inspect:
                 if budget <= 0:
+                    is_review_truncated = True
                     break
                 budget -= 1
 
@@ -1205,50 +1327,89 @@ async def sync_repository_activities(
                     if norm:
                         review_activities.append(norm)
 
-            synced_reviews = await upsert_activities(db, repository.id, review_activities)
+            synced_reviews = await upsert_activities(db, repo_id, review_activities)
             total_persisted_for_repo += synced_reviews
 
             categories_status["reviews"] = {
-                "status": "synced",
+                "status": "partial" if is_review_truncated else "synced",
+                "truncated": is_review_truncated,
                 "count": synced_reviews,
                 "last_synced_at": now.isoformat(),
                 "error": None,
             }
         except Exception as exc:
-            logger.warning("Failed to sync reviews for repo %s: %s", repository.full_name, exc)
-            category_failures["reviews"] = str(exc)
+            await db.rollback()
+            safe_err = _safe_activity_error(exc)
+            logger.warning("Failed to sync reviews for repo %s: %s", repo_full_name, exc)
+            category_failures["reviews"] = safe_err
             categories_status["reviews"] = {
                 "status": "failed",
-                "error": str(exc),
+                "truncated": False,
+                "count": 0,
+                "error": safe_err,
                 "failed_at": now.isoformat(),
             }
+            refreshed = await db.get(GitHubRepository, repo_id)
+            if refreshed is not None:
+                repository = refreshed
+    else:
+        categories_status["reviews"] = {
+            "status": "synced",
+            "truncated": False,
+            "count": 0,
+            "last_synced_at": now.isoformat(),
+            "error": None,
+        }
 
     # Compute repository sync status
     total_cats = len(categories_status)
     failed_cats = len(category_failures)
-    if failed_cats == 0:
-        repo_status = "synced"
-        err_msg = None
-    elif failed_cats < total_cats:
-        repo_status = "partial"
-        err_msg = f"Partial failure in categories: {', '.join(category_failures.keys())}"
-    else:
+    truncated_cats = [
+        cat for cat, st in categories_status.items()
+        if isinstance(st, dict) and st.get("truncated") is True
+    ]
+
+    if failed_cats == total_cats and total_cats > 0:
         repo_status = "failed"
         err_msg = f"Failed categories: {', '.join(category_failures.keys())}"
+    elif failed_cats > 0:
+        repo_status = "partial"
+        err_msg = f"Partial failure in categories: {', '.join(category_failures.keys())}"
+        if truncated_cats:
+            err_msg += f"; truncated categories: {', '.join(truncated_cats)}"
+    elif truncated_cats:
+        repo_status = "partial"
+        err_msg = f"Sync partially completed due to pagination or budget limits in: {', '.join(truncated_cats)}"
+    else:
+        repo_status = "synced"
+        err_msg = None
 
     # Update repository record
-    repository.activity_sync_status = repo_status
-    repository.activity_sync_error = err_msg
-    repository.activity_last_synced_at = now
-    meta["checkpoints"] = checkpoints
-    meta["categories"] = categories_status
-    repository.activity_sync_metadata = meta
-    flag_modified(repository, "activity_sync_metadata")
-    await db.commit()
+    try:
+        refreshed = await db.get(GitHubRepository, repo_id)
+        if refreshed is not None:
+            repository = refreshed
+        repository.activity_sync_status = repo_status
+        repository.activity_sync_error = err_msg
+        repository.activity_last_synced_at = now
+        meta["checkpoints"] = checkpoints
+        meta["categories"] = categories_status
+        meta["counts"] = {
+            cat: data.get("count", 0)
+            for cat, data in categories_status.items()
+            if isinstance(data, dict)
+        }
+        repository.activity_sync_metadata = meta
+        flag_modified(repository, "activity_sync_metadata")
+        await db.commit()
+    except Exception as save_exc:
+        await db.rollback()
+        logger.exception("Failed to persist activity sync status for repo %s: %s", repo_full_name, save_exc)
+        raise
 
     return {
-        "repository_id": str(repository.id),
-        "full_name": repository.full_name,
+        "repository_id": str(repo_id),
+        "full_name": repo_full_name,
         "status": repo_status,
         "synced_activities": total_persisted_for_repo,
         "error": err_msg,
@@ -1314,10 +1475,16 @@ async def sync_selected_repositories_activities(
     has_successes = False
 
     for repo in repositories:
+        cur_repo_id = repo.id
+        cur_repo_full_name = repo.full_name
         try:
             repo.activity_sync_status = "syncing"
             await db.commit()
+        except Exception as start_exc:
+            await db.rollback()
+            logger.error("Failed to set syncing status on repo %s: %s", cur_repo_full_name, start_exc)
 
+        try:
             repo_res = await sync_repository_activities(
                 db=db,
                 connection=connection,
@@ -1325,7 +1492,7 @@ async def sync_selected_repositories_activities(
                 access_token=access_token,
                 github_client=github_client,
             )
-            results_breakdown[repo.full_name] = repo_res
+            results_breakdown[cur_repo_full_name] = repo_res
             total_activities += repo_res.get("synced_activities", 0)
 
             if repo_res.get("status") in ("synced", "partial"):
@@ -1334,16 +1501,24 @@ async def sync_selected_repositories_activities(
             if repo_res.get("status") in ("failed", "partial"):
                 has_failures = True
         except Exception as repo_exc:
-            logger.exception("Unexpected error syncing activities for repo %s: %s", repo.full_name, repo_exc)
+            await db.rollback()
+            logger.exception("Unexpected error syncing activities for repo %s: %s", cur_repo_full_name, repo_exc)
             has_failures = True
-            repo.activity_sync_status = "failed"
-            repo.activity_sync_error = str(repo_exc)
-            await db.commit()
-            results_breakdown[repo.full_name] = {
-                "repository_id": str(repo.id),
-                "full_name": repo.full_name,
+            safe_msg = _safe_activity_error(repo_exc)
+            refreshed_repo = await db.get(GitHubRepository, cur_repo_id)
+            if refreshed_repo:
+                refreshed_repo.activity_sync_status = "failed"
+                refreshed_repo.activity_sync_error = safe_msg
+                try:
+                    await db.commit()
+                except Exception as commit_exc:
+                    await db.rollback()
+                    logger.error("Failed to persist failed repository status: %s", commit_exc)
+            results_breakdown[cur_repo_full_name] = {
+                "repository_id": str(cur_repo_id),
+                "full_name": cur_repo_full_name,
                 "status": "failed",
-                "error": str(repo_exc),
+                "error": safe_msg,
             }
 
     finish_time = datetime.now(timezone.utc)
@@ -1367,7 +1542,11 @@ async def sync_selected_repositories_activities(
     }
     connection.token_metadata = token_meta
     flag_modified(connection, "token_metadata")
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception as conn_commit_exc:
+        await db.rollback()
+        logger.error("Failed to commit connection activity sync metadata: %s", conn_commit_exc)
 
     return {
         "status": overall_status,
