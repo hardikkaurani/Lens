@@ -39,7 +39,7 @@ class SearchResultChunk {
   }
 }
 
-/// Grouped capture search result containing matching chunks.
+/// Grouped capture or GitHub activity search result containing matching chunks.
 class SearchResultCapture {
   final String captureId;
   final String? title;
@@ -49,6 +49,12 @@ class SearchResultCapture {
   final double? bestLexicalScore;
   final double? bestSemanticScore;
   final List<SearchResultChunk> matchingChunks;
+  final String? resultKind;
+  final String? activityType;
+  final String? repositoryName;
+  final String? authorLogin;
+  final String? state;
+  final String? externalId;
 
   const SearchResultCapture({
     required this.captureId,
@@ -59,7 +65,17 @@ class SearchResultCapture {
     this.bestLexicalScore,
     this.bestSemanticScore,
     this.matchingChunks = const [],
+    this.resultKind,
+    this.activityType,
+    this.repositoryName,
+    this.authorLogin,
+    this.state,
+    this.externalId,
   });
+
+  bool get isGitHubActivity =>
+      resultKind == 'github_activity' ||
+      const ['pull_request', 'issue', 'commit', 'review', 'github'].contains(sourceType.toLowerCase());
 
   String get displayTitle {
     if (title != null && title!.trim().isNotEmpty) {
@@ -67,6 +83,9 @@ class SearchResultCapture {
     }
     if (originalUrl != null && originalUrl!.trim().isNotEmpty) {
       return originalUrl!.trim();
+    }
+    if (isGitHubActivity) {
+      return 'GitHub Activity';
     }
     return 'Untitled Capture';
   }
@@ -85,6 +104,12 @@ class SearchResultCapture {
           .whereType<Map<String, dynamic>>()
           .map((c) => SearchResultChunk.fromJson(c))
           .toList(),
+      resultKind: json['result_kind']?.toString(),
+      activityType: json['activity_type']?.toString(),
+      repositoryName: json['repository_name']?.toString(),
+      authorLogin: json['author_login']?.toString(),
+      state: json['state']?.toString(),
+      externalId: json['external_id']?.toString(),
     );
   }
 
@@ -98,6 +123,12 @@ class SearchResultCapture {
       if (bestLexicalScore != null) 'best_lexical_score': bestLexicalScore,
       if (bestSemanticScore != null) 'best_semantic_score': bestSemanticScore,
       'matching_chunks': matchingChunks.map((c) => c.toJson()).toList(),
+      if (resultKind != null) 'result_kind': resultKind,
+      if (activityType != null) 'activity_type': activityType,
+      if (repositoryName != null) 'repository_name': repositoryName,
+      if (authorLogin != null) 'author_login': authorLogin,
+      if (state != null) 'state': state,
+      if (externalId != null) 'external_id': externalId,
     };
   }
 }
@@ -108,6 +139,7 @@ class SearchResponse {
   final int total;
   final int limit;
   final bool degraded;
+  final String? sourceFilter;
   final List<SearchResultCapture> results;
 
   const SearchResponse({
@@ -115,6 +147,7 @@ class SearchResponse {
     required this.total,
     required this.limit,
     this.degraded = false,
+    this.sourceFilter,
     required this.results,
   });
 
@@ -125,6 +158,7 @@ class SearchResponse {
       total: (json['total'] as num?)?.toInt() ?? 0,
       limit: (json['limit'] as num?)?.toInt() ?? 20,
       degraded: json['degraded'] as bool? ?? false,
+      sourceFilter: json['source_filter'] as String?,
       results: rawResults
           .whereType<Map<String, dynamic>>()
           .map((r) => SearchResultCapture.fromJson(r))

@@ -47,6 +47,30 @@ class SearchResultCapture(BaseModel):
         default_factory=list,
         description="Ordered list of matching chunks for this capture.",
     )
+    result_kind: str = Field(
+        default="capture",
+        description="Discriminator identifying the result category: 'capture' or 'github_activity'.",
+    )
+    activity_type: Optional[str] = Field(
+        default=None,
+        description="GitHub activity entity type (e.g. 'pull_request', 'issue', 'commit', 'review') if applicable.",
+    )
+    repository_name: Optional[str] = Field(
+        default=None,
+        description="GitHub repository full name (e.g. 'octocat/Hello-World') if applicable.",
+    )
+    author_login: Optional[str] = Field(
+        default=None,
+        description="GitHub author login username if applicable.",
+    )
+    state: Optional[str] = Field(
+        default=None,
+        description="GitHub activity state (e.g. 'open', 'closed', 'merged') if applicable.",
+    )
+    external_id: Optional[str] = Field(
+        default=None,
+        description="External identifier (PR/issue number or commit SHA) if applicable.",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -55,13 +79,17 @@ class SearchResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     query: str = Field(..., description="The sanitized query string that was executed.")
-    total: int = Field(..., description="Total number of distinct matching capture results.")
+    total: int = Field(..., description="Total number of distinct matching results evaluated.")
     limit: int = Field(..., description="Result limit applied to this search.")
     degraded: bool = Field(
         default=False,
         description="True if semantic search was unavailable and results are lexical-only.",
     )
+    source_filter: Optional[str] = Field(
+        default=None,
+        description="Validated source type filter applied to this search query, or None for all sources.",
+    )
     results: list[SearchResultCapture] = Field(
         default_factory=list,
-        description="Ranked and grouped capture search results.",
+        description="Ranked and grouped search results across captures and GitHub activities.",
     )

@@ -11,13 +11,42 @@ import { LoadingListSkeleton } from "@/components/LoadingSkeleton";
 import { formatScorePercentage } from "@/lib/format";
 import { sanitizeUrl } from "@/lib/security";
 
+const FILTER_OPTIONS = [
+  { id: "all", label: "All Sources" },
+  { id: "captures", label: "Captures" },
+  { id: "text", label: "Notes" },
+  { id: "url", label: "Web Links" },
+  { id: "pdf", label: "PDFs" },
+  { id: "github", label: "GitHub" },
+  { id: "pull_request", label: "PRs" },
+  { id: "issue", label: "Issues" },
+  { id: "commit", label: "Commits" },
+];
+
 function SearchContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialQuery = searchParams.get("q") || "";
+  const initialSourceType = searchParams.get("source_type") || "all";
 
   const [inputVal, setInputVal] = useState<string>(initialQuery);
   const [activeQuery, setActiveQuery] = useState<string>(initialQuery);
+  const [selectedFilter, setSelectedFilter] = useState<string>(initialSourceType);
+  const [prevQuery, setPrevQuery] = useState<string>(initialQuery);
+  const [prevSourceType, setPrevSourceType] = useState<string>(initialSourceType);
+
+  // Synchronize local input, active query, and filter states from URL search params during render
+  if (prevQuery !== initialQuery) {
+    setPrevQuery(initialQuery);
+    setInputVal(initialQuery);
+    setActiveQuery(initialQuery);
+  }
+
+  if (prevSourceType !== initialSourceType) {
+    setPrevSourceType(initialSourceType);
+    setSelectedFilter(initialSourceType);
+  }
+
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,13 +54,15 @@ function SearchContent() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const latestRequestIdRef = useRef<number>(0);
 
-  const executeSearch = useCallback(async (query: string) => {
+  const executeSearch = useCallback(async (query: string, filter?: string) => {
     const trimmed = query.trim();
     if (!trimmed) {
       setResponse(null);
       setError(null);
       return;
     }
+
+    const currentFilter = filter !== undefined ? filter : selectedFilter;
 
     // Cancel in-flight requests to prevent stale results
     if (abortControllerRef.current) {
@@ -49,6 +80,7 @@ function SearchContent() {
       const data = await apiClient.search({
         q: trimmed,
         limit: 20,
+        source_type: currentFilter === "all" ? undefined : currentFilter,
         signal: controller.signal,
       });
 
@@ -72,16 +104,37 @@ function SearchContent() {
         setLoading(false);
       }
     }
-  }, []);
+  }, [selectedFilter]);
 
-  // Sync with URL query on initial load or URL change
+  // Fetch search results when URL query or filter changes
   useEffect(() => {
-    if (!initialQuery) return;
+    // If query is empty, cancel any pending requests and clear stale results
+    if (!initialQuery.trim()) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      latestRequestIdRef.current++;
+      setResponse(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     const controller = new AbortController();
+    abortControllerRef.current = controller;
     const requestId = ++latestRequestIdRef.current;
+    setLoading(true);
 
     apiClient
-      .search({ q: initialQuery, limit: 20, signal: controller.signal })
+      .search({
+        q: initialQuery.trim(),
+        limit: 20,
+        source_type: initialSourceType === "all" ? undefined : initialSourceType,
+        signal: controller.signal,
+      })
       .then((data) => {
         if (requestId === latestRequestIdRef.current) {
           setResponse(data);
@@ -102,7 +155,7 @@ function SearchContent() {
     return () => {
       controller.abort();
     };
-  }, [initialQuery]);
+  }, [initialQuery, initialSourceType]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -110,8 +163,19 @@ function SearchContent() {
     if (!trimmed) return;
 
     setActiveQuery(trimmed);
-    router.push(`/search?q=${encodeURIComponent(trimmed)}`);
-    executeSearch(trimmed);
+    const filterParam = selectedFilter !== "all" ? `&source_type=${encodeURIComponent(selectedFilter)}` : "";
+    router.push(`/search?q=${encodeURIComponent(trimmed)}${filterParam}`);
+    executeSearch(trimmed, selectedFilter);
+  };
+
+  const handleFilterSelect = (filterId: string) => {
+    setSelectedFilter(filterId);
+    const queryToUse = activeQuery.trim() || inputVal.trim();
+    if (queryToUse) {
+      const filterParam = filterId !== "all" ? `&source_type=${encodeURIComponent(filterId)}` : "";
+      router.push(`/search?q=${encodeURIComponent(queryToUse)}${filterParam}`);
+      executeSearch(queryToUse, filterId);
+    }
   };
 
   return (
@@ -120,7 +184,7 @@ function SearchContent() {
       <div className="pb-4 border-b border-white/10">
         <h1 className="text-2xl font-bold tracking-tight text-white">Search Knowledge Base</h1>
         <p className="text-sm text-slate-400 mt-1">
-          Unified hybrid retrieval combining PostgreSQL full-text search with pgvector semantic similarity.
+          Unified knowledge retrieval combining captured items (notes, links, PDFs) and ingested GitHub activities (PRs, issues, commits, reviews).
         </p>
       </div>
 
@@ -131,7 +195,7 @@ function SearchContent() {
             type="search"
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
-            placeholder="Search concepts, code, links, notes (e.g. 'fastapi async pool')..."
+            placeholder="Search concepts, code, links, notes, PRs, commits (e.g. 'fastapi async pool')..."
             className="lens-input pl-10 pr-4 py-3 text-sm rounded-xl"
             autoFocus
           />
@@ -165,6 +229,30 @@ function SearchContent() {
         </button>
       </form>
 
+      {/* Source Category Filter Pills */}
+      <div className="flex flex-wrap items-center gap-1.5" data-testid="search-filter-pills">
+        <span className="text-xs text-slate-400 mr-1 font-mono">Filter:</span>
+        {FILTER_OPTIONS.map((opt) => {
+          const isSelected = selectedFilter === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => handleFilterSelect(opt.id)}
+              aria-pressed={isSelected}
+              className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                isSelected
+                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-500/20"
+                  : "bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700/80 border border-slate-700/50"
+              }`}
+              data-testid={`filter-btn-${opt.id}`}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Degraded Search Warning Banner */}
       {response?.degraded && (
         <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2.5">
@@ -172,13 +260,13 @@ function SearchContent() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <span>
-            Semantic search is temporarily running in degraded mode; showing lexical full-text results.
+            Semantic search is temporarily running in degraded mode; showing lexical full-text results across captures and activities.
           </span>
         </div>
       )}
 
       {/* Error State */}
-      {error && <ErrorMessage message={error} onRetry={() => executeSearch(activeQuery)} />}
+      {error && <ErrorMessage message={error} onRetry={() => executeSearch(activeQuery, selectedFilter)} />}
 
       {/* Loading Skeleton */}
       {loading && <LoadingListSkeleton count={3} />}
@@ -203,7 +291,7 @@ function SearchContent() {
           </div>
           <h3 className="text-sm font-semibold text-white">No matching captures found</h3>
           <p className="text-xs text-slate-400 max-w-sm mx-auto">
-            We couldn&apos;t find any content or titles matching &quot;{response.query}&quot;. Try different keywords or conceptual terms.
+            We couldn&apos;t find any content matching &quot;{response.query}&quot;. Try different keywords or conceptual terms.
           </p>
         </div>
       )}
@@ -213,13 +301,17 @@ function SearchContent() {
         <div className="space-y-4" data-testid="search-results">
           <div className="flex items-center justify-between text-xs text-slate-400 px-1 font-mono">
             <span>
-              Found {response.total} capture{response.total === 1 ? "" : "s"} for &quot;{response.query}&quot;
+              Found {response.total} result{response.total === 1 ? "" : "s"} for &quot;{response.query}&quot;
+              {response.source_filter && ` (${response.source_filter})`}
             </span>
           </div>
 
           {response.results.map((res) => {
+            const isGitHub =
+              res.result_kind === "github_activity" ||
+              ["pull_request", "issue", "commit", "review"].includes(res.source_type);
             const safeUrl = sanitizeUrl(res.original_url);
-            const titleDisplay = res.title?.trim() || res.original_url || "Untitled Note";
+            const titleDisplay = res.title?.trim() || res.original_url || (isGitHub ? "Untitled Activity" : "Untitled Note");
 
             return (
               <div
@@ -231,6 +323,29 @@ function SearchContent() {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <SourceTypeBadge sourceType={res.source_type} />
+                    {res.repository_name && (
+                      <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                        {res.repository_name}
+                      </span>
+                    )}
+                    {res.state && (
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                          res.state === "open"
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                            : res.state === "merged"
+                            ? "bg-purple-500/10 text-purple-400 border-purple-500/20"
+                            : "bg-slate-800 text-slate-400 border-slate-700"
+                        }`}
+                      >
+                        {res.state.toUpperCase()}
+                      </span>
+                    )}
+                    {res.author_login && (
+                      <span className="text-[11px] font-mono text-slate-400">
+                        @{res.author_login}
+                      </span>
+                    )}
                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                       Relevance: {formatScorePercentage(res.best_score)}
                     </span>
@@ -246,23 +361,53 @@ function SearchContent() {
                     )}
                   </div>
 
-                  <Link
-                    href={`/captures/${res.capture_id}`}
-                    className="text-xs text-indigo-400 hover:text-indigo-300 font-medium self-start sm:self-auto flex items-center gap-1"
-                  >
-                    <span>Inspect Capture</span>
-                    <span>→</span>
-                  </Link>
+                  {isGitHub ? (
+                    safeUrl ? (
+                      <a
+                        href={safeUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-cyan-400 hover:text-cyan-300 font-medium self-start sm:self-auto flex items-center gap-1 font-mono"
+                        data-testid={`inspect-github-${res.capture_id}`}
+                      >
+                        <span>View on GitHub</span>
+                        <span>↗</span>
+                      </a>
+                    ) : (
+                      <span className="text-xs text-slate-500 font-mono">GitHub Activity</span>
+                    )
+                  ) : (
+                    <Link
+                      href={`/captures/${res.capture_id}`}
+                      className="text-xs text-indigo-400 hover:text-indigo-300 font-medium self-start sm:self-auto flex items-center gap-1"
+                    >
+                      <span>Inspect Capture</span>
+                      <span>→</span>
+                    </Link>
+                  )}
                 </div>
 
                 {/* Title */}
                 <h3 className="text-base font-semibold text-white group-hover:text-indigo-300 transition-colors">
-                  <Link href={`/captures/${res.capture_id}`}>
-                    {titleDisplay}
-                  </Link>
+                  {isGitHub && safeUrl ? (
+                    <a
+                      href={safeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                    >
+                      {titleDisplay}
+                    </a>
+                  ) : isGitHub ? (
+                    <span>{titleDisplay}</span>
+                  ) : (
+                    <Link href={`/captures/${res.capture_id}`}>
+                      {titleDisplay}
+                    </Link>
+                  )}
                 </h3>
 
-                {safeUrl && (
+                {safeUrl && !isGitHub && (
                   <p className="text-xs text-slate-400 font-mono truncate">
                     <a
                       href={safeUrl}
@@ -275,7 +420,7 @@ function SearchContent() {
                   </p>
                 )}
 
-                {/* Matching Chunks */}
+                {/* Matching Chunks / Excerpt */}
                 {res.matching_chunks && res.matching_chunks.length > 0 && (
                   <div className="space-y-2 pt-1 border-t border-white/5">
                     {res.matching_chunks.map((chunk) => (
@@ -284,7 +429,9 @@ function SearchContent() {
                         className="p-3 rounded-lg bg-[#0d121e] border border-white/5 text-xs text-slate-300/90 leading-relaxed font-sans"
                       >
                         <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pb-1 mb-1 border-b border-white/5">
-                          <span>Chunk #{chunk.chunk_index + 1} match</span>
+                          <span>
+                            {isGitHub ? "Activity snippet" : `Chunk #${chunk.chunk_index + 1} match`}
+                          </span>
                           <div className="flex gap-2">
                             <span>Score: {formatScorePercentage(chunk.score)}</span>
                             {chunk.lexical_score !== null && <span>Lex: {formatScorePercentage(chunk.lexical_score)}</span>}

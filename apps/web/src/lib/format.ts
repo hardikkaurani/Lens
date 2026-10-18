@@ -29,6 +29,14 @@ export function formatSourceType(sourceType: SourceType | string): string {
       return "Note / Text";
     case "github":
       return "GitHub";
+    case "pull_request":
+      return "Pull Request";
+    case "issue":
+      return "Issue";
+    case "commit":
+      return "Commit";
+    case "review":
+      return "Review";
     case "pdf":
       return "PDF Document";
     case "image":
