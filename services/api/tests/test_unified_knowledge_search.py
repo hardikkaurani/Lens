@@ -23,6 +23,7 @@ import uuid
 import httpx
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Ensure services/api and services/worker are in sys.path
 api_path = str(Path(__file__).resolve().parents[1])
@@ -129,6 +130,13 @@ async def prepare_test_env() -> None:
     test_provider = DeterministicTestEmbeddingProvider(dimension=1536)
     set_embedding_provider_override(test_provider)
     await clean_database()
+
+
+@pytest.fixture(autouse=True)
+def _reset_provider_override():
+    """Ensure process-global embedding provider override is reset after each test."""
+    yield
+    reset_embedding_provider_override()
 
 
 @pytest.mark.asyncio
@@ -612,3 +620,206 @@ async def test_unified_search_deterministic_tie_breaking() -> None:
         order1 = [r["capture_id"] for r in r1.json()["results"]]
         order2 = [r["capture_id"] for r in r2.json()["results"]]
         assert order1 == order2, "Repeated queries must yield identical ordering"
+
+
+@pytest.mark.asyncio
+async def test_unified_search_sql_wildcards_treated_literally() -> None:
+    """Finding G: % and _ in query are treated literally rather than as wildcard matches."""
+    await prepare_test_env()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, full_name="wildcard/repo")
+
+    async with AsyncSessionLocal() as session:
+        # act1 contains literal '%' and '_'
+        act1 = GitHubActivity(
+            repository_id=repo_id,
+            activity_type=GitHubActivityType.ISSUE,
+            external_id="100",
+            title="Special 100% discount promotion",
+            body="Promotion details for user_name discount.",
+            author_login="user_name",
+            html_url="https://github.com/wildcard/repo/issues/100",
+            payload={},
+        )
+        # act2 does NOT contain '%' or '_', but would match if % or _ were wildcards
+        act2 = GitHubActivity(
+            repository_id=repo_id,
+            activity_type=GitHubActivityType.ISSUE,
+            external_id="200",
+            title="Regular 1000 discount promotion",
+            body="Promotion details for username discount.",
+            author_login="username",
+            html_url="https://github.com/wildcard/repo/issues/200",
+            payload={},
+        )
+        session.add_all([act1, act2])
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Querying "100%" must match act1 ("100%"), but NOT act2 ("1000")
+        resp_pct = await client.get("/search", params={"q": "100%"})
+        assert resp_pct.status_code == 200
+        results_pct = resp_pct.json()["results"]
+        assert len(results_pct) == 1
+        assert results_pct[0]["external_id"] == "100"
+
+        # Querying "user_name" must match act1 ("user_name"), but NOT act2 ("username")
+        resp_us = await client.get("/search", params={"q": "user_name"})
+        assert resp_us.status_code == 200
+        results_us = resp_us.json()["results"]
+        assert len(results_us) == 1
+        assert results_us[0]["external_id"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_unified_search_transaction_savepoint_isolation_and_distinct_degradation() -> None:
+    """Findings H & I: When GitHub activity retrieval fails, capture results are still returned, savepoint rolls back safely, and degraded remains False if vector search succeeded."""
+    await prepare_test_env()
+
+    # Ingest a healthy capture with chunk and vector embedding
+    test_provider = DeterministicTestEmbeddingProvider(dimension=1536)
+    embedding = await test_provider.embed_text("PostgreSQL transaction savepoints and recovery")
+
+    async with AsyncSessionLocal() as session:
+        cap = Capture(
+            source_type=SourceType.TEXT,
+            title="PostgreSQL Savepoints Guide",
+            content="PostgreSQL transaction savepoints and recovery guide.",
+        )
+        session.add(cap)
+        await session.commit()
+        await session.refresh(cap)
+
+        chunk = ContentChunk(
+            capture_id=cap.id,
+            chunk_index=0,
+            content="PostgreSQL transaction savepoints and recovery guide.",
+            embedding=embedding,
+        )
+        session.add(chunk)
+        await session.commit()
+
+    # Ingest a GitHub activity
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, full_name="savepoint/repo")
+    async with AsyncSessionLocal() as session:
+        act = GitHubActivity(
+            repository_id=repo_id,
+            activity_type=GitHubActivityType.PULL_REQUEST,
+            external_id="15",
+            title="PR 15: PostgreSQL transaction improvements",
+            body="Improves transaction robustness.",
+            html_url="https://github.com/savepoint/repo/pull/15",
+            payload={},
+        )
+        session.add(act)
+        await session.commit()
+
+    # Execute a search where we monkeypatch GitHub activity retrieval to simulate an SQL error
+    from app.search.service import SearchService
+    search_service = SearchService()
+
+    real_execute = AsyncSession.execute
+
+    async def faulty_execute(self_session, statement, params=None, *args, **kwargs):
+        # Fail specifically if it's the GitHub query
+        sql_str = str(statement)
+        if "github_activities" in sql_str:
+            raise RuntimeError("Simulated PostgreSQL statement failure in GitHub activity query")
+        return await real_execute(self_session, statement, params, *args, **kwargs)
+
+    async with AsyncSessionLocal() as session:
+        import unittest.mock as mock
+        with mock.patch.object(AsyncSession, "execute", faulty_execute):
+            search_res = await search_service.search(
+                query="savepoints",
+                session=session,
+                embedding_provider=test_provider,
+            )
+
+        # Captures are returned successfully!
+        assert search_res.total == 1
+        assert search_res.results[0].result_kind == "capture"
+        assert search_res.results[0].title == "PostgreSQL Savepoints Guide"
+        # Finding I: degraded is False because embedding/vector search succeeded!
+        assert search_res.degraded is False
+        assert search_res.results[0].best_semantic_score is not None
+
+
+@pytest.mark.asyncio
+async def test_unified_search_calibrated_cross_source_ranking() -> None:
+    """Finding J: Comparable capture and PR rank near each other; repository name match alone receives a bounded modest score."""
+    await prepare_test_env()
+    test_provider = DeterministicTestEmbeddingProvider(dimension=1536)
+
+    # 1. Capture on "Connection Pooling" with high lexical and semantic match
+    cap_embed = await test_provider.embed_text("Database Connection Pooling architecture")
+    async with AsyncSessionLocal() as session:
+        cap = Capture(
+            source_type=SourceType.TEXT,
+            title="Database Connection Pooling Architecture",
+            content="Database Connection Pooling architecture and pool sizing.",
+        )
+        session.add(cap)
+        await session.commit()
+        await session.refresh(cap)
+
+        chunk = ContentChunk(
+            capture_id=cap.id,
+            chunk_index=0,
+            content="Database Connection Pooling architecture and pool sizing.",
+            embedding=cap_embed,
+        )
+        session.add(chunk)
+        await session.commit()
+
+    # 2. GitHub PR with high title and body match on "Connection Pooling"
+    conn_id = await create_test_connection()
+    repo1_id = await create_test_repository(conn_id, full_name="octocat/backend-service")
+    async with AsyncSessionLocal() as session:
+        pr = GitHubActivity(
+            repository_id=repo1_id,
+            activity_type=GitHubActivityType.PULL_REQUEST,
+            external_id="88",
+            title="Fix Database Connection Pooling bug",
+            body="Resolves Database Connection Pooling timeout and connection leaks.",
+            html_url="https://github.com/octocat/backend-service/pull/88",
+            payload={},
+        )
+        session.add(pr)
+        await session.commit()
+
+    # 3. Another GitHub activity that matches ONLY because the repository name contains "pooling",
+    # but the activity title and body are completely unrelated ("Update css layout")
+    repo2_id = await create_test_repository(conn_id, full_name="octocat/pooling-utility")
+    async with AsyncSessionLocal() as session:
+        unrelated = GitHubActivity(
+            repository_id=repo2_id,
+            activity_type=GitHubActivityType.ISSUE,
+            external_id="999",
+            title="Update css layout button margin",
+            body="Changes margin to 12px for better button alignment.",
+            html_url="https://github.com/octocat/pooling-utility/issues/999",
+            payload={},
+        )
+        session.add(unrelated)
+        await session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/search", params={"q": "Pooling"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 3
+
+        results = data["results"]
+        # Both the capture and the relevant PR rank in the top 2 with strong calibrated scores
+        top_2_ids = {results[0]["external_id"] if results[0]["result_kind"] == "github_activity" else str(results[0]["capture_id"]),
+                     results[1]["external_id"] if results[1]["result_kind"] == "github_activity" else str(results[1]["capture_id"])}
+        assert "88" in top_2_ids, "Relevant PR must rank in the top positions"
+        assert str(cap.id) in top_2_ids, "Relevant capture must rank in the top positions"
+
+        # The unrelated activity that only matched the repository name must rank 3rd with a modest score (<= 0.20)
+        assert results[2]["external_id"] == "999"
+        assert results[2]["best_score"] <= 0.20, f"Repo-name only match should receive modest score, got {results[2]['best_score']}"

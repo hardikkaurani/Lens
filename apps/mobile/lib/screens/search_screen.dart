@@ -9,6 +9,7 @@ import '../widgets/loading_view.dart';
 import '../widgets/source_badge.dart';
 import '../models/capture.dart';
 import 'capture_detail_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Search screen executing hybrid lexical + semantic queries against LENS.
 class SearchScreen extends StatefulWidget {
@@ -287,70 +288,124 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _showGitHubDetails(BuildContext context, SearchResultCapture result) {
+    final safeUrl = SecurityUtils.sanitizeUrl(result.originalUrl);
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: AppTheme.surfaceElevated,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        return SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+            ),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SourceBadge(sourceType: SourceType.fromString(result.sourceType)),
-                  _ScoreBadge(score: result.bestScore),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      SourceBadge(sourceType: SourceType.fromString(result.sourceType)),
+                      _ScoreBadge(score: result.bestScore),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    result.displayTitle,
+                    style: const TextStyle(
+                      color: AppTheme.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (result.repositoryName != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      result.repositoryName!,
+                      style: const TextStyle(
+                        color: AppTheme.accent,
+                        fontSize: 13,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                  if (result.authorLogin != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Author: @${result.authorLogin!}',
+                      style: const TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 12,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                  if (result.state != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'State: ${result.state!.toUpperCase()}',
+                      style: const TextStyle(
+                        color: AppTheme.textMuted,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
+                  if (safeUrl != null) ...[
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      safeUrl,
+                      style: const TextStyle(
+                        color: AppTheme.accent,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    InkWell(
+                      key: const Key('open-github-activity-btn'),
+                      onTap: () async {
+                        final uri = Uri.parse(safeUrl);
+                        if (await canLaunchUrl(uri)) {
+                          await launchUrl(uri, mode: LaunchMode.externalApplication);
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: AppTheme.accent.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppTheme.accent.withValues(alpha: 0.3)),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.open_in_new_rounded, size: 14, color: AppTheme.accent),
+                            SizedBox(width: 8),
+                            Text(
+                              'Open on GitHub',
+                              style: TextStyle(
+                                color: AppTheme.accent,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
                 ],
               ),
-              const SizedBox(height: 12),
-              Text(
-                result.displayTitle,
-                style: const TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              if (result.repositoryName != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  result.repositoryName!,
-                  style: const TextStyle(
-                    color: AppTheme.accent,
-                    fontSize: 13,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ],
-              if (result.authorLogin != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  'Author: @${result.authorLogin!}',
-                  style: const TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 12,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ],
-              if (result.originalUrl != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  result.originalUrl!,
-                  style: const TextStyle(
-                    color: AppTheme.textMuted,
-                    fontSize: 11,
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ],
-              const SizedBox(height: 16),
-            ],
+            ),
           ),
         );
       },
@@ -383,9 +438,12 @@ class _SearchResultCard extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  SourceBadge(
-                    sourceType: SourceType.fromString(result.sourceType),
+                  Flexible(
+                    child: SourceBadge(
+                      sourceType: SourceType.fromString(result.sourceType),
+                    ),
                   ),
+                  const SizedBox(width: 8),
                   _ScoreBadge(score: result.bestScore),
                 ],
               ),
@@ -406,22 +464,32 @@ class _SearchResultCard extends StatelessWidget {
                   children: [
                     const Icon(Icons.source_rounded, size: 12, color: AppTheme.accent),
                     const SizedBox(width: 4),
-                    Text(
-                      result.repositoryName!,
-                      style: const TextStyle(
-                        color: AppTheme.accent,
-                        fontSize: 11,
-                        fontFamily: 'monospace',
+                    Flexible(
+                      flex: 3,
+                      child: Text(
+                        result.repositoryName!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppTheme.accent,
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
                     if (result.authorLogin != null) ...[
                       const SizedBox(width: 8),
-                      Text(
-                        '@${result.authorLogin!}',
-                        style: const TextStyle(
-                          color: AppTheme.textMuted,
-                          fontSize: 11,
-                          fontFamily: 'monospace',
+                      Flexible(
+                        flex: 2,
+                        child: Text(
+                          '@${result.authorLogin!}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppTheme.textMuted,
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                          ),
                         ),
                       ),
                     ],

@@ -93,14 +93,34 @@ function SearchContent() {
 
   // Sync with URL query and filter on initial load or URL change
   useEffect(() => {
-    if (!initialQuery) return;
+    // Synchronize local input, active query, and filter states from URL search params
+    setInputVal(initialQuery);
+    setActiveQuery(initialQuery);
+    setSelectedFilter(initialSourceType);
+
+    // If query is empty, cancel any pending requests and clear stale results
+    if (!initialQuery.trim()) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      latestRequestIdRef.current++;
+      setResponse(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     const controller = new AbortController();
+    abortControllerRef.current = controller;
     const requestId = ++latestRequestIdRef.current;
     setLoading(true);
 
     apiClient
       .search({
-        q: initialQuery,
+        q: initialQuery.trim(),
         limit: 20,
         source_type: initialSourceType === "all" ? undefined : initialSourceType,
         signal: controller.signal,
@@ -209,6 +229,7 @@ function SearchContent() {
               key={opt.id}
               type="button"
               onClick={() => handleFilterSelect(opt.id)}
+              aria-pressed={isSelected}
               className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
                 isSelected
                   ? "bg-indigo-600 text-white shadow-sm shadow-indigo-500/20"
@@ -367,6 +388,8 @@ function SearchContent() {
                     >
                       {titleDisplay}
                     </a>
+                  ) : isGitHub ? (
+                    <span>{titleDisplay}</span>
                   ) : (
                     <Link href={`/captures/${res.capture_id}`}>
                       {titleDisplay}

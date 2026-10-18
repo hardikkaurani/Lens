@@ -135,6 +135,11 @@ class _CandidateGitHubActivity:
     html_url: Optional[str]
     author_login: Optional[str]
     state: Optional[str]
+    tsv_rank: float = 0.0
+    title_match: float = 0.0
+    id_match: float = 0.0
+    author_match: float = 0.0
+    repo_match: float = 0.0
     raw_lexical_score: Optional[float] = None
     lexical_score: float = 0.0
     hybrid_score: float = 0.0
@@ -225,26 +230,27 @@ class SearchService:
             )
 
             try:
-                lex_results = await session.execute(
-                    lexical_query_sql,
-                    {
-                        "query": sanitized_query,
-                        "capture_types": list(capture_types),
-                        "candidate_limit": candidate_limit,
-                    },
-                )
-                for row in lex_results.mappings():
-                    chunk_id = row["chunk_id"]
-                    capture_candidates[chunk_id] = _CandidateChunk(
-                        chunk_id=chunk_id,
-                        capture_id=row["capture_id"],
-                        chunk_index=row["chunk_index"],
-                        content=row["content"],
-                        title=row["title"],
-                        original_url=row["original_url"],
-                        source_type=str(row["source_type"]),
-                        raw_lexical_score=float(row["raw_lex_score"]),
+                async with session.begin_nested():
+                    lex_results = await session.execute(
+                        lexical_query_sql,
+                        {
+                            "query": sanitized_query,
+                            "capture_types": list(capture_types),
+                            "candidate_limit": candidate_limit,
+                        },
                     )
+                    for row in lex_results.mappings():
+                        chunk_id = row["chunk_id"]
+                        capture_candidates[chunk_id] = _CandidateChunk(
+                            chunk_id=chunk_id,
+                            capture_id=row["capture_id"],
+                            chunk_index=row["chunk_index"],
+                            content=row["content"],
+                            title=row["title"],
+                            original_url=row["original_url"],
+                            source_type=str(row["source_type"]),
+                            raw_lexical_score=float(row["raw_lex_score"]),
+                        )
             except Exception as e:
                 logger.warning("Capture lexical search query failed: %s", e)
 
@@ -291,31 +297,32 @@ class SearchService:
                 )
 
                 try:
-                    vec_results = await session.execute(
-                        vector_query_sql,
-                        {
-                            "query_vector": vec_str,
-                            "max_dist": max_dist,
-                            "capture_types": list(capture_types),
-                            "candidate_limit": candidate_limit,
-                        },
-                    )
-                    for row in vec_results.mappings():
-                        chunk_id = row["chunk_id"]
-                        dist = float(row["cos_dist"])
-                        if chunk_id in capture_candidates:
-                            capture_candidates[chunk_id].cosine_distance = dist
-                        else:
-                            capture_candidates[chunk_id] = _CandidateChunk(
-                                chunk_id=chunk_id,
-                                capture_id=row["capture_id"],
-                                chunk_index=row["chunk_index"],
-                                content=row["content"],
-                                title=row["title"],
-                                original_url=row["original_url"],
-                                source_type=str(row["source_type"]),
-                                cosine_distance=dist,
-                            )
+                    async with session.begin_nested():
+                        vec_results = await session.execute(
+                            vector_query_sql,
+                            {
+                                "query_vector": vec_str,
+                                "max_dist": max_dist,
+                                "capture_types": list(capture_types),
+                                "candidate_limit": candidate_limit,
+                            },
+                        )
+                        for row in vec_results.mappings():
+                            chunk_id = row["chunk_id"]
+                            dist = float(row["cos_dist"])
+                            if chunk_id in capture_candidates:
+                                capture_candidates[chunk_id].cosine_distance = dist
+                            else:
+                                capture_candidates[chunk_id] = _CandidateChunk(
+                                    chunk_id=chunk_id,
+                                    capture_id=row["capture_id"],
+                                    chunk_index=row["chunk_index"],
+                                    content=row["content"],
+                                    title=row["title"],
+                                    original_url=row["original_url"],
+                                    source_type=str(row["source_type"]),
+                                    cosine_distance=dist,
+                                )
                 except Exception as e:
                     logger.warning("Vector search query execution failed: %s", e)
                     degraded = True
@@ -324,7 +331,13 @@ class SearchService:
         # 3. GitHub Activity Retrieval (PostgreSQL Full-Text Search with GIN Index)
         # ---------------------------------------------------------------------
         if github_types:
-            exact_pattern = f"%{sanitized_query}%"
+            escaped_query = (
+                sanitized_query
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            exact_pattern = f"%{escaped_query}%"
             github_query_sql = text(
                 """
                 SELECT
@@ -338,59 +351,72 @@ class SearchService:
                     ga.author_login,
                     ga.state,
                     gr.full_name AS repository_name,
-                    (
-                        ts_rank_cd(ga.tsv, websearch_to_tsquery('english', :query))
-                        + CASE WHEN ga.title ILIKE :exact_pattern THEN 0.5 ELSE 0.0 END
-                        + CASE WHEN ga.external_id = :raw_query THEN 1.0 ELSE 0.0 END
-                        + CASE WHEN ga.author_login ILIKE :exact_pattern THEN 0.25 ELSE 0.0 END
-                        + CASE WHEN gr.full_name ILIKE :exact_pattern THEN 0.25 ELSE 0.0 END
-                    ) AS raw_lex_score
+                    ts_rank_cd(ga.tsv, websearch_to_tsquery('english', :query)) AS tsv_rank,
+                    (CASE WHEN ga.title ILIKE :exact_pattern ESCAPE '\\' THEN 1.0 ELSE 0.0 END) AS title_match,
+                    (CASE WHEN ga.external_id = :raw_query THEN 1.0 ELSE 0.0 END) AS id_match,
+                    (CASE WHEN ga.author_login ILIKE :exact_pattern ESCAPE '\\' THEN 1.0 ELSE 0.0 END) AS author_match,
+                    (CASE WHEN gr.full_name ILIKE :exact_pattern ESCAPE '\\' THEN 1.0 ELSE 0.0 END) AS repo_match
                 FROM github_activities ga
                 JOIN github_repositories gr ON ga.repository_id = gr.id
                 JOIN github_connections gc ON gr.connection_id = gc.id
                 WHERE (
                     ga.tsv @@ websearch_to_tsquery('english', :query)
                     OR ga.external_id = :raw_query
-                    OR ga.title ILIKE :exact_pattern
-                    OR ga.author_login ILIKE :exact_pattern
-                    OR gr.full_name ILIKE :exact_pattern
+                    OR ga.title ILIKE :exact_pattern ESCAPE '\\'
+                    OR ga.author_login ILIKE :exact_pattern ESCAPE '\\'
+                    OR gr.full_name ILIKE :exact_pattern ESCAPE '\\'
                 )
                 AND ga.activity_type::text = ANY(:github_types)
-                ORDER BY raw_lex_score DESC, ga.source_created_at DESC NULLS LAST, ga.id ASC
+                ORDER BY (
+                    ts_rank_cd(ga.tsv, websearch_to_tsquery('english', :query))
+                    + (CASE WHEN ga.external_id = :raw_query THEN 1.0 ELSE 0.0 END)
+                    + (CASE WHEN ga.title ILIKE :exact_pattern ESCAPE '\\' THEN 0.5 ELSE 0.0 END)
+                    + (CASE WHEN ga.author_login ILIKE :exact_pattern ESCAPE '\\' THEN 0.1 ELSE 0.0 END)
+                    + (CASE WHEN gr.full_name ILIKE :exact_pattern ESCAPE '\\' THEN 0.05 ELSE 0.0 END)
+                ) DESC, ga.source_created_at DESC NULLS LAST, ga.id ASC
                 LIMIT :candidate_limit
                 """
             )
 
             try:
-                gh_results = await session.execute(
-                    github_query_sql,
-                    {
-                        "query": sanitized_query,
-                        "raw_query": sanitized_query,
-                        "exact_pattern": exact_pattern,
-                        "github_types": list(github_types),
-                        "candidate_limit": candidate_limit,
-                    },
-                )
-                for row in gh_results.mappings():
-                    act_id = row["activity_id"]
-                    github_candidates[act_id] = _CandidateGitHubActivity(
-                        activity_id=act_id,
-                        repository_id=row["repository_id"],
-                        repository_name=row["repository_name"],
-                        activity_type=str(row["activity_type"]),
-                        external_id=row["external_id"],
-                        title=row["title"],
-                        body=row["body"],
-                        html_url=row["html_url"],
-                        author_login=row["author_login"],
-                        state=row["state"],
-                        raw_lexical_score=float(row["raw_lex_score"]),
+                async with session.begin_nested():
+                    gh_results = await session.execute(
+                        github_query_sql,
+                        {
+                            "query": sanitized_query,
+                            "raw_query": sanitized_query,
+                            "exact_pattern": exact_pattern,
+                            "github_types": list(github_types),
+                            "candidate_limit": candidate_limit,
+                        },
                     )
+                    for row in gh_results.mappings():
+                        act_id = row["activity_id"]
+                        tsv_rank = float(row["tsv_rank"])
+                        title_match = float(row["title_match"])
+                        id_match = float(row["id_match"])
+                        author_match = float(row["author_match"])
+                        repo_match = float(row["repo_match"])
+                        github_candidates[act_id] = _CandidateGitHubActivity(
+                            activity_id=act_id,
+                            repository_id=row["repository_id"],
+                            repository_name=row["repository_name"],
+                            activity_type=str(row["activity_type"]),
+                            external_id=row["external_id"],
+                            title=row["title"],
+                            body=row["body"],
+                            html_url=row["html_url"],
+                            author_login=row["author_login"],
+                            state=row["state"],
+                            tsv_rank=tsv_rank,
+                            title_match=title_match,
+                            id_match=id_match,
+                            author_match=author_match,
+                            repo_match=repo_match,
+                            raw_lexical_score=tsv_rank + (0.5 * title_match) + id_match + (0.1 * author_match) + (0.05 * repo_match),
+                        )
             except Exception as e:
                 logger.warning("GitHub activity search query failed: %s", e)
-                # If both queries fail or github activities failed unexpectedly, record degraded status
-                degraded = True
 
         if not capture_candidates and not github_candidates:
             return SearchResponse(
@@ -405,22 +431,16 @@ class SearchService:
         # ---------------------------------------------------------------------
         # 4. Calibrated Score Normalization & Unified Ranking
         # ---------------------------------------------------------------------
-        # Calibrate lexical scores across captures and activities using the same shared scale
-        all_raw_lex_scores = [
-            c.raw_lexical_score
-            for c in capture_candidates.values()
-            if c.raw_lexical_score is not None
-        ] + [
-            g.raw_lexical_score
-            for g in github_candidates.values()
-            if g.raw_lexical_score is not None
-        ]
-        max_raw_lex = max(all_raw_lex_scores, default=0.0)
+        # Calibrate lexical scores across captures and activities using source-specific maxima
+        max_cap_lex = max(
+            (c.raw_lexical_score for c in capture_candidates.values() if c.raw_lexical_score is not None),
+            default=0.0,
+        )
 
         for candidate in capture_candidates.values():
-            if candidate.raw_lexical_score is not None and max_raw_lex > 0:
+            if candidate.raw_lexical_score is not None and max_cap_lex > 0:
                 candidate.lexical_score = min(
-                    1.0, max(0.0, candidate.raw_lexical_score / max_raw_lex)
+                    1.0, max(0.0, candidate.raw_lexical_score / max_cap_lex)
                 )
             else:
                 candidate.lexical_score = 0.0
@@ -440,16 +460,32 @@ class SearchService:
                     6,
                 )
 
-        for g_cand in github_candidates.values():
-            if g_cand.raw_lexical_score is not None and max_raw_lex > 0:
-                g_cand.lexical_score = min(
-                    1.0, max(0.0, g_cand.raw_lexical_score / max_raw_lex)
-                )
-            else:
-                g_cand.lexical_score = 0.0
+        max_gh_tsv = max(
+            (g.tsv_rank for g in github_candidates.values()),
+            default=0.0,
+        )
 
-            # Grounded relevance: GitHub activity relevance is its normalized lexical score on the shared scale
-            g_cand.hybrid_score = round(g_cand.lexical_score, 6)
+        for g_cand in github_candidates.values():
+            norm_tsv = (g_cand.tsv_rank / max_gh_tsv) if max_gh_tsv > 0 else 0.0
+            if g_cand.id_match > 0.0:
+                # Exact identifier match (e.g. query "42" for PR #42, or full commit SHA)
+                g_cand.lexical_score = 1.0
+            else:
+                # Balanced component weighting:
+                # Base text relevance: up to 0.60
+                # Exact title substring match: up to 0.30
+                # Author match: up to 0.05
+                # Repository match: up to 0.05
+                score = (
+                    (0.60 * norm_tsv)
+                    + (0.30 * g_cand.title_match)
+                    + (0.05 * g_cand.author_match)
+                    + (0.05 * g_cand.repo_match)
+                )
+                g_cand.lexical_score = round(min(1.0, max(0.0, score)), 6)
+
+            # Grounded relevance: GitHub activity relevance is bounded in [0, 1]
+            g_cand.hybrid_score = g_cand.lexical_score
 
         # ---------------------------------------------------------------------
         # 5. Assemble and Group Capture Results

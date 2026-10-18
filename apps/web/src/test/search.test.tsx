@@ -459,4 +459,129 @@ describe("Search Experience & UX (Tests 20-26, 31)", () => {
       );
     });
   });
+
+  // Stage 16.1 Finding E: Accessible filter button aria-pressed
+  it("Stage 16.1 Finding E: filter buttons expose aria-pressed for assistive technologies", async () => {
+    render(<SearchPage />);
+
+    const allBtn = screen.getByTestId("filter-btn-all");
+    const githubBtn = screen.getByTestId("filter-btn-github");
+    const notesBtn = screen.getByTestId("filter-btn-text");
+
+    expect(allBtn).toHaveAttribute("aria-pressed", "true");
+    expect(githubBtn).toHaveAttribute("aria-pressed", "false");
+    expect(notesBtn).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(githubBtn);
+
+    expect(allBtn).toHaveAttribute("aria-pressed", "false");
+    expect(githubBtn).toHaveAttribute("aria-pressed", "true");
+    expect(notesBtn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  // Stage 16.1 Finding F: Safe web links for GitHub activities (no safe URL -> plain text, not /captures/[id])
+  it("Stage 16.1 Finding F: renders plain text title for GitHub activity with missing or unsafe URL", async () => {
+    const mockResponse: SearchResponse = {
+      query: "unsafe commit",
+      total: 2,
+      limit: 20,
+      degraded: false,
+      results: [
+        {
+          capture_id: "gh-unsafe-1",
+          title: "Commit: missing url activity",
+          original_url: null,
+          source_type: "commit",
+          result_kind: "github_activity",
+          activity_type: "commit",
+          best_score: 0.8,
+          best_lexical_score: 0.8,
+          best_semantic_score: null,
+          matching_chunks: [],
+        },
+        {
+          capture_id: "gh-unsafe-2",
+          title: "PR: javascript scheme activity",
+          original_url: "javascript:alert(1)",
+          source_type: "pull_request",
+          result_kind: "github_activity",
+          activity_type: "pull_request",
+          best_score: 0.75,
+          best_lexical_score: 0.75,
+          best_semantic_score: null,
+          matching_chunks: [],
+        },
+      ],
+    };
+
+    vi.spyOn(apiClient, "search").mockResolvedValue(mockResponse);
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "unsafe commit" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Commit: missing url activity")).toBeInTheDocument();
+      expect(screen.getByText("PR: javascript scheme activity")).toBeInTheDocument();
+    });
+
+    // Neither activity should link to /captures/gh-unsafe-1 or /captures/gh-unsafe-2
+    expect(screen.queryByRole("link", { name: /Commit: missing url activity/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /PR: javascript scheme activity/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /javascript:alert/i })).not.toBeInTheDocument();
+  });
+
+  // Stage 16.1 Finding D: URL search params synchronization and clearing
+  it("Stage 16.1 Finding D: URL search params synchronize input and filter, and clearing query clears results", async () => {
+    mockSearchParams = new URLSearchParams("q=initial+query&source_type=issue");
+
+    const mockResponse: SearchResponse = {
+      query: "initial query",
+      total: 1,
+      limit: 20,
+      degraded: false,
+      source_filter: "issue",
+      results: [
+        {
+          capture_id: "gh-issue-10",
+          title: "Initial Issue",
+          original_url: "https://github.com/octocat/Lens/issues/10",
+          source_type: "issue",
+          result_kind: "github_activity",
+          activity_type: "issue",
+          best_score: 0.9,
+          best_lexical_score: 0.9,
+          best_semantic_score: null,
+          matching_chunks: [],
+        },
+      ],
+    };
+
+    const searchSpy = vi.spyOn(apiClient, "search").mockResolvedValue(mockResponse);
+
+    const { rerender } = render(<SearchPage />);
+
+    // Verify initial URL state was synchronized into input and filter
+    const input = screen.getByPlaceholderText(/Search concepts, code, links/i) as HTMLInputElement;
+    expect(input.value).toBe("initial query");
+    expect(screen.getByTestId("filter-btn-issue")).toHaveAttribute("aria-pressed", "true");
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "initial query", source_type: "issue" })
+      );
+      expect(screen.getByText("Initial Issue")).toBeInTheDocument();
+    });
+
+    // Now simulate back/forward navigation that clears query parameters
+    mockSearchParams = new URLSearchParams("");
+    rerender(<SearchPage />);
+
+    await waitFor(() => {
+      expect(input.value).toBe("");
+      expect(screen.queryByText("Initial Issue")).not.toBeInTheDocument();
+    });
+  });
 });

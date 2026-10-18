@@ -61,7 +61,6 @@ class SourceBadge extends StatelessWidget {
         label = 'Image';
         break;
       case SourceType.file:
-      default:
         color = const Color(0xFF94A3B8);
         icon = Icons.insert_drive_file_rounded;
         label = 'File';
@@ -80,12 +79,16 @@ class SourceBadge extends StatelessWidget {
         children: [
           Icon(icon, size: 13, color: color),
           const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],
