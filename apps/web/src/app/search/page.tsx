@@ -32,6 +32,21 @@ function SearchContent() {
   const [inputVal, setInputVal] = useState<string>(initialQuery);
   const [activeQuery, setActiveQuery] = useState<string>(initialQuery);
   const [selectedFilter, setSelectedFilter] = useState<string>(initialSourceType);
+  const [prevQuery, setPrevQuery] = useState<string>(initialQuery);
+  const [prevSourceType, setPrevSourceType] = useState<string>(initialSourceType);
+
+  // Synchronize local input, active query, and filter states from URL search params during render
+  if (prevQuery !== initialQuery) {
+    setPrevQuery(initialQuery);
+    setInputVal(initialQuery);
+    setActiveQuery(initialQuery);
+  }
+
+  if (prevSourceType !== initialSourceType) {
+    setPrevSourceType(initialSourceType);
+    setSelectedFilter(initialSourceType);
+  }
+
   const [response, setResponse] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,13 +106,8 @@ function SearchContent() {
     }
   }, [selectedFilter]);
 
-  // Sync with URL query and filter on initial load or URL change
+  // Fetch search results when URL query or filter changes
   useEffect(() => {
-    // Synchronize local input, active query, and filter states from URL search params
-    setInputVal(initialQuery);
-    setActiveQuery(initialQuery);
-    setSelectedFilter(initialSourceType);
-
     // If query is empty, cancel any pending requests and clear stale results
     if (!initialQuery.trim()) {
       if (abortControllerRef.current) {

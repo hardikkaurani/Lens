@@ -372,8 +372,19 @@ class _SearchScreenState extends State<SearchScreen> {
                       key: const Key('open-github-activity-btn'),
                       onTap: () async {
                         final uri = Uri.parse(safeUrl);
-                        if (await canLaunchUrl(uri)) {
-                          await launchUrl(uri, mode: LaunchMode.externalApplication);
+                        try {
+                          final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                          if (!launched && ctx.mounted) {
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              const SnackBar(content: Text('Could not open GitHub URL.')),
+                            );
+                          }
+                        } catch (_) {
+                          if (ctx.mounted) {
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              const SnackBar(content: Text('Could not open GitHub URL.')),
+                            );
+                          }
                         }
                       },
                       borderRadius: BorderRadius.circular(8),
