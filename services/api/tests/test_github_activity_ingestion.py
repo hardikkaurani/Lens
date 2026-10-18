@@ -1327,3 +1327,129 @@ async def test_finding_9_sanitizes_unexpected_exception_details() -> None:
         )
         assert "GitHub API rate limit exceeded." in res2["categories"]["pull_requests"]["error"]
 
+
+@pytest.mark.asyncio
+async def test_issue_pagination_with_pull_request_items_does_not_prematurely_break() -> None:
+    """Verify issue pagination uses raw item count for termination and advances cursor safely when PRs are mixed in."""
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="issues-pr-mix", full_name="activity_user/issues-pr-mix")
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    # Page 1: 2 items (page_size=2). 1 PR and 1 issue.
+    # Because raw page has 2 items == page_size, pagination must NOT terminate early!
+    # Page 2: 1 issue (< page_size=2). Pagination completes.
+    calls = []
+
+    async def mock_list_issues(*args, **kwargs):
+        page = kwargs.get("page", 1)
+        calls.append(page)
+        if page == 1:
+            return [
+                {
+                    "id": 101,
+                    "number": 1,
+                    "title": "PR on issues feed",
+                    "state": "open",
+                    "created_at": "2026-05-01T10:00:00Z",
+                    "updated_at": "2026-05-02T10:00:00Z",
+                    "pull_request": {"url": "https://..."},
+                },
+                {
+                    "id": 102,
+                    "number": 2,
+                    "title": "Real Issue 1",
+                    "state": "open",
+                    "created_at": "2026-05-01T10:00:00Z",
+                    "updated_at": "2026-05-03T10:00:00Z",
+                },
+            ]
+        elif page == 2:
+            return [
+                {
+                    "id": 103,
+                    "number": 3,
+                    "title": "Real Issue 2",
+                    "state": "open",
+                    "created_at": "2026-05-01T10:00:00Z",
+                    "updated_at": "2026-05-04T10:00:00Z",
+                }
+            ]
+        return []
+
+    mock_client.list_repository_issues = AsyncMock(side_effect=mock_list_issues)
+
+    with patch("app.core.config.get_settings") as mock_settings:
+        settings_obj = get_settings()
+        mock_settings.return_value = settings_obj
+        orig_page_size = settings_obj.GITHUB_ACTIVITY_PAGE_SIZE
+        try:
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", 2)
+            async with AsyncSessionLocal() as session:
+                conn = await session.get(GitHubConnection, conn_id)
+                repo = await session.get(GitHubRepository, repo_id)
+                assert conn is not None
+                assert repo is not None
+                res = await sync_repository_activities(
+                    db=session,
+                    connection=conn,
+                    repository=repo,
+                    access_token="dummy_token",
+                    github_client=mock_client,
+                )
+
+                # Both pages must have been requested!
+                assert calls == [1, 2], f"Expected pages [1, 2] but got {calls}"
+                # Only the 2 real issues were ingested (the PR was excluded)
+                assert res["categories"]["issues"]["count"] == 2
+                assert repo.activity_sync_metadata["categories"]["issues"]["count"] == 2
+                assert repo.activity_sync_metadata["categories"]["issues"]["status"] == "synced"
+                # Checkpoint moved to newest updated timestamp (2026-05-04T10:00:00)
+                assert "2026-05-04T10:00:00" in repo.activity_sync_metadata["checkpoints"]["issues"]
+        finally:
+            object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", orig_page_size)
+
+
+@pytest.mark.asyncio
+async def test_multi_repository_sync_reloads_orm_and_succeeds_after_earlier_repo_rollback() -> None:
+    """Verify that multi-repository sync handles rollback in repo 1 without MissingGreenlet in repo 2."""
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_1_id = await create_test_repository(conn_id, github_repo_id="3001", name="repo-flaky", full_name="activity_user/repo-flaky")
+    repo_2_id = await create_test_repository(conn_id, github_repo_id="3002", name="repo-healthy", full_name="activity_user/repo-healthy")
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[])
+    mock_client.list_repository_issues = AsyncMock(return_value=[])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    original_sync = sync_repository_activities
+
+    async def flaky_sync_repo(*args, **kwargs):
+        repo = kwargs.get("repository") or args[2]
+        if repo.id == repo_1_id:
+            # Simulate a DB failure that triggers rollback in repo 1
+            raise OperationalError("SELECT * FROM fail", {}, Exception("Database connection reset"))
+        return await original_sync(*args, **kwargs)
+
+    with patch("app.integrations.github.service.sync_repository_activities", side_effect=flaky_sync_repo):
+        async with AsyncSessionLocal() as session:
+            res = await sync_selected_repositories_activities(
+                db=session,
+                connection_id=conn_id,
+                github_client=mock_client,
+            )
+
+            assert res["status"] == "partial"
+            assert res["synced_repositories"] == 1
+            assert "activity_user/repo-flaky" in res["details"]
+            assert res["details"]["activity_user/repo-flaky"]["status"] == "failed"
+            assert "activity_user/repo-healthy" in res["details"]
+            assert res["details"]["activity_user/repo-healthy"]["status"] == "synced"
+
+

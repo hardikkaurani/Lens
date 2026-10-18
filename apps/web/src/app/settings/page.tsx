@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense, useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import { formatDate } from "@/lib/format";
@@ -302,7 +302,9 @@ export function SettingsContent() {
   };
 
   // Fetch activities preview
+  const activityRequestSeq = useRef(0);
   const handleLoadActivities = async (typeFilter?: string) => {
+    const seq = ++activityRequestSeq.current;
     setIsLoadingActivities(true);
     try {
       const filterToUse = typeFilter !== undefined ? (typeFilter || undefined) : (activityTypeFilter || undefined);
@@ -310,11 +312,15 @@ export function SettingsContent() {
         activity_type: filterToUse,
         limit: 25,
       });
-      setActivities(res.items);
+      if (seq === activityRequestSeq.current) {
+        setActivities(res.items);
+      }
     } catch {
       // safe fallback
     } finally {
-      setIsLoadingActivities(false);
+      if (seq === activityRequestSeq.current) {
+        setIsLoadingActivities(false);
+      }
     }
   };
 

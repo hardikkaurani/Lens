@@ -818,7 +818,7 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     render(<SettingsContent />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("sync-activities-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("sync-activities-btn")).toHaveTextContent("Sync Activities (1)");
     });
 
     fireEvent.click(screen.getByTestId("sync-activities-btn"));

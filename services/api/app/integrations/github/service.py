@@ -6,7 +6,7 @@ import time
 from typing import Any, Awaitable, Optional, cast
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -918,7 +918,22 @@ async def upsert_activities(
         return 0
 
     try:
-        stmt = select(GitHubActivity).where(GitHubActivity.repository_id == repository_id)
+        keys_by_type: dict[str, set[str]] = {}
+        for a in activities:
+            keys_by_type.setdefault(a.activity_type, set()).add(a.external_id)
+
+        conditions = [
+            and_(
+                GitHubActivity.activity_type == GitHubActivityType(t),
+                GitHubActivity.external_id.in_(list(ext_ids)),
+            )
+            for t, ext_ids in keys_by_type.items()
+        ]
+
+        stmt = select(GitHubActivity).where(
+            GitHubActivity.repository_id == repository_id,
+            or_(*conditions),
+        )
         res = await db.execute(stmt)
         existing_all = res.scalars().all()
         existing_map: dict[tuple[str, str], GitHubActivity] = {
@@ -1031,9 +1046,11 @@ async def sync_repository_activities(
         pr_cutoff = (pr_parsed - overlap_delta) if pr_parsed else None
         pr_activities: list[NormalizedGitHubActivity] = []
         max_pr_updated: Optional[datetime] = None
+        min_pr_updated: Optional[datetime] = None
+        start_page = int(checkpoints.get("prs_next_page", 1))
 
         try:
-            for page in range(1, max_pages + 1):
+            for page in range(start_page, start_page + max_pages):
                 if budget <= 0:
                     is_pr_truncated = True
                     break
@@ -1060,7 +1077,9 @@ async def sync_repository_activities(
                     if norm.source_updated_at:
                         if max_pr_updated is None or norm.source_updated_at > max_pr_updated:
                             max_pr_updated = norm.source_updated_at
-                        if pr_cutoff and norm.source_updated_at < pr_cutoff:
+                        if min_pr_updated is None or norm.source_updated_at < min_pr_updated:
+                            min_pr_updated = norm.source_updated_at
+                        if pr_cutoff and start_page == 1 and norm.source_updated_at < pr_cutoff:
                             stop_pr_pagination = True
 
                     pr_activities.append(norm)
@@ -1069,7 +1088,7 @@ async def sync_repository_activities(
                     break
                 if len(raw_prs) < page_size:
                     break
-                if page == max_pages:
+                if page == start_page + max_pages - 1:
                     is_pr_truncated = True
 
             # Persist and advance checkpoint only upon success
@@ -1077,6 +1096,9 @@ async def sync_repository_activities(
             total_persisted_for_repo += synced_prs
 
             if is_pr_truncated:
+                checkpoints["prs_next_page"] = page + 1
+                if max_pr_updated and not checkpoints.get("prs_frontier"):
+                    checkpoints["prs_frontier"] = max_pr_updated.isoformat()
                 categories_status["pull_requests"] = {
                     "status": "partial",
                     "truncated": True,
@@ -1085,8 +1107,15 @@ async def sync_repository_activities(
                     "error": None,
                 }
             else:
-                if max_pr_updated:
+                checkpoints.pop("prs_next_page", None)
+                frontier = checkpoints.pop("prs_frontier", None)
+                frontier_dt = parse_iso_datetime(frontier) if frontier else None
+                if max_pr_updated and frontier_dt:
+                    checkpoints["pull_requests"] = max(max_pr_updated, frontier_dt).isoformat()
+                elif max_pr_updated:
                     checkpoints["pull_requests"] = max_pr_updated.isoformat()
+                elif frontier:
+                    checkpoints["pull_requests"] = frontier
                 elif not pr_checkpoint_str:
                     checkpoints["pull_requests"] = now.isoformat()
 
@@ -1136,7 +1165,7 @@ async def sync_repository_activities(
                     break
                 budget -= 1
 
-                raw_issues = await client.list_repository_issues(
+                raw_items = await client.list_repository_issues(
                     access_token=access_token,
                     owner=owner,
                     repo=repo_name,
@@ -1145,20 +1174,25 @@ async def sync_repository_activities(
                     direction="asc",
                     page=page,
                     per_page=page_size,
+                    exclude_pull_requests=False,
                 )
-                if not raw_issues:
+                if not raw_items:
                     break
 
-                for item in raw_issues:
-                    norm = normalize_github_issue(item)
-                    if not norm:
-                        continue
-                    if norm.source_updated_at:
-                        if max_issue_updated is None or norm.source_updated_at > max_issue_updated:
-                            max_issue_updated = norm.source_updated_at
-                    issue_activities.append(norm)
+                for item in raw_items:
+                    raw_updated = parse_iso_datetime(item.get("updated_at")) if isinstance(item, dict) else None
+                    if raw_updated:
+                        if max_issue_updated is None or raw_updated > max_issue_updated:
+                            max_issue_updated = raw_updated
 
-                if len(raw_issues) < page_size:
+                    if isinstance(item, dict) and "pull_request" in item:
+                        continue
+
+                    norm = normalize_github_issue(item)
+                    if norm:
+                        issue_activities.append(norm)
+
+                if len(raw_items) < page_size:
                     break
                 if page == max_pages:
                     is_issue_truncated = True
@@ -1170,8 +1204,9 @@ async def sync_repository_activities(
             # max_issue_updated safely advances the checkpoint to the frontier fetched so far.
             if max_issue_updated:
                 checkpoints["issues"] = max_issue_updated.isoformat()
-            elif not checkpoints.get("issues"):
-                checkpoints["issues"] = now.isoformat()
+            elif page == 1 and not raw_items:
+                if not checkpoints.get("issues"):
+                    checkpoints["issues"] = now.isoformat()
 
             categories_status["issues"] = {
                 "status": "partial" if is_issue_truncated else "synced",
@@ -1208,9 +1243,11 @@ async def sync_repository_activities(
             "error": "Request budget exhausted before commits sync started.",
         }
     else:
-        commit_since = _format_since(checkpoints.get("commits"))
+        commit_until = checkpoints.get("commits_backfill_until")
+        commit_since = _format_since(checkpoints.get("commits")) if not commit_until else None
         commit_activities: list[NormalizedGitHubActivity] = []
         max_commit_date: Optional[datetime] = None
+        min_commit_date: Optional[datetime] = None
 
         try:
             for page in range(1, max_pages + 1):
@@ -1224,6 +1261,7 @@ async def sync_repository_activities(
                     owner=owner,
                     repo=repo_name,
                     since=commit_since,
+                    until=commit_until,
                     page=page,
                     per_page=page_size,
                 )
@@ -1237,6 +1275,8 @@ async def sync_repository_activities(
                     if norm.source_created_at:
                         if max_commit_date is None or norm.source_created_at > max_commit_date:
                             max_commit_date = norm.source_created_at
+                        if min_commit_date is None or norm.source_created_at < min_commit_date:
+                            min_commit_date = norm.source_created_at
                     commit_activities.append(norm)
 
                 if len(raw_commits) < page_size:
@@ -1248,8 +1288,10 @@ async def sync_repository_activities(
             total_persisted_for_repo += synced_commits
 
             if is_commit_truncated:
-                # Commits are in reverse DAG order (newest first). If pagination truncated
-                # before reaching commit_since or the end, do not advance checkpoint past unfetched commits.
+                if min_commit_date:
+                    checkpoints["commits_backfill_until"] = min_commit_date.isoformat()
+                if max_commit_date and not checkpoints.get("commits_frontier"):
+                    checkpoints["commits_frontier"] = max_commit_date.isoformat()
                 categories_status["commits"] = {
                     "status": "partial",
                     "truncated": True,
@@ -1258,8 +1300,15 @@ async def sync_repository_activities(
                     "error": None,
                 }
             else:
-                if max_commit_date:
+                checkpoints.pop("commits_backfill_until", None)
+                frontier = checkpoints.pop("commits_frontier", None)
+                frontier_dt = parse_iso_datetime(frontier) if frontier else None
+                if max_commit_date and frontier_dt:
+                    checkpoints["commits"] = max(max_commit_date, frontier_dt).isoformat()
+                elif max_commit_date:
                     checkpoints["commits"] = max_commit_date.isoformat()
+                elif frontier:
+                    checkpoints["commits"] = frontier
                 elif not checkpoints.get("commits"):
                     checkpoints["commits"] = now.isoformat()
 
@@ -1474,9 +1523,12 @@ async def sync_selected_repositories_activities(
     has_failures = False
     has_successes = False
 
-    for repo in repositories:
-        cur_repo_id = repo.id
-        cur_repo_full_name = repo.full_name
+    repo_refs = [(r.id, r.full_name) for r in repositories]
+
+    for cur_repo_id, cur_repo_full_name in repo_refs:
+        repo = await db.get(GitHubRepository, cur_repo_id)
+        if repo is None:
+            continue
         try:
             repo.activity_sync_status = "syncing"
             await db.commit()
@@ -1531,6 +1583,11 @@ async def sync_selected_repositories_activities(
     else:
         overall_status = "failed"
         overall_msg = "Failed to synchronize activities for selected repositories."
+
+    try:
+        await db.refresh(connection)
+    except Exception as ref_exc:
+        logger.warning("Failed to refresh connection before persisting activity sync metadata: %s", ref_exc)
 
     token_meta = dict(connection.token_metadata or {})
     token_meta["activity_sync"] = {

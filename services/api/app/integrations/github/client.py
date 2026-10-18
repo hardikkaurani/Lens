@@ -438,8 +438,9 @@ class GitHubClient:
         since: Optional[str] = None,
         page: int = 1,
         per_page: int = 100,
+        exclude_pull_requests: bool = True,
     ) -> list[dict[str, Any]]:
-        """Fetch paginated issues for a repository, excluding pull requests."""
+        """Fetch paginated issues for a repository, optionally excluding pull requests."""
         safe_page = max(1, page)
         safe_per_page = min(max(1, per_page), 100)
         url = f"{self.settings.GITHUB_API_BASE_URL.rstrip('/')}/repos/{owner}/{repo}/issues"
@@ -455,8 +456,9 @@ class GitHubClient:
         data = await self._get_request(url, access_token=access_token, params=params)
         if not isinstance(data, list):
             raise GitHubApiError("Unexpected response shape from GitHub issues API (expected list).")
-        # Important: Filter out pull requests which GitHub includes in issues response
-        return [item for item in data if isinstance(item, dict) and "pull_request" not in item]
+        if exclude_pull_requests:
+            return [item for item in data if isinstance(item, dict) and "pull_request" not in item]
+        return [item for item in data if isinstance(item, dict)]
 
     async def list_repository_commits(
         self,
