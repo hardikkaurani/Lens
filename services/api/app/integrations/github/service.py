@@ -1048,6 +1048,7 @@ async def sync_repository_activities(
         max_pr_updated: Optional[datetime] = None
         min_pr_updated: Optional[datetime] = None
         start_page = int(checkpoints.get("prs_next_page", 1))
+        last_successful_pr_page = start_page - 1
 
         try:
             for page in range(start_page, start_page + max_pages):
@@ -1060,11 +1061,16 @@ async def sync_repository_activities(
                     access_token=access_token,
                     owner=owner,
                     repo=repo_name,
+                    state="all",
+                    sort="updated",
+                    direction="desc",
                     page=page,
                     per_page=page_size,
                 )
                 if not raw_prs:
                     break
+
+                last_successful_pr_page = page
 
                 stop_pr_pagination = False
                 for item in raw_prs:
@@ -1096,9 +1102,13 @@ async def sync_repository_activities(
             total_persisted_for_repo += synced_prs
 
             if is_pr_truncated:
-                checkpoints["prs_next_page"] = page + 1
-                if max_pr_updated and not checkpoints.get("prs_frontier"):
-                    checkpoints["prs_frontier"] = max_pr_updated.isoformat()
+                checkpoints["prs_next_page"] = (
+                    last_successful_pr_page + 1 if last_successful_pr_page >= start_page else start_page
+                )
+                if max_pr_updated:
+                    existing_frontier = parse_iso_datetime(checkpoints.get("prs_frontier"))
+                    if not existing_frontier or max_pr_updated > existing_frontier:
+                        checkpoints["prs_frontier"] = max_pr_updated.isoformat()
                 categories_status["pull_requests"] = {
                     "status": "partial",
                     "truncated": True,
@@ -1110,12 +1120,9 @@ async def sync_repository_activities(
                 checkpoints.pop("prs_next_page", None)
                 frontier = checkpoints.pop("prs_frontier", None)
                 frontier_dt = parse_iso_datetime(frontier) if frontier else None
-                if max_pr_updated and frontier_dt:
-                    checkpoints["pull_requests"] = max(max_pr_updated, frontier_dt).isoformat()
-                elif max_pr_updated:
-                    checkpoints["pull_requests"] = max_pr_updated.isoformat()
-                elif frontier:
-                    checkpoints["pull_requests"] = frontier
+                candidates = [dt for dt in [max_pr_updated, frontier_dt] if dt is not None]
+                if candidates:
+                    checkpoints["pull_requests"] = max(candidates).isoformat()
                 elif not pr_checkpoint_str:
                     checkpoints["pull_requests"] = now.isoformat()
 
@@ -1244,13 +1251,15 @@ async def sync_repository_activities(
         }
     else:
         commit_until = checkpoints.get("commits_backfill_until")
+        start_commit_page = int(checkpoints.get("commits_backfill_page", 1)) if commit_until else 1
         commit_since = _format_since(checkpoints.get("commits")) if not commit_until else None
         commit_activities: list[NormalizedGitHubActivity] = []
         max_commit_date: Optional[datetime] = None
         min_commit_date: Optional[datetime] = None
+        last_successful_commit_page = start_commit_page - 1
 
         try:
-            for page in range(1, max_pages + 1):
+            for page in range(start_commit_page, start_commit_page + max_pages):
                 if budget <= 0:
                     is_commit_truncated = True
                     break
@@ -1268,6 +1277,8 @@ async def sync_repository_activities(
                 if not raw_commits:
                     break
 
+                last_successful_commit_page = page
+
                 for item in raw_commits:
                     norm = normalize_github_commit(item)
                     if not norm:
@@ -1281,17 +1292,34 @@ async def sync_repository_activities(
 
                 if len(raw_commits) < page_size:
                     break
-                if page == max_pages:
+                if page == start_commit_page + max_pages - 1:
                     is_commit_truncated = True
 
             synced_commits = await upsert_activities(db, repo_id, commit_activities)
             total_persisted_for_repo += synced_commits
 
             if is_commit_truncated:
+                prev_until_dt = parse_iso_datetime(commit_until) if commit_until else None
                 if min_commit_date:
-                    checkpoints["commits_backfill_until"] = min_commit_date.isoformat()
-                if max_commit_date and not checkpoints.get("commits_frontier"):
-                    checkpoints["commits_frontier"] = max_commit_date.isoformat()
+                    if prev_until_dt is None or min_commit_date < prev_until_dt:
+                        checkpoints["commits_backfill_until"] = min_commit_date.isoformat()
+                        checkpoints["commits_backfill_page"] = 1
+                    else:
+                        checkpoints["commits_backfill_until"] = commit_until
+                        checkpoints["commits_backfill_page"] = (
+                            last_successful_commit_page + 1
+                            if last_successful_commit_page >= start_commit_page
+                            else start_commit_page
+                        )
+                elif commit_until:
+                    checkpoints["commits_backfill_until"] = commit_until
+                    checkpoints["commits_backfill_page"] = start_commit_page
+
+                if max_commit_date:
+                    existing_frontier = parse_iso_datetime(checkpoints.get("commits_frontier"))
+                    if not existing_frontier or max_commit_date > existing_frontier:
+                        checkpoints["commits_frontier"] = max_commit_date.isoformat()
+
                 categories_status["commits"] = {
                     "status": "partial",
                     "truncated": True,
@@ -1301,14 +1329,12 @@ async def sync_repository_activities(
                 }
             else:
                 checkpoints.pop("commits_backfill_until", None)
+                checkpoints.pop("commits_backfill_page", None)
                 frontier = checkpoints.pop("commits_frontier", None)
                 frontier_dt = parse_iso_datetime(frontier) if frontier else None
-                if max_commit_date and frontier_dt:
-                    checkpoints["commits"] = max(max_commit_date, frontier_dt).isoformat()
-                elif max_commit_date:
-                    checkpoints["commits"] = max_commit_date.isoformat()
-                elif frontier:
-                    checkpoints["commits"] = frontier
+                candidates = [dt for dt in [max_commit_date, frontier_dt] if dt is not None]
+                if candidates:
+                    checkpoints["commits"] = max(candidates).isoformat()
                 elif not checkpoints.get("commits"):
                     checkpoints["commits"] = now.isoformat()
 

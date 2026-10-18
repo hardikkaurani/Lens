@@ -1453,3 +1453,475 @@ async def test_multi_repository_sync_reloads_orm_and_succeeds_after_earlier_repo
             assert res["details"]["activity_user/repo-healthy"]["status"] == "synced"
 
 
+@pytest.mark.asyncio
+async def test_commit_backfill_resumable_cursor_with_boundary_timestamp_collisions_across_successive_runs() -> None:
+    """Stage 15.4: Verify commit backfill progresses across multiple runs when multiple
+    commits share identical timestamps at page boundaries without infinite loops or skipping records.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="commit-collision-repo", full_name="activity_user/commit-collision-repo")
+
+    # 5 Commits in reverse-chronological order:
+    # C1: 2026-05-10T12:00:00Z
+    # C2: 2026-05-09T12:00:00Z (boundary commit)
+    # C3: 2026-05-09T12:00:00Z (collision with C2)
+    # C4: 2026-05-09T12:00:00Z (collision with C2, C3)
+    # C5: 2026-05-08T12:00:00Z (older)
+    c1 = {
+        "sha": "1" * 40,
+        "commit": {"message": "Commit 1", "author": {"name": "Dev", "date": "2026-05-10T12:00:00Z"}},
+        "author": {"login": "dev1"},
+        "html_url": "https://github.com/activity_user/commit-collision-repo/commit/" + "1" * 40,
+    }
+    c2 = {
+        "sha": "2" * 40,
+        "commit": {"message": "Commit 2", "author": {"name": "Dev", "date": "2026-05-09T12:00:00Z"}},
+        "author": {"login": "dev1"},
+        "html_url": "https://github.com/activity_user/commit-collision-repo/commit/" + "2" * 40,
+    }
+    c3 = {
+        "sha": "3" * 40,
+        "commit": {"message": "Commit 3", "author": {"name": "Dev", "date": "2026-05-09T12:00:00Z"}},
+        "author": {"login": "dev2"},
+        "html_url": "https://github.com/activity_user/commit-collision-repo/commit/" + "3" * 40,
+    }
+    c4 = {
+        "sha": "4" * 40,
+        "commit": {"message": "Commit 4", "author": {"name": "Dev", "date": "2026-05-09T12:00:00Z"}},
+        "author": {"login": "dev2"},
+        "html_url": "https://github.com/activity_user/commit-collision-repo/commit/" + "4" * 40,
+    }
+    c5 = {
+        "sha": "5" * 40,
+        "commit": {"message": "Commit 5", "author": {"name": "Dev", "date": "2026-05-08T12:00:00Z"}},
+        "author": {"login": "dev3"},
+        "html_url": "https://github.com/activity_user/commit-collision-repo/commit/" + "5" * 40,
+    }
+
+    recorded_calls: list[dict[str, Any]] = []
+
+    async def mock_list_commits(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        page = kwargs.get("page", 1)
+        until = kwargs.get("until")
+        since = kwargs.get("since")
+        per_page = kwargs.get("per_page", 2)
+        recorded_calls.append({"page": page, "until": until, "since": since, "per_page": per_page})
+
+        all_commits = [c1, c2, c3, c4, c5]
+        # Filter by until (inclusive)
+        if until:
+            until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+            filtered = [
+                c for c in all_commits
+                if datetime.fromisoformat(c["commit"]["author"]["date"].replace("Z", "+00:00")) <= until_dt
+            ]
+        else:
+            filtered = all_commits
+
+        # Slice by page and per_page
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        return filtered[start_idx:end_idx]
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_commits = mock_list_commits
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[])
+    mock_client.list_repository_issues = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    settings_obj = get_settings()
+    orig_pages = settings_obj.GITHUB_ACTIVITY_MAX_PAGES_PER_RUN
+    orig_page_size = settings_obj.GITHUB_ACTIVITY_PAGE_SIZE
+    try:
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", 1)
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", 2)
+
+        # -------------------------------------------------------------
+        # RUN 1: Initial sync (returns C1, C2)
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Assert exact call parameters for Run 1
+            assert recorded_calls[0] == {"page": 1, "until": None, "since": None, "per_page": 2}
+
+            # Commits C1, C2 persisted
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 2
+            assert {r.external_id for r in rows} == {"1" * 40, "2" * 40}
+
+            # Checkpoints: Ordinary checkpoint MUST NOT advance
+            assert "commits" not in checkpoints
+            assert "2026-05-09T12:00:00" in checkpoints["commits_backfill_until"]
+            assert checkpoints["commits_backfill_page"] == 1
+            assert "2026-05-10T12:00:00" in checkpoints["commits_frontier"]
+            assert meta["categories"]["commits"]["status"] == "partial"
+            assert meta["categories"]["commits"]["truncated"] is True
+
+        # -------------------------------------------------------------
+        # RUN 2: Resumed with until="2026-05-09T12:00:00" (returns C2, C3)
+        # C2 is repeated boundary record (overlap), C3 has identical timestamp
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Assert exact call parameters for Run 2
+            assert recorded_calls[1]["page"] == 1
+            assert "2026-05-09T12:00:00" in recorded_calls[1]["until"]
+
+            # Commits C1, C2, C3 persisted without duplicate rows
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 3
+            assert {r.external_id for r in rows} == {"1" * 40, "2" * 40, "3" * 40}
+
+            # Checkpoints: Ordinary checkpoint still NOT in checkpoints
+            assert "commits" not in checkpoints
+            # Crucial: Page MUST advance to 2 because min_commit_date == until
+            assert "2026-05-09T12:00:00" in checkpoints["commits_backfill_until"]
+            assert checkpoints["commits_backfill_page"] == 2
+            assert meta["categories"]["commits"]["status"] == "partial"
+            assert meta["categories"]["commits"]["truncated"] is True
+
+        # -------------------------------------------------------------
+        # RUN 3: Resumed with until="2026-05-09T12:00:00", page=2 (returns C4, C5)
+        # C4 shares timestamp, C5 is older ("2026-05-08T12:00:00")
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Assert exact call parameters for Run 3
+            assert recorded_calls[2]["page"] == 2
+            assert "2026-05-09T12:00:00" in recorded_calls[2]["until"]
+
+            # All 5 commits persisted without duplicates
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 5
+            assert {r.external_id for r in rows} == {"1" * 40, "2" * 40, "3" * 40, "4" * 40, "5" * 40}
+
+            # Checkpoints: min_commit_date is 2026-05-08, so until advances to 2026-05-08 and page resets to 1
+            assert "commits" not in checkpoints
+            assert "2026-05-08T12:00:00" in checkpoints["commits_backfill_until"]
+            assert checkpoints["commits_backfill_page"] == 1
+            assert meta["categories"]["commits"]["status"] == "partial"
+            assert meta["categories"]["commits"]["truncated"] is True
+
+        # -------------------------------------------------------------
+        # RUN 4: Resumed with until="2026-05-08T12:00:00", page=1 (returns [C5] -> len=1 < per_page=2)
+        # Backfill is now fully exhausted!
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Assert exact call parameters for Run 4
+            assert recorded_calls[3]["page"] == 1
+            assert "2026-05-08T12:00:00" in recorded_calls[3]["until"]
+
+            # Backfill cursor keys cleared upon completion
+            assert "commits_backfill_until" not in checkpoints
+            assert "commits_backfill_page" not in checkpoints
+            assert "commits_frontier" not in checkpoints
+
+            # Ordinary checkpoint advanced to highest frontier (2026-05-10T12:00:00)
+            assert "commits" in checkpoints
+            assert "2026-05-10T12:00:00" in checkpoints["commits"]
+
+            # Category and repository marked fully synced
+            assert meta["categories"]["commits"]["status"] == "synced"
+            assert meta["categories"]["commits"]["truncated"] is False
+            assert repo.activity_sync_status == "synced"
+    finally:
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", orig_pages)
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", orig_page_size)
+
+
+@pytest.mark.asyncio
+async def test_pull_request_backfill_resumable_cursor_across_successive_runs() -> None:
+    """Stage 15.4: Verify pull request backfill progresses across multiple runs without
+    skipping historical PRs even if collection changes, and captures incremental updates.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="pr-backfill-repo", full_name="activity_user/pr-backfill-repo")
+
+    # 5 PRs (ordered desc by updated_at)
+    pr5 = {
+        "id": 505, "number": 5, "title": "PR 5", "body": "b5",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/5",
+        "state": "open", "created_at": "2026-05-01T10:00:00Z", "updated_at": "2026-05-10T10:00:00Z",
+        "user": {"login": "dev1"},
+    }
+    pr4 = {
+        "id": 504, "number": 4, "title": "PR 4", "body": "b4",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/4",
+        "state": "open", "created_at": "2026-05-01T09:00:00Z", "updated_at": "2026-05-09T10:00:00Z",
+        "user": {"login": "dev1"},
+    }
+    pr3 = {
+        "id": 503, "number": 3, "title": "PR 3", "body": "b3",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/3",
+        "state": "open", "created_at": "2026-05-01T08:00:00Z", "updated_at": "2026-05-08T10:00:00Z",
+        "user": {"login": "dev2"},
+    }
+    pr2 = {
+        "id": 502, "number": 2, "title": "PR 2", "body": "b2",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/2",
+        "state": "open", "created_at": "2026-05-01T07:00:00Z", "updated_at": "2026-05-07T10:00:00Z",
+        "user": {"login": "dev2"},
+    }
+    pr1 = {
+        "id": 501, "number": 1, "title": "PR 1", "body": "b1",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/1",
+        "state": "closed", "created_at": "2026-05-01T06:00:00Z", "updated_at": "2026-05-06T10:00:00Z",
+        "user": {"login": "dev3"},
+    }
+
+    # PR 6 will be added between Run 1 and Run 2 to simulate collection change during backfill
+    pr6 = {
+        "id": 506, "number": 6, "title": "PR 6 (newly updated)", "body": "b6",
+        "html_url": "https://github.com/activity_user/pr-backfill-repo/pull/6",
+        "state": "open", "created_at": "2026-05-11T10:00:00Z", "updated_at": "2026-05-11T10:00:00Z",
+        "user": {"login": "dev4"},
+    }
+
+    current_github_prs = [pr5, pr4, pr3, pr2, pr1]
+    recorded_pr_calls: list[dict[str, Any]] = []
+
+    async def mock_list_prs(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        page = kwargs.get("page", 1)
+        per_page = kwargs.get("per_page", 2)
+        sort = kwargs.get("sort")
+        direction = kwargs.get("direction")
+        state = kwargs.get("state")
+        recorded_pr_calls.append({"page": page, "per_page": per_page, "sort": sort, "direction": direction, "state": state})
+
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        return current_github_prs[start_idx:end_idx]
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_pull_requests = mock_list_prs
+    mock_client.list_repository_issues = AsyncMock(return_value=[])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    settings_obj = get_settings()
+    orig_pages = settings_obj.GITHUB_ACTIVITY_MAX_PAGES_PER_RUN
+    orig_page_size = settings_obj.GITHUB_ACTIVITY_PAGE_SIZE
+    try:
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", 1)
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", 2)
+
+        # -------------------------------------------------------------
+        # RUN 1: Page 1 (returns PR 5, PR 4)
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            assert recorded_pr_calls[0] == {"page": 1, "per_page": 2, "sort": "updated", "direction": "desc", "state": "all"}
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 2
+            assert {r.external_id for r in rows} == {"505", "504"}
+
+            assert "pull_requests" not in checkpoints
+            assert checkpoints["prs_next_page"] == 2
+            assert "2026-05-10T10:00:00" in checkpoints["prs_frontier"]
+            assert meta["categories"]["pull_requests"]["status"] == "partial"
+            assert meta["categories"]["pull_requests"]["truncated"] is True
+
+        # Simulate collection change: PR 6 is updated, shifting PR 4 to Page 2 in GitHub
+        current_github_prs = [pr6, pr5, pr4, pr3, pr2, pr1]
+
+        # -------------------------------------------------------------
+        # RUN 2: Page 2 (returns PR 4, PR 3)
+        # PR 4 deduplicated, PR 3 added
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            assert recorded_pr_calls[1] == {"page": 2, "per_page": 2, "sort": "updated", "direction": "desc", "state": "all"}
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 3
+            assert {r.external_id for r in rows} == {"505", "504", "503"}
+
+            assert "pull_requests" not in checkpoints
+            assert checkpoints["prs_next_page"] == 3
+            assert "2026-05-10T10:00:00" in checkpoints["prs_frontier"]
+            assert meta["categories"]["pull_requests"]["status"] == "partial"
+            assert meta["categories"]["pull_requests"]["truncated"] is True
+
+        # -------------------------------------------------------------
+        # RUN 3: Page 3 (returns PR 2, PR 1)
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            assert recorded_pr_calls[2] == {"page": 3, "per_page": 2, "sort": "updated", "direction": "desc", "state": "all"}
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            assert len(rows) == 5
+            assert {r.external_id for r in rows} == {"505", "504", "503", "502", "501"}
+
+            assert "pull_requests" not in checkpoints
+            assert checkpoints["prs_next_page"] == 4
+            assert meta["categories"]["pull_requests"]["status"] == "partial"
+            assert meta["categories"]["pull_requests"]["truncated"] is True
+
+        # -------------------------------------------------------------
+        # RUN 4: Page 4 (returns [] -> len=0 < per_page=2) -> Backfill complete!
+        # -------------------------------------------------------------
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            assert recorded_pr_calls[3] == {"page": 4, "per_page": 2, "sort": "updated", "direction": "desc", "state": "all"}
+            assert "prs_next_page" not in checkpoints
+            assert "prs_frontier" not in checkpoints
+            assert "pull_requests" in checkpoints
+            assert "2026-05-10T10:00:00" in checkpoints["pull_requests"]
+            assert meta["categories"]["pull_requests"]["status"] == "synced"
+            assert meta["categories"]["pull_requests"]["truncated"] is False
+
+        # -------------------------------------------------------------
+        # RUN 5: Incremental sync immediately captures PR 6 from Page 1
+        # -------------------------------------------------------------
+        current_github_prs = [pr6]
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Starts at page 1 for incremental sync
+            assert recorded_pr_calls[4]["page"] == 1
+            rows = (await session.execute(select(GitHubActivity).where(GitHubActivity.repository_id == repo_id))).scalars().all()
+            # PR 6 is now ingested! All 6 PRs in DB!
+            assert len(rows) == 6
+            assert {r.external_id for r in rows} == {"506", "505", "504", "503", "502", "501"}
+            assert "2026-05-11T10:00:00" in checkpoints["pull_requests"]
+            assert meta["categories"]["pull_requests"]["status"] == "synced"
+            assert meta["categories"]["pull_requests"]["truncated"] is False
+    finally:
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_MAX_PAGES_PER_RUN", orig_pages)
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_PAGE_SIZE", orig_page_size)
+
+
+@pytest.mark.asyncio
+async def test_backfill_cursor_does_not_advance_page_when_budget_exhausted_before_fetch() -> None:
+    """Stage 15.4: Verify that budget exhaustion before fetching any pages preserves
+    the exact cursor without incrementing prs_next_page or commits_backfill_page.
+    """
+    await clean_database()
+    conn_id = await create_test_connection()
+    repo_id = await create_test_repository(conn_id, name="budget-exhaust-repo", full_name="activity_user/budget-exhaust-repo")
+
+    mock_client = AsyncMock()
+    mock_client.list_repository_pull_requests = AsyncMock(return_value=[])
+    mock_client.list_repository_commits = AsyncMock(return_value=[])
+    mock_client.list_repository_issues = AsyncMock(return_value=[])
+    mock_client.list_pull_request_reviews = AsyncMock(return_value=[])
+
+    # Pre-populate repository checkpoints with active backfill cursors
+    async with AsyncSessionLocal() as session:
+        repo = await session.get(GitHubRepository, repo_id)
+        assert repo is not None
+        repo.activity_sync_metadata = {
+            "checkpoints": {
+                "prs_next_page": 3,
+                "prs_frontier": "2026-05-10T10:00:00Z",
+                "commits_backfill_until": "2026-05-09T12:00:00Z",
+                "commits_backfill_page": 2,
+                "commits_frontier": "2026-05-10T12:00:00Z",
+            }
+        }
+        await session.commit()
+
+    settings_obj = get_settings()
+    orig_budget = settings_obj.GITHUB_ACTIVITY_REQUEST_BUDGET
+    try:
+        # Budget = 0: All categories immediately see budget <= 0 without fetching
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_REQUEST_BUDGET", 0)
+
+        async with AsyncSessionLocal() as session:
+            conn = await session.get(GitHubConnection, conn_id)
+            repo = await session.get(GitHubRepository, repo_id)
+            assert conn is not None and repo is not None
+            await sync_repository_activities(
+                db=session, connection=conn, repository=repo, access_token="token", github_client=mock_client
+            )
+            meta = repo.activity_sync_metadata
+            checkpoints = meta["checkpoints"]
+
+            # Neither cursor page must have advanced!
+            assert checkpoints["prs_next_page"] == 3
+            assert checkpoints["commits_backfill_page"] == 2
+            assert checkpoints["commits_backfill_until"] == "2026-05-09T12:00:00Z"
+            assert checkpoints["prs_frontier"] == "2026-05-10T10:00:00Z"
+            assert checkpoints["commits_frontier"] == "2026-05-10T12:00:00Z"
+
+            assert meta["categories"]["pull_requests"]["truncated"] is True
+            assert meta["categories"]["commits"]["truncated"] is True
+            assert repo.activity_sync_status == "partial"
+    finally:
+        object.__setattr__(settings_obj, "GITHUB_ACTIVITY_REQUEST_BUDGET", orig_budget)
+
+
+
