@@ -327,4 +327,136 @@ describe("Search Experience & UX (Tests 20-26, 31)", () => {
     expect(screen.getByText("Newer Second Result")).toBeInTheDocument();
     expect(screen.queryByText("Older First Result (Stale)")).not.toBeInTheDocument();
   });
+
+  // Stage 16: Mixed results rendering (captures + GitHub activities)
+  it("Stage 16: renders mixed results with captures and GitHub activity metadata", async () => {
+    const mockUnifiedResponse: SearchResponse = {
+      query: "auth refactor",
+      total: 2,
+      limit: 20,
+      degraded: false,
+      results: [
+        {
+          capture_id: "cap-note-1",
+          title: "Auth Refactor Architectural Notes",
+          original_url: null,
+          source_type: "text",
+          result_kind: "capture",
+          best_score: 0.95,
+          best_lexical_score: 0.9,
+          best_semantic_score: 1.0,
+          matching_chunks: [
+            {
+              chunk_id: "chunk-1",
+              chunk_index: 0,
+              content_excerpt: "We decided to decouple token storage from sessions...",
+              score: 0.95,
+              lexical_score: 0.9,
+              semantic_score: 1.0,
+            },
+          ],
+        },
+        {
+          capture_id: "gh-pr-101",
+          title: "PR #42: Refactor OAuth token storage",
+          original_url: "https://github.com/octocat/Lens/pull/42",
+          source_type: "pull_request",
+          result_kind: "github_activity",
+          activity_type: "pull_request",
+          repository_name: "octocat/Lens",
+          author_login: "octocat",
+          state: "merged",
+          external_id: "42",
+          best_score: 0.88,
+          best_lexical_score: 0.88,
+          best_semantic_score: null,
+          matching_chunks: [
+            {
+              chunk_id: "chunk-gh-1",
+              chunk_index: 0,
+              content_excerpt: "Closes issue #39 by migrating to encrypted token metadata.",
+              score: 0.88,
+              lexical_score: 0.88,
+              semantic_score: null,
+            },
+          ],
+        },
+      ],
+    };
+
+    vi.spyOn(apiClient, "search").mockResolvedValue(mockUnifiedResponse);
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "auth refactor" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      // Capture item rendered with inspect capture link
+      expect(screen.getByText("Auth Refactor Architectural Notes")).toBeInTheDocument();
+      const captureInspectLink = screen.getByRole("link", { name: /Inspect Capture/i });
+      expect(captureInspectLink).toHaveAttribute("href", "/captures/cap-note-1");
+
+      // GitHub activity item rendered with GitHub metadata and external link
+      expect(screen.getByText("PR #42: Refactor OAuth token storage")).toBeInTheDocument();
+      expect(screen.getByText("octocat/Lens")).toBeInTheDocument();
+      expect(screen.getByText("@octocat")).toBeInTheDocument();
+      expect(screen.getByText("MERGED")).toBeInTheDocument();
+      const ghLink = screen.getByTestId("inspect-github-gh-pr-101");
+      expect(ghLink).toHaveAttribute("href", "https://github.com/octocat/Lens/pull/42");
+      expect(ghLink).toHaveAttribute("target", "_blank");
+    });
+  });
+
+  // Stage 16: Source filter selection
+  it("Stage 16: clicking source filter pill triggers search with source_type parameter", async () => {
+    const searchSpy = vi.spyOn(apiClient, "search").mockResolvedValue({
+      query: "redis pool",
+      total: 1,
+      limit: 20,
+      degraded: false,
+      source_filter: "github",
+      results: [
+        {
+          capture_id: "gh-issue-5",
+          title: "Issue #5: Redis connection pooling error",
+          original_url: "https://github.com/octocat/Lens/issues/5",
+          source_type: "issue",
+          result_kind: "github_activity",
+          activity_type: "issue",
+          repository_name: "octocat/Lens",
+          author_login: "monalisa",
+          state: "open",
+          external_id: "5",
+          best_score: 0.91,
+          best_lexical_score: 0.91,
+          best_semantic_score: null,
+          matching_chunks: [],
+        },
+      ],
+    });
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "redis pool" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "redis pool", limit: 20 })
+      );
+    });
+
+    // Now click the GitHub filter pill
+    const githubFilterBtn = screen.getByTestId("filter-btn-github");
+    fireEvent.click(githubFilterBtn);
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "redis pool", source_type: "github" })
+      );
+    });
+  });
 });

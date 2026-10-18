@@ -328,12 +328,21 @@ export const apiClient = {
   },
 
   /**
-   * Perform hybrid search across captured content and titles.
+   * Perform unified hybrid search across captured content and GitHub activities.
    */
-  async search(params: { q: string; limit?: number; signal?: AbortSignal }): Promise<SearchResponse> {
-    const query = encodeURIComponent(params.q.trim());
-    const limit = params.limit ?? 10;
-    return request<SearchResponse>(`/search?q=${query}&limit=${limit}`, {
+  async search(params: {
+    q: string;
+    limit?: number;
+    source_type?: string;
+    signal?: AbortSignal;
+  }): Promise<SearchResponse> {
+    const searchParams = new URLSearchParams();
+    searchParams.set("q", params.q.trim());
+    searchParams.set("limit", String(params.limit ?? 10));
+    if (params.source_type && params.source_type.trim()) {
+      searchParams.set("source_type", params.source_type.trim());
+    }
+    return request<SearchResponse>(`/search?${searchParams.toString()}`, {
       method: "GET",
       signal: params.signal,
     });

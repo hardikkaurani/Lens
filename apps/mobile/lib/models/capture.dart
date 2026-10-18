@@ -27,12 +27,36 @@ enum ProcessingStatus {
 /// Source type values matching the backend FastAPI enum.
 enum SourceType {
   url,
-  text;
+  text,
+  pdf,
+  image,
+  file,
+  github,
+  pullRequest,
+  issue,
+  commit,
+  review;
 
   static SourceType fromString(String? value) {
     switch (value?.toLowerCase()) {
       case 'text':
         return SourceType.text;
+      case 'pdf':
+        return SourceType.pdf;
+      case 'image':
+        return SourceType.image;
+      case 'file':
+        return SourceType.file;
+      case 'github':
+        return SourceType.github;
+      case 'pull_request':
+        return SourceType.pullRequest;
+      case 'issue':
+        return SourceType.issue;
+      case 'commit':
+        return SourceType.commit;
+      case 'review':
+        return SourceType.review;
       case 'url':
       default:
         return SourceType.url;

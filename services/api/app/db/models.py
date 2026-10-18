@@ -613,6 +613,13 @@ class GitHubActivity(Base):
         server_default=sa.text("'{}'::jsonb"),
     )
 
+    # Full-text search tsvector computed column (title and body search)
+    tsv: Mapped[Optional[Any]] = mapped_column(
+        TSVECTOR,
+        sa.Computed("to_tsvector('english', coalesce(title, '') || ' ' || coalesce(body, ''))", persisted=True),
+        nullable=True,
+    )
+
     repository: Mapped["GitHubRepository"] = relationship(
         "GitHubRepository",
         back_populates="activities",
@@ -634,6 +641,11 @@ class GitHubActivity(Base):
             "ix_github_activities_repo_created",
             "repository_id",
             "source_created_at",
+        ),
+        sa.Index(
+            "ix_github_activities_tsv",
+            "tsv",
+            postgresql_using="gin",
         ),
     )
 

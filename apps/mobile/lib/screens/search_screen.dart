@@ -268,17 +268,92 @@ class _SearchScreenState extends State<SearchScreen> {
         ...results.map((result) => _SearchResultCard(
               result: result,
               onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => CaptureDetailScreen(
-                      captureId: result.captureId,
-                      apiClient: _client,
+                if (result.isGitHubActivity) {
+                  _showGitHubDetails(context, result);
+                } else {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => CaptureDetailScreen(
+                        captureId: result.captureId,
+                        apiClient: _client,
+                      ),
                     ),
-                  ),
-                );
+                  );
+                }
               },
             )),
       ],
+    );
+  }
+
+  void _showGitHubDetails(BuildContext context, SearchResultCapture result) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surfaceElevated,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  SourceBadge(sourceType: SourceType.fromString(result.sourceType)),
+                  _ScoreBadge(score: result.bestScore),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                result.displayTitle,
+                style: const TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              if (result.repositoryName != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  result.repositoryName!,
+                  style: const TextStyle(
+                    color: AppTheme.accent,
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+              if (result.authorLogin != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'Author: @${result.authorLogin!}',
+                  style: const TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+              if (result.originalUrl != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  result.originalUrl!,
+                  style: const TextStyle(
+                    color: AppTheme.textMuted,
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -325,7 +400,35 @@ class _SearchResultCard extends StatelessWidget {
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              if (safeUrl != null) ...[
+              if (result.repositoryName != null) ...[
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    const Icon(Icons.source_rounded, size: 12, color: AppTheme.accent),
+                    const SizedBox(width: 4),
+                    Text(
+                      result.repositoryName!,
+                      style: const TextStyle(
+                        color: AppTheme.accent,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    if (result.authorLogin != null) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        '@${result.authorLogin!}',
+                        style: const TextStyle(
+                          color: AppTheme.textMuted,
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+              if (safeUrl != null && !result.isGitHubActivity) ...[
                 const SizedBox(height: 4),
                 Text(
                   safeUrl,
