@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     S3_REGION: str = "us-east-1"
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
+    # Stage 15 — GitHub Activity Ingestion settings
+    GITHUB_ACTIVITY_MAX_PAGES_PER_RUN: int = 5
+    GITHUB_ACTIVITY_PAGE_SIZE: int = 100
+    GITHUB_ACTIVITY_REQUEST_BUDGET: int = 60
+    GITHUB_ACTIVITY_MAX_RECORDS_PER_CATEGORY: int = 500
+    GITHUB_ACTIVITY_MAX_PRS_FOR_REVIEWS: int = 25
+    GITHUB_ACTIVITY_REVIEWS_PER_PR: int = 30
+
 
     # Stage 7 — Embedding settings
     EMBEDDING_PROVIDER: str = "openai"

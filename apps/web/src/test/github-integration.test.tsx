@@ -655,5 +655,475 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
     expect(card).toHaveTextContent("public and private repositories");
     expect(card).not.toHaveTextContent("No code modification or write permissions are requested");
   });
+
+  // -------------------------------------------------------------
+  // STAGE 15: GitHub Activity Ingestion UX (Tests 51-61)
+  // -------------------------------------------------------------
+
+  // 51. activity sync button disabled when no repositories are selected
+  it("51. activity sync button is disabled when no repositories are selected", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-1",
+          github_repository_id: "101",
+          name: "repo-one",
+          full_name: "octocat/repo-one",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: false,
+          sync_status: "synced" as const,
+          sync_error: null,
+          html_url: "https://github.com/octocat/repo-one",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-activities-btn")).toBeInTheDocument();
+    });
+
+    const syncActivitiesBtn = screen.getByTestId("sync-activities-btn");
+    expect(syncActivitiesBtn).toBeDisabled();
+    expect(syncActivitiesBtn).toHaveTextContent("Sync Activities (0)");
+  });
+
+  // 52. activity sync button triggers syncGitHubActivities with selected repository IDs
+  it("52. triggers syncGitHubActivities with selected repository IDs", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-1",
+          github_repository_id: "101",
+          name: "repo-one",
+          full_name: "octocat/repo-one",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: true,
+          sync_status: "synced" as const,
+          sync_error: null,
+          html_url: "https://github.com/octocat/repo-one",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    const syncSpy = vi.spyOn(apiClient, "syncGitHubActivities").mockResolvedValue({
+      status: "enqueued",
+      synced_repositories: 1,
+      synced_activities: 0,
+      message: "Activity synchronization job enqueued in background worker.",
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-activities-btn")).toHaveTextContent("Sync Activities (1)");
+    });
+
+    const syncActivitiesBtn = screen.getByTestId("sync-activities-btn");
+    expect(syncActivitiesBtn).not.toBeDisabled();
+
+    fireEvent.click(syncActivitiesBtn);
+
+    await waitFor(() => {
+      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-1"], async_sync: true });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-notification")).toHaveTextContent(
+        "Activity synchronization job enqueued in background worker."
+      );
+    });
+  });
+
+  // 53. handles already_syncing status correctly
+  it("53. displays already in progress notification when activity sync is already active", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-1",
+          github_repository_id: "101",
+          name: "repo-one",
+          full_name: "octocat/repo-one",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: true,
+          sync_status: "synced" as const,
+          sync_error: null,
+          html_url: "https://github.com/octocat/repo-one",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    vi.spyOn(apiClient, "syncGitHubActivities").mockResolvedValue({
+      status: "already_syncing",
+      synced_repositories: 0,
+      synced_activities: 0,
+      message: "Activity synchronization is already in progress for this repository.",
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-activities-btn")).toHaveTextContent("Sync Activities (1)");
+    });
+
+    fireEvent.click(screen.getByTestId("sync-activities-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("settings-notification")).toHaveTextContent(
+        "Activity synchronization is already in progress"
+      );
+    });
+  });
+
+  // 54. renders activity sync status badges and counts on repository item
+  it("54. renders activity sync status badge and metadata counts on selected repository", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-1",
+          github_repository_id: "101",
+          name: "repo-one",
+          full_name: "octocat/repo-one",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: true,
+          sync_status: "synced" as const,
+          sync_error: null,
+          activity_sync_status: "synced",
+          activity_sync_metadata: {
+            categories: {
+              pull_requests: { status: "synced", count: 12, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              issues: { status: "synced", count: 4, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              commits: { status: "synced", count: 45, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+              reviews: { status: "synced", count: 8, last_synced_at: "2026-10-03T12:00:00Z", error: null },
+            },
+          },
+          activity_last_synced_at: "2026-10-03T12:00:00Z",
+          html_url: "https://github.com/octocat/repo-one",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-activity-section-repo-1")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("activity-status-repo-1")).toHaveTextContent("Synced");
+    const countsEl = screen.getByTestId("repo-counts-repo-1");
+    expect(countsEl).toHaveTextContent("pull_requests: 12");
+    expect(countsEl).toHaveTextContent("issues: 4");
+    expect(countsEl).toHaveTextContent("commits: 45");
+    expect(countsEl).toHaveTextContent("reviews: 8");
+    expect(screen.getByTestId("repo-activity-synced-at-repo-1")).toBeInTheDocument();
+  });
+
+  // 55. displays repository error and per-repository retry action
+  it("55. displays error and allows retrying sync for a specific failed repository", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-fail",
+          github_repository_id: "202",
+          name: "repo-fail",
+          full_name: "octocat/repo-fail",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: true,
+          sync_status: "synced" as const,
+          sync_error: null,
+          activity_sync_status: "failed",
+          activity_sync_error: "GitHub API returned 502 Bad Gateway",
+          html_url: "https://github.com/octocat/repo-fail",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    const syncSpy = vi.spyOn(apiClient, "syncGitHubActivities").mockResolvedValue({
+      status: "enqueued",
+      synced_repositories: 1,
+      synced_activities: 0,
+      message: "Activity synchronization job enqueued in background worker.",
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("repo-activity-error-repo-fail")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("activity-status-repo-fail")).toHaveTextContent("Sync Failed");
+    expect(screen.getByTestId("repo-activity-error-repo-fail")).toHaveTextContent(
+      "GitHub API returned 502 Bad Gateway"
+    );
+
+    const retryBtn = screen.getByTestId("retry-repo-sync-repo-fail");
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(syncSpy).toHaveBeenCalledWith({ repository_ids: ["repo-fail"], async_sync: true });
+    });
+  });
+
+  // 56. displays rate limit error message when activity sync is rate limited
+  it("56. displays sanitized rate limit message when API responds with 429", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [
+        {
+          id: "repo-1",
+          github_repository_id: "101",
+          name: "repo-one",
+          full_name: "octocat/repo-one",
+          owner_login: "octocat",
+          is_private: false,
+          is_fork: false,
+          is_archived: false,
+          is_disabled: false,
+          is_selected: true,
+          sync_status: "synced" as const,
+          sync_error: null,
+          html_url: "https://github.com/octocat/repo-one",
+          created_at: "2026-10-03T10:00:00Z",
+          updated_at: "2026-10-03T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    vi.spyOn(apiClient, "syncGitHubActivities").mockRejectedValue(
+      new ApiClientError(429, "Rate limit exceeded")
+    );
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-activities-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("sync-activities-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-error-message")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("activity-error-message")).toHaveTextContent(
+      "GitHub API rate limit exceeded. Please try again later."
+    );
+  });
+
+  // 57. toggles activity preview drawer and displays ingested activities
+  it("57. opens ingested activity drawer and renders activity items", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    const getActivitiesSpy = vi.spyOn(apiClient, "getGitHubActivities").mockResolvedValue({
+      items: [
+        {
+          id: "act-1",
+          repository_id: "repo-1",
+          activity_type: "pull_request",
+          external_id: "42",
+          title: "Add feature X",
+          body: "Implements feature X",
+          html_url: "https://github.com/octocat/repo/pull/42",
+          author_login: "octocat",
+          state: "open",
+          source_created_at: "2026-10-03T11:00:00Z",
+          source_updated_at: "2026-10-03T11:00:00Z",
+          ingested_at: "2026-10-03T12:00:00Z",
+          payload: {},
+        },
+      ],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("toggle-activities-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("toggle-activities-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("activities-drawer")).toBeInTheDocument();
+    });
+
+    expect(getActivitiesSpy).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByTestId("activity-item-act-1")).toBeInTheDocument();
+      expect(screen.getByTestId("activity-title-act-1")).toHaveTextContent("Add feature X");
+    });
+  });
+
+  // 58. selecting category filter and then selecting 'All' removes category filter
+  it("58. selecting category filter and then selecting 'All' removes category filter", async () => {
+    vi.spyOn(apiClient, "getGitHubStatus").mockResolvedValue({
+      connected: true,
+      github_username: "octocat",
+      github_user_id: "123",
+      scope: "read:user,repo",
+      connected_at: "2026-10-03T10:00:00Z",
+      last_verified_at: "2026-10-03T11:00:00Z",
+    });
+
+    vi.spyOn(apiClient, "getGitHubRepositories").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
+
+    const getActivitiesSpy = vi.spyOn(apiClient, "getGitHubActivities").mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 25,
+      offset: 0,
+    });
+
+    render(<SettingsContent />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("toggle-activities-btn")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId("toggle-activities-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("activities-drawer")).toBeInTheDocument();
+    });
+
+    // Select "issue" filter
+    const issueBtn = screen.getByTestId("activity-filter-issue");
+    fireEvent.click(issueBtn);
+
+    await waitFor(() => {
+      expect(getActivitiesSpy).toHaveBeenLastCalledWith({ activity_type: "issue", limit: 25 });
+    });
+
+    // Select "All" filter
+    const allBtn = screen.getByTestId("activity-filter-all");
+    fireEvent.click(allBtn);
+
+    await waitFor(() => {
+      expect(getActivitiesSpy).toHaveBeenLastCalledWith({ activity_type: undefined, limit: 25 });
+    });
+  });
 });
 

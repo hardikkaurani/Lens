@@ -3,6 +3,9 @@ import {
   type CaptureCreatePayload,
   type CaptureDetail,
   type CaptureListResponse,
+  type GitHubActivityListResponse,
+  type GitHubActivityStatusResponse,
+  type GitHubActivitySyncResponse,
   type GitHubConnectionStatus,
   type GitHubDisconnectResponse,
   type GitHubRepoListResponse,
@@ -420,4 +423,61 @@ export const apiClient = {
       signal: params.signal,
     });
   },
+
+  /**
+   * Trigger activity ingestion for selected repositories.
+   */
+  async syncGitHubActivities(params: {
+    repository_ids?: string[];
+    async_sync?: boolean;
+    signal?: AbortSignal;
+  } = {}): Promise<GitHubActivitySyncResponse> {
+    const query = new URLSearchParams();
+    if (params.async_sync) query.set("async_sync", "true");
+    const qs = query.toString();
+    const endpoint = `/integrations/github/activities/sync${qs ? `?${qs}` : ""}`;
+    const payload = params.repository_ids ? { repository_ids: params.repository_ids } : undefined;
+
+    return request<GitHubActivitySyncResponse>(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Retrieve ingested GitHub activities with optional filtering and pagination.
+   */
+  async getGitHubActivities(params: {
+    repository_id?: string;
+    activity_type?: string;
+    limit?: number;
+    offset?: number;
+    signal?: AbortSignal;
+  } = {}): Promise<GitHubActivityListResponse> {
+    const query = new URLSearchParams();
+    if (params.repository_id) query.set("repository_id", params.repository_id);
+    if (params.activity_type) query.set("activity_type", params.activity_type);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.offset !== undefined) query.set("offset", String(params.offset));
+
+    const qs = query.toString();
+    const endpoint = `/integrations/github/activities${qs ? `?${qs}` : ""}`;
+    return request<GitHubActivityListResponse>(endpoint, {
+      method: "GET",
+      signal: params.signal,
+    });
+  },
+
+  /**
+   * Retrieve aggregate activity sync state across selected repositories.
+   */
+  async getGitHubActivityStatus(params: { signal?: AbortSignal } = {}): Promise<GitHubActivityStatusResponse> {
+    return request<GitHubActivityStatusResponse>("/integrations/github/activities/status", {
+      method: "GET",
+      signal: params.signal,
+    });
+  },
 };
+

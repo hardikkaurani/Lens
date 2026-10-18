@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import logging
 from urllib.parse import urlencode, urlparse
-from typing import Optional
+from typing import Any, Optional
 import uuid
 
 from fastapi import (
@@ -15,11 +15,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import RedirectResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import Settings, get_settings
 from app.core.encryption import EncryptionError
+from app.db.models import GitHubRepository
 from app.db.session import get_db
 from app.integrations.github.client import (
     GitHubAuthError,
@@ -30,6 +32,10 @@ from app.integrations.github.client import (
     get_github_client,
 )
 from app.integrations.github.schemas import (
+    GitHubActivityListResponse,
+    GitHubActivityResponse,
+    GitHubActivitySyncRequest,
+    GitHubActivitySyncResponse,
     GitHubConnectionStatus,
     GitHubDisconnectResponse,
     GitHubRepoListResponse,
@@ -39,9 +45,12 @@ from app.integrations.github.schemas import (
     check_sufficient_repo_scope,
 )
 from app.integrations.github.service import (
+    GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE,
     GENERIC_SYNC_ERROR_MESSAGE,
     OAUTH_COOKIE_NAME,
     OAuthStorageError,
+    acquire_activity_enqueue_lock,
+    acquire_activity_sync_lock,
     acquire_enqueue_lock,
     acquire_sync_lock,
     delete_github_connection,
@@ -49,19 +58,29 @@ from app.integrations.github.service import (
     generate_oauth_state,
     generate_session_binding,
     get_github_connection,
+    is_activity_sync_locked,
+    is_activity_sync_metadata_active,
     is_sync_locked,
     is_sync_metadata_active,
+    list_connection_activities,
     list_connection_repositories,
+    release_activity_enqueue_lock,
+    release_activity_sync_lock,
     release_enqueue_lock,
     release_sync_lock,
     store_oauth_state,
+    sync_selected_repositories_activities,
     update_repository_selection,
     upsert_github_connection,
     validate_and_consume_oauth_state,
 )
-from app.queue.job import enqueue_github_repo_sync_job
+from app.queue.job import (
+    enqueue_github_activity_sync_job,
+    enqueue_github_repo_sync_job,
+)
 
 logger = logging.getLogger(__name__)
+
 
 router = APIRouter(prefix="/integrations/github", tags=["integrations"])
 
@@ -583,4 +602,291 @@ async def update_github_repository_selection(
         )
 
     return GitHubRepositoryResponse.model_validate(updated_repo)
+
+
+@router.post(
+    "/activities/sync",
+    response_model=GitHubActivitySyncResponse,
+    summary="Synchronize GitHub repository activities",
+    description="Synchronizes pull requests, issues, commits, and reviews for selected repositories.",
+)
+async def sync_github_activities(
+    payload: Optional[GitHubActivitySyncRequest] = None,
+    async_sync: bool = Query(False, description="Enqueue in background worker instead of synchronous processing."),
+    db: AsyncSession = Depends(get_db),
+    github_client: GitHubClient = Depends(get_github_client),
+) -> GitHubActivitySyncResponse:
+    """Trigger activity synchronization for selected repositories."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found. Please connect your GitHub account first.",
+        )
+
+    # 1. Enforce sufficient repository discovery OAuth scope
+    if not check_sufficient_repo_scope(connection.scope):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="GitHub connection lacks required repository permissions (repo or public_repo scope). Please reconnect your GitHub account to grant repository access.",
+        )
+
+    repository_ids = payload.repository_ids if payload else None
+
+    # Validate client-supplied repository IDs: ownership and selection state
+    if repository_ids:
+        stmt = select(GitHubRepository).where(
+            GitHubRepository.id.in_(repository_ids),
+            GitHubRepository.connection_id == connection.id,
+        )
+        res = await db.execute(stmt)
+        found_repos = {r.id: r for r in res.scalars().all()}
+        for r_id in repository_ids:
+            if r_id not in found_repos:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Repository {r_id} not found or does not belong to this connection.",
+                )
+            if not found_repos[r_id].is_selected:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Repository '{found_repos[r_id].full_name}' is not selected for synchronization.",
+                )
+
+    # 2. Async background sync path
+    if async_sync:
+        sync_info = (connection.token_metadata or {}).get("activity_sync", {})
+        if is_activity_sync_metadata_active(sync_info) or await is_activity_sync_locked(connection.id):
+            return GitHubActivitySyncResponse(
+                status="already_syncing",
+                message="Activity synchronization is already in progress for this connection.",
+            )
+
+        # Concurrency guard: serialize duplicate enqueue requests
+        enqueue_token = await acquire_activity_enqueue_lock(connection.id)
+        if not enqueue_token:
+            return GitHubActivitySyncResponse(
+                status="already_syncing",
+                message="Activity synchronization is already in progress for this connection.",
+            )
+
+        try:
+            # Re-verify under enqueue lock
+            await db.refresh(connection, attribute_names=["token_metadata"])
+            sync_info_fresh = (connection.token_metadata or {}).get("activity_sync", {})
+            if is_activity_sync_metadata_active(sync_info_fresh) or await is_activity_sync_locked(connection.id):
+                return GitHubActivitySyncResponse(
+                    status="already_syncing",
+                    message="Activity synchronization is already in progress for this connection.",
+                )
+
+            # Persist syncing state before enqueueing
+            now = datetime.now(timezone.utc)
+            sync_meta = dict(connection.token_metadata or {})
+            sync_meta["activity_sync"] = {
+                "status": "syncing",
+                "started_at": now.isoformat(),
+                "error": None,
+            }
+            connection.token_metadata = sync_meta
+            flag_modified(connection, "token_metadata")
+            await db.commit()
+
+            try:
+                await enqueue_github_activity_sync_job(
+                    connection_id=connection.id,
+                    repository_ids=repository_ids,
+                )
+            except Exception as enqueue_exc:
+                logger.exception("Failed to enqueue GitHub activity sync job: %s", enqueue_exc)
+                fail_time = datetime.now(timezone.utc)
+                fail_meta = dict(connection.token_metadata or {})
+                fail_meta["activity_sync"] = {
+                    "status": "failed",
+                    "failed_at": fail_time.isoformat(),
+                    "error": "Failed to enqueue activity synchronization job.",
+                }
+                connection.token_metadata = fail_meta
+                flag_modified(connection, "token_metadata")
+                try:
+                    await db.commit()
+                except Exception as db_exc:
+                    logger.error("Failed to commit failed state after enqueue error: %s", db_exc)
+                    await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Failed to queue activity sync. Please retry.",
+                )
+
+            return GitHubActivitySyncResponse(
+                status="enqueued",
+                message="GitHub activity synchronization job enqueued in background worker.",
+            )
+        finally:
+            await release_activity_enqueue_lock(connection.id, enqueue_token)
+
+    # 3. Synchronous sync path
+    sync_info = (connection.token_metadata or {}).get("activity_sync", {})
+    if is_activity_sync_metadata_active(sync_info):
+        return GitHubActivitySyncResponse(
+            status="already_syncing",
+            message="Activity synchronization is already in progress for this connection.",
+        )
+
+    lock_token = await acquire_activity_sync_lock(connection.id)
+    if not lock_token:
+        return GitHubActivitySyncResponse(
+            status="already_syncing",
+            message="Activity synchronization is already in progress for this connection.",
+        )
+
+    try:
+        result = await sync_selected_repositories_activities(
+            db=db,
+            connection_id=connection.id,
+            repository_ids=repository_ids,
+            github_client=github_client,
+        )
+        return GitHubActivitySyncResponse(
+            status=result.get("status", "completed"),
+            synced_repositories=result.get("synced_repositories", 0),
+            synced_activities=result.get("synced_activities", 0),
+            message=result.get("message", "Activity synchronization finished."),
+            details=result.get("details"),
+        )
+    except GitHubRateLimitError as rate_err:
+        headers = {}
+        if rate_err.retry_after is not None:
+            headers["Retry-After"] = str(rate_err.retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="GitHub API rate limit exceeded. Please try again later.",
+            headers=headers,
+        )
+    except GitHubAuthError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="GitHub access token rejected. Please reconnect your account.",
+        )
+    except GitHubTimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timeout communicating with GitHub API while synchronizing activities.",
+        )
+    except GitHubClientError as client_err:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"GitHub API error during activity synchronization: {client_err.message}",
+        )
+    except EncryptionError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to decrypt stored GitHub access token.",
+        )
+    except Exception as exc:
+        logger.exception("Unexpected error during activity sync: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=GENERIC_ACTIVITY_SYNC_ERROR_MESSAGE,
+        )
+    finally:
+        await release_activity_sync_lock(connection.id, lock_token)
+
+
+@router.get(
+    "/activities",
+    response_model=GitHubActivityListResponse,
+    summary="List ingested GitHub activities",
+    description="Returns paginated and filtered activity records for selected repositories.",
+)
+async def list_github_activities(
+    repository_id: Optional[uuid.UUID] = Query(None, description="Filter by repository UUID."),
+    activity_type: Optional[str] = Query(None, description="Filter by type: pull_request, issue, commit, or review."),
+    limit: int = Query(50, ge=1, le=100, description="Page limit."),
+    offset: int = Query(0, ge=0, description="Page offset."),
+    db: AsyncSession = Depends(get_db),
+) -> GitHubActivityListResponse:
+    """Retrieve ingested GitHub activities with pagination and filtering."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found.",
+        )
+
+    # If repository_id specified, verify repository exists and belongs to this connection
+    if repository_id is not None:
+        stmt = select(GitHubRepository).where(
+            GitHubRepository.id == repository_id,
+            GitHubRepository.connection_id == connection.id,
+        )
+        repo_res = await db.execute(stmt)
+        if not repo_res.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Repository not found or does not belong to this connection.",
+            )
+
+    items, total = await list_connection_activities(
+        db=db,
+        connection_id=connection.id,
+        repository_id=repository_id,
+        activity_type=activity_type,
+        limit=limit,
+        offset=offset,
+    )
+
+    return GitHubActivityListResponse(
+        items=[GitHubActivityResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/activities/status",
+    summary="Get GitHub activity synchronization status",
+    description="Returns aggregate activity synchronization status and per-repository breakdown.",
+)
+async def get_github_activity_status(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Retrieve current activity sync state across selected repositories."""
+    connection = await get_github_connection(db)
+    if not connection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active GitHub connection found.",
+        )
+
+    stmt = select(GitHubRepository).where(
+        GitHubRepository.connection_id == connection.id,
+        GitHubRepository.is_selected.is_(True),
+    )
+    repo_res = await db.execute(stmt)
+    selected_repos = list(repo_res.scalars().all())
+
+    connection_sync_meta = (connection.token_metadata or {}).get("activity_sync", {})
+
+    repo_statuses = []
+    for r in selected_repos:
+        repo_statuses.append({
+            "id": str(r.id),
+            "full_name": r.full_name,
+            "activity_sync_status": r.activity_sync_status,
+            "activity_sync_error": r.activity_sync_error,
+            "activity_last_synced_at": r.activity_last_synced_at,
+            "activity_sync_metadata": r.activity_sync_metadata,
+        })
+
+    return {
+        "status": connection_sync_meta.get("status", "idle"),
+        "last_synced_at": connection_sync_meta.get("last_synced_at"),
+        "synced_repositories": connection_sync_meta.get("synced_repositories", 0),
+        "synced_activities": connection_sync_meta.get("synced_activities", 0),
+        "error": connection_sync_meta.get("error"),
+        "repositories": repo_statuses,
+    }
+
 

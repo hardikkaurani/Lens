@@ -478,9 +478,41 @@ class GitHubRepository(Base):
         nullable=False,
     )
 
+
     connection: Mapped["GitHubConnection"] = relationship(
         "GitHubConnection",
         back_populates="repositories",
+    )
+
+    # One-to-many relationship with GitHubActivity (cascade deletion)
+    activities: Mapped[list["GitHubActivity"]] = relationship(
+        "GitHubActivity",
+        back_populates="repository",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # Activity sync status tracking
+    activity_sync_status: Mapped[str] = mapped_column(
+        sa.String(32),
+        default="idle",
+        server_default="idle",
+        nullable=False,
+        index=True,
+    )
+    activity_sync_error: Mapped[Optional[str]] = mapped_column(
+        sa.Text,
+        nullable=True,
+    )
+    activity_sync_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=True,
+        default=dict,
+        server_default=sa.text("'{}'::jsonb"),
+    )
+    activity_last_synced_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
     )
 
     __table_args__ = (
@@ -498,4 +530,114 @@ class GitHubRepository(Base):
 
     def __repr__(self) -> str:
         return f"<GitHubRepository id={self.id} full_name={self.full_name!r} status={self.sync_status.value}>"
+
+
+class GitHubActivityType(str, enum.Enum):
+    """Supported GitHub activity entity types for ingestion and search indexing."""
+
+    PULL_REQUEST = "pull_request"
+    ISSUE = "issue"
+    COMMIT = "commit"
+    REVIEW = "review"
+
+
+class GitHubActivity(Base):
+    """Stores normalized GitHub activity records (PRs, issues, commits, reviews)."""
+
+    __tablename__ = "github_activities"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("github_repositories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    activity_type: Mapped[GitHubActivityType] = mapped_column(
+        sa.Enum(
+            GitHubActivityType,
+            name="github_activity_type",
+            values_callable=lambda obj: [e.value for e in obj],
+            native_enum=True,
+        ),
+        nullable=False,
+        index=True,
+    )
+    external_id: Mapped[str] = mapped_column(
+        sa.String(255),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[Optional[str]] = mapped_column(
+        sa.String(512),
+        nullable=True,
+    )
+    body: Mapped[Optional[str]] = mapped_column(
+        sa.Text,
+        nullable=True,
+    )
+    html_url: Mapped[Optional[str]] = mapped_column(
+        sa.String(1024),
+        nullable=True,
+    )
+    author_login: Mapped[Optional[str]] = mapped_column(
+        sa.String(255),
+        nullable=True,
+    )
+    state: Mapped[Optional[str]] = mapped_column(
+        sa.String(64),
+        nullable=True,
+    )
+    source_created_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True),
+        nullable=True,
+    )
+    ingested_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=sa.text("'{}'::jsonb"),
+    )
+
+    repository: Mapped["GitHubRepository"] = relationship(
+        "GitHubRepository",
+        back_populates="activities",
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "repository_id",
+            "activity_type",
+            "external_id",
+            name="uq_github_activities_repo_type_ext",
+        ),
+        sa.Index(
+            "ix_github_activities_repo_type",
+            "repository_id",
+            "activity_type",
+        ),
+        sa.Index(
+            "ix_github_activities_repo_created",
+            "repository_id",
+            "source_created_at",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<GitHubActivity id={self.id} type={self.activity_type.value} ext_id={self.external_id!r}>"
+
 
