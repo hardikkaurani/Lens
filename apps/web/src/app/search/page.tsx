@@ -35,21 +35,31 @@ function SearchContent() {
   const [prevQuery, setPrevQuery] = useState<string>(initialQuery);
   const [prevSourceType, setPrevSourceType] = useState<string>(initialSourceType);
 
+  const [response, setResponse] = useState<SearchResponse | null>(null);
+  const [loading, setLoading] = useState<boolean>(() => Boolean(initialQuery.trim()));
+  const [error, setError] = useState<string | null>(null);
+
   // Synchronize local input, active query, and filter states from URL search params during render
   if (prevQuery !== initialQuery) {
     setPrevQuery(initialQuery);
     setInputVal(initialQuery);
     setActiveQuery(initialQuery);
+    if (!initialQuery.trim()) {
+      setResponse(null);
+      setError(null);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
   }
 
   if (prevSourceType !== initialSourceType) {
     setPrevSourceType(initialSourceType);
     setSelectedFilter(initialSourceType);
+    if (initialQuery.trim()) {
+      setLoading(true);
+    }
   }
-
-  const [response, setResponse] = useState<SearchResponse | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const latestRequestIdRef = useRef<number>(0);
@@ -108,15 +118,12 @@ function SearchContent() {
 
   // Fetch search results when URL query or filter changes
   useEffect(() => {
-    // If query is empty, cancel any pending requests and clear stale results
+    // If query is empty, cancel any pending requests
     if (!initialQuery.trim()) {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
       latestRequestIdRef.current++;
-      setResponse(null);
-      setError(null);
-      setLoading(false);
       return;
     }
 
@@ -126,7 +133,6 @@ function SearchContent() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const requestId = ++latestRequestIdRef.current;
-    setLoading(true);
 
     apiClient
       .search({

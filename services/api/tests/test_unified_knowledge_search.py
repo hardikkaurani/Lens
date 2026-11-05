@@ -22,7 +22,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Ensure services/api and services/worker are in sys.path
@@ -723,10 +723,12 @@ async def test_unified_search_transaction_savepoint_isolation_and_distinct_degra
     real_execute = AsyncSession.execute
 
     async def faulty_execute(self_session, statement, params=None, *args, **kwargs):
-        # Fail specifically if it's the GitHub query
+        # Fail specifically if it's the GitHub query by executing an invalid statement in PostgreSQL
         sql_str = str(statement)
         if "github_activities" in sql_str:
-            raise RuntimeError("Simulated PostgreSQL statement failure in GitHub activity query")
+            # Executes a division-by-zero against PostgreSQL inside the savepoint
+            # to verify genuine SAVEPOINT transaction isolation at the database level.
+            await real_execute(self_session, text("SELECT 1 / 0"))
         return await real_execute(self_session, statement, params, *args, **kwargs)
 
     async with AsyncSessionLocal() as session:
@@ -745,6 +747,10 @@ async def test_unified_search_transaction_savepoint_isolation_and_distinct_degra
         # Finding I: degraded is False because embedding/vector search succeeded!
         assert search_res.degraded is False
         assert search_res.results[0].best_semantic_score is not None
+
+        # Verify the session and its transaction remain completely healthy
+        session_check = await session.execute(text("SELECT 1"))
+        assert session_check.scalar() == 1
 
 
 @pytest.mark.asyncio
@@ -814,12 +820,29 @@ async def test_unified_search_calibrated_cross_source_ranking() -> None:
         assert data["total"] == 3
 
         results = data["results"]
-        # Both the capture and the relevant PR rank in the top 2 with strong calibrated scores
-        top_2_ids = {results[0]["external_id"] if results[0]["result_kind"] == "github_activity" else str(results[0]["capture_id"]),
-                     results[1]["external_id"] if results[1]["result_kind"] == "github_activity" else str(results[1]["capture_id"])}
+        # Both the capture and the relevant PR rank in the top 2 with strong calibrated scores (> 0.70)
+        assert results[0]["best_score"] > 0.70
+        assert results[1]["best_score"] > 0.70
+        top_2_kinds = {results[0]["result_kind"], results[1]["result_kind"]}
+        assert top_2_kinds == {"capture", "github_activity"}
+
+        top_2_ids = {
+            results[0]["external_id"] if results[0]["result_kind"] == "github_activity" else str(results[0]["capture_id"]),
+            results[1]["external_id"] if results[1]["result_kind"] == "github_activity" else str(results[1]["capture_id"]),
+        }
         assert "88" in top_2_ids, "Relevant PR must rank in the top positions"
         assert str(cap.id) in top_2_ids, "Relevant capture must rank in the top positions"
 
         # The unrelated activity that only matched the repository name must rank 3rd with a modest score (<= 0.20)
         assert results[2]["external_id"] == "999"
         assert results[2]["best_score"] <= 0.20, f"Repo-name only match should receive modest score, got {results[2]['best_score']}"
+        assert results[2]["best_score"] < results[1]["best_score"]
+        assert results[2]["best_score"] < results[0]["best_score"]
+
+        # When searching specifically for the full capture title, the capture ranks #1 with perfect calibrated score
+        exact_cap_resp = await client.get("/search", params={"q": "Database Connection Pooling Architecture"})
+        assert exact_cap_resp.status_code == 200
+        exact_cap_data = exact_cap_resp.json()
+        assert exact_cap_data["results"][0]["result_kind"] == "capture"
+        assert exact_cap_data["results"][0]["capture_id"] == str(cap.id)
+        assert exact_cap_data["results"][0]["best_score"] == 1.0
