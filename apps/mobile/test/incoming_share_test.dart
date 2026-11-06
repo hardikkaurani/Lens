@@ -108,7 +108,7 @@ void main() {
       expect(content, isNotNull);
       expect(content!.type, SharedContentType.url);
       expect(content.url, 'https://lens.example.com/arch');
-      expect(content.title, 'Check this awesome architecture guide:  for details');
+      expect(content.title, 'Check this awesome architecture guide: for details');
       expect(content.sourceType, SourceType.url);
     });
 
