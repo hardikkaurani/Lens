@@ -1,7 +1,7 @@
 # LENS — Architecture Specification
 
-> **Document Status**: Stage 9 Active Implementation (Flutter Mobile Client Foundation)  
-> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), and Flutter mobile client (`apps/mobile`) are **ACTIVE**. Authentication, GitHub sync, offline SQLite storage, and advanced recommendation engines remain **PLANNED**.
+> **Document Status**: Stage 17 Active Implementation (Android Share Sheet Daily Capture Workflow)  
+> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), Flutter mobile client (`apps/mobile`), GitHub OAuth & activity ingestion, Unified Knowledge Search (Stage 16), and Android Share Sheet daily capture integration (Stage 17) are **ACTIVE**. Offline SQLite storage and advanced recommendation engines remain **PLANNED**.
 
 ---
 
@@ -70,12 +70,20 @@ flowchart TD
   * Centralized, strongly-typed API client with error normalization and zero credential exposure.
   * Responsive, accessible layout shell (`AppShell`) with live API health status monitoring.
 
-### 3.2 Mobile Application (`apps/mobile/`) — *ACTIVE IMPLEMENTATION (STAGE 9)*
+### 3.2 Mobile Application (`apps/mobile/`) — *ACTIVE IMPLEMENTATION (STAGE 17)*
 
 * **Technology**: Flutter 3.41+, Dart 3.11+, Material 3, Android SDK 36+.
 * **Responsibilities**:
   * Cross-platform Android capture and retrieval client.
   * Instant capture creation interface for web URLs and text notes (`NewCaptureScreen`).
+  * Android Share Sheet integration for native incoming content capture (Stage 17):
+    * `ACTION_SEND` and `ACTION_SEND_MULTIPLE` intent filters registered for `text/plain` MIME types.
+    * Kotlin native channels: MethodChannel (`com.lens.mobile/share_channel`) and EventChannel (`com.lens.mobile/share_events`).
+    * Resilient cold-start (`getInitialShare`) and warm-start (`onNewIntent` event stream) lifecycle management.
+    * Safe `SharedContentParser` handling standalone HTTP/HTTPS URLs, plain text notes, and text containing embedded URLs.
+    * Strict URL scheme security: accepts `http`/`https` exclusively, rejecting `javascript:`, `file:`, `data:`.
+    * Dedicated incoming share review experience (`ShareReviewScreen`) with type badge, title and content editing, explicit Save/Cancel, and transition to `CaptureDetailScreen`.
+    * Deduplication window (1500ms) and double-tap submission locks to prevent duplicate captures.
   * Paginated capture list with newest-first ordering, status indicators, and pull-to-refresh (`CapturesScreen`).
   * Capture detail inspector displaying processing status, chunks, and metadata with bounded polling (`CaptureDetailScreen`).
   * Hybrid search screen querying the FastAPI backend with relevance score breakdowns (`SearchScreen`).
