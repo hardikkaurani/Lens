@@ -85,24 +85,52 @@ class MainActivity : FlutterActivity() {
 
         val text: String? = when (action) {
             Intent.ACTION_SEND -> {
-                intent.getStringExtra(Intent.EXTRA_TEXT)
+                val raw = intent.getStringExtra(Intent.EXTRA_TEXT)
                     ?: intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                if (raw != null && raw.length > MAX_TEXT_LENGTH) {
+                    raw.substring(0, MAX_TEXT_LENGTH)
+                } else {
+                    raw
+                }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
-                val list = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
-                list?.filterNotNull()?.joinToString("\n") { it.toString() }
+                val list: List<CharSequence?>? = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
+                    ?: intent.getStringArrayListExtra(Intent.EXTRA_TEXT)
+
+                if (list != null) {
+                    val builder = StringBuilder()
+                    for (item in list) {
+                        if (item == null) continue
+                        val str = item.toString().trim()
+                        if (str.isEmpty()) continue
+                        if (builder.isNotEmpty()) {
+                            if (builder.length >= MAX_TEXT_LENGTH) break
+                            builder.append("\n\n")
+                        }
+                        if (builder.length + str.length > MAX_TEXT_LENGTH) {
+                            builder.append(str.substring(0, MAX_TEXT_LENGTH - builder.length))
+                            break
+                        } else {
+                            builder.append(str)
+                        }
+                    }
+                    if (builder.isEmpty()) null else builder.toString()
+                } else {
+                    // Fallback to single text extra if present
+                    val raw = intent.getStringExtra(Intent.EXTRA_TEXT)
+                        ?: intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                    if (raw != null && raw.length > MAX_TEXT_LENGTH) {
+                        raw.substring(0, MAX_TEXT_LENGTH)
+                    } else {
+                        raw
+                    }
+                }
             }
             else -> null
         }
 
         if (text.isNullOrBlank()) {
             return null
-        }
-
-        val boundedText = if (text.length > MAX_TEXT_LENGTH) {
-            text.substring(0, MAX_TEXT_LENGTH)
-        } else {
-            text
         }
 
         val boundedSubject = if (subject != null && subject.length > 512) {
@@ -113,7 +141,7 @@ class MainActivity : FlutterActivity() {
 
         return mapOf(
             "action" to action,
-            "text" to boundedText,
+            "text" to text,
             "subject" to boundedSubject,
             "timestamp" to System.currentTimeMillis()
         )
