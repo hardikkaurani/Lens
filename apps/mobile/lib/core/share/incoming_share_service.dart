@@ -36,9 +36,22 @@ class MethodChannelIncomingSharePlatform implements IncomingSharePlatform {
   }
 }
 
-/// Service managing incoming platform share intents with deduplication and parsing.
+/// Service managing incoming platform share intents with platform callback debounce and parsing.
+///
+/// **Debounce Semantics:**
+/// The in-memory 1500ms duplicate suppression window is strictly an OS intent-delivery
+/// debounce guard. It absorbs immediate duplicate platform callbacks triggered by Android
+/// Activity recreation, configuration changes (e.g. screen rotation), or double-intent
+/// delivery on certain OEM Android skins.
+///
+/// It is **not** durable deduplication across application sessions or repeated user shares:
+/// if a user intentionally shares the same content after the debounce window expires,
+/// it will be processed normally as a distinct capture. Durable deduplication and
+/// idempotency are managed upstream by backend capture pipelines.
 class IncomingShareService {
   final IncomingSharePlatform _platform;
+  final Duration debounceDuration;
+  final DateTime Function() _clock;
   final StreamController<SharedContent> _shareController =
       StreamController<SharedContent>.broadcast();
 
@@ -47,8 +60,13 @@ class IncomingShareService {
   String? _lastShareHash;
   DateTime? _lastShareTime;
 
-  IncomingShareService({IncomingSharePlatform? platform})
-      : _platform = platform ?? MethodChannelIncomingSharePlatform() {
+  IncomingShareService({
+    IncomingSharePlatform? platform,
+    Duration debounceDuration = const Duration(milliseconds: 1500),
+    DateTime Function()? clock,
+  })  : _platform = platform ?? MethodChannelIncomingSharePlatform(),
+        debounceDuration = debounceDuration,
+        _clock = clock ?? DateTime.now {
     _platformSubscription = _platform.onShareReceived.listen(_handleRawShare);
   }
 
@@ -77,12 +95,15 @@ class IncomingShareService {
       return null;
     }
 
-    // Deduplication check: ignore identical share payloads received within 1500ms
+    // Deduplication check: suppress duplicate platform callbacks within debounce window (default 1500ms).
+    // Note: This is an in-memory intent delivery debounce guard to absorb immediate OS duplicates
+    // (e.g. during Activity recreation or Android intent double-delivery), NOT durable deduplication.
+    // Identical content shared after the window expires is processed as a fresh capture.
     final hash = '$text|$subject';
-    final now = DateTime.now();
+    final now = _clock();
     if (_lastShareHash == hash &&
         _lastShareTime != null &&
-        now.difference(_lastShareTime!).inMilliseconds < 1500) {
+        now.difference(_lastShareTime!) < debounceDuration) {
       return null;
     }
 
