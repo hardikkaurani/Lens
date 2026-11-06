@@ -220,6 +220,12 @@ export interface SearchResultCapture {
   best_lexical_score: number | null;
   best_semantic_score: number | null;
   matching_chunks: SearchResultChunk[];
+  result_kind?: "capture" | "github_activity" | string;
+  activity_type?: GitHubActivityType | string | null;
+  repository_name?: string | null;
+  author_login?: string | null;
+  state?: string | null;
+  external_id?: string | null;
 }
 
 export interface SearchResponse {
@@ -227,6 +233,7 @@ export interface SearchResponse {
   total: number;
   limit: number;
   degraded: boolean;
+  source_filter?: string | null;
   results: SearchResultCapture[];
 }
 

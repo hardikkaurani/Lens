@@ -7,8 +7,14 @@ interface SourceTypeBadgeProps {
 }
 
 export function SourceTypeBadge({ sourceType }: SourceTypeBadgeProps) {
-  const isUrl = sourceType === "url";
-  const isPdf = sourceType === "pdf" || sourceType === "file";
+  const normType = sourceType.toLowerCase();
+  const isUrl = normType === "url";
+  const isPdf = normType === "pdf" || normType === "file";
+  const isPR = normType === "pull_request";
+  const isIssue = normType === "issue";
+  const isCommit = normType === "commit";
+  const isReview = normType === "review";
+  const isGitHub = normType === "github" || isPR || isIssue || isCommit || isReview;
   const label = formatSourceType(sourceType);
 
   let badgeColor = "bg-slate-700/40 text-slate-300 border border-slate-600/30";
@@ -16,6 +22,16 @@ export function SourceTypeBadge({ sourceType }: SourceTypeBadgeProps) {
     badgeColor = "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20";
   } else if (isPdf) {
     badgeColor = "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20";
+  } else if (isPR) {
+    badgeColor = "bg-purple-500/10 text-purple-300 border border-purple-500/20";
+  } else if (isIssue) {
+    badgeColor = "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20";
+  } else if (isCommit) {
+    badgeColor = "bg-cyan-500/10 text-cyan-300 border border-cyan-500/20";
+  } else if (isReview) {
+    badgeColor = "bg-amber-500/10 text-amber-300 border border-amber-500/20";
+  } else if (isGitHub) {
+    badgeColor = "bg-slate-500/10 text-slate-300 border border-slate-500/20";
   }
 
   return (
@@ -30,6 +46,26 @@ export function SourceTypeBadge({ sourceType }: SourceTypeBadgeProps) {
       ) : isPdf ? (
         <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+        </svg>
+      ) : isPR ? (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <circle cx="18" cy="18" r="3" strokeWidth={2} />
+          <circle cx="6" cy="6" r="3" strokeWidth={2} />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 9v12m12-9a9 9 0 00-9-9" />
+        </svg>
+      ) : isIssue ? (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" strokeWidth={2} />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
+        </svg>
+      ) : isCommit ? (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" strokeWidth={2} />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M1.5 12h6.5m8 0h6.5" />
+        </svg>
+      ) : isReview ? (
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ) : (
         <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">

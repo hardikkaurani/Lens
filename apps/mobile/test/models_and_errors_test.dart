@@ -174,5 +174,100 @@ void main() {
       expect(config.baseUrl, isNotEmpty);
       expect(RegExp('password|secret|key|token|postgresql://|redis://').hasMatch(config.baseUrl), isFalse);
     });
+
+    // 13. Stage 16 Unified Knowledge Search response deserialization and unknown kind resilience
+    test('13. Unified search deserializes GitHub activities and unknown result kinds safely', () {
+      final unifiedSearchJson = {
+        'query': 'auth issue',
+        'total': 3,
+        'limit': 20,
+        'degraded': false,
+        'source_filter': 'all',
+        'results': [
+          {
+            'capture_id': 'act-1',
+            'title': 'Fix JWT expiration handling',
+            'original_url': 'https://github.com/octocat/repo/pull/42',
+            'source_type': 'pull_request',
+            'best_score': 0.95,
+            'best_lexical_score': 0.95,
+            'best_semantic_score': null,
+            'result_kind': 'github_activity',
+            'activity_type': 'pull_request',
+            'repository_name': 'octocat/repo',
+            'author_login': 'octocat',
+            'state': 'open',
+            'external_id': '42',
+            'matching_chunks': [
+              {
+                'chunk_id': 'act-1-excerpt',
+                'chunk_index': 0,
+                'content_excerpt': 'Resolves token refresh race conditions',
+                'score': 0.95,
+                'lexical_score': 0.95,
+                'semantic_score': null,
+              }
+            ],
+          },
+          {
+            'capture_id': 'act-2',
+            'title': 'Bug: Memory leak in worker',
+            'original_url': 'https://github.com/octocat/repo/issues/10',
+            'source_type': 'issue',
+            'best_score': 0.82,
+            'best_lexical_score': 0.82,
+            'best_semantic_score': null,
+            'result_kind': 'github_activity',
+            'activity_type': 'issue',
+            'repository_name': 'octocat/repo',
+            'author_login': 'contributor',
+            'state': 'closed',
+            'external_id': '10',
+            'matching_chunks': [],
+          },
+          {
+            'capture_id': 'future-99',
+            'title': 'Slack notification message',
+            'original_url': 'https://slack.com/archives/123',
+            'source_type': 'slack_message', // unknown future type
+            'best_score': 0.70,
+            'best_lexical_score': 0.70,
+            'best_semantic_score': null,
+            'result_kind': 'slack_integration',
+            'matching_chunks': [],
+          }
+        ],
+      };
+
+      final response = SearchResponse.fromJson(unifiedSearchJson);
+      expect(response.total, 3);
+      expect(response.sourceFilter, 'all');
+      expect(response.results.length, 3);
+
+      final pr = response.results[0];
+      expect(pr.resultKind, 'github_activity');
+      expect(pr.isGitHubActivity, true);
+      expect(pr.activityType, 'pull_request');
+      expect(pr.sourceType, 'pull_request');
+      expect(SourceType.fromString(pr.sourceType), SourceType.pullRequest);
+      expect(pr.repositoryName, 'octocat/repo');
+      expect(pr.authorLogin, 'octocat');
+      expect(pr.state, 'open');
+      expect(pr.externalId, '42');
+
+      final issue = response.results[1];
+      expect(issue.resultKind, 'github_activity');
+      expect(issue.isGitHubActivity, true);
+      expect(issue.activityType, 'issue');
+      expect(issue.sourceType, 'issue');
+      expect(SourceType.fromString(issue.sourceType), SourceType.issue);
+      expect(issue.state, 'closed');
+
+      final unknown = response.results[2];
+      expect(unknown.resultKind, 'slack_integration');
+      expect(unknown.isGitHubActivity, false);
+      expect(unknown.sourceType, 'slack_message');
+      expect(SourceType.fromString(unknown.sourceType), SourceType.url); // gracefully falls back to default without error
+    });
   });
 }

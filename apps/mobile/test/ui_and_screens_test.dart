@@ -559,5 +559,78 @@ void main() {
       // Search response remains null, placeholder still present
       expect(find.text('Hybrid Knowledge Retrieval'), findsOneWidget);
     });
+
+    // 17. Stage 16.1: SearchScreen GitHub activity card layout and scrollable bottom sheet
+    testWidgets('17. Stage 16.1: SearchScreen renders GitHub activity with flexible narrow metadata and scrollable bottom sheet with open action', (tester) async {
+      final ghResult = SearchResultCapture(
+        captureId: 'act-gh-1',
+        title: 'Very Long Pull Request Title Explaining Architectural Changes In Detail',
+        originalUrl: 'https://github.com/very-long-org-name-in-enterprise/very-long-repo-name-in-enterprise/pull/42',
+        sourceType: 'pull_request',
+        resultKind: 'github_activity',
+        activityType: 'pull_request',
+        repositoryName: 'very-long-org-name-in-enterprise/very-long-repo-name-in-enterprise',
+        authorLogin: 'very-long-author-name-with-numbers-123456789',
+        state: 'open',
+        externalId: '42',
+        bestScore: 0.95,
+        bestLexicalScore: 0.95,
+        bestSemanticScore: null,
+        matchingChunks: [
+          const SearchResultChunk(
+            chunkId: 'act-gh-1-excerpt',
+            chunkIndex: 0,
+            contentExcerpt: 'Extensive architectural refactor resolving race conditions...',
+            score: 0.95,
+            lexicalScore: 0.95,
+          ),
+        ],
+      );
+
+      final fakeClient = FakeApiClient(
+        searchResponse: SearchResponse(
+          query: 'architectural',
+          total: 1,
+          limit: 20,
+          degraded: false,
+          results: [ghResult],
+        ),
+      );
+
+      // Set a narrow screen size (320px width) to verify narrow-screen metadata overflow protection
+      tester.view.physicalSize = const Size(320, 600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.darkTheme,
+          home: SearchScreen(apiClient: fakeClient),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final input = find.byType(TextField);
+      await tester.enterText(input, 'architectural');
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      await tester.pumpAndSettle();
+
+      // Card metadata is displayed without overflow exceptions
+      expect(find.text('Very Long Pull Request Title Explaining Architectural Changes In Detail'), findsOneWidget);
+      expect(find.text('very-long-org-name-in-enterprise/very-long-repo-name-in-enterprise'), findsOneWidget);
+      expect(find.text('@very-long-author-name-with-numbers-123456789'), findsOneWidget);
+
+      // Tap card to open modal bottom sheet
+      await tester.tap(find.text('Very Long Pull Request Title Explaining Architectural Changes In Detail'));
+      await tester.pumpAndSettle();
+
+      // Bottom sheet contains SingleChildScrollView and action button
+      expect(find.byType(SingleChildScrollView), findsOneWidget);
+      expect(find.byKey(const Key('open-github-activity-btn')), findsOneWidget);
+      expect(find.text('Open on GitHub'), findsOneWidget);
+    });
   });
 }
