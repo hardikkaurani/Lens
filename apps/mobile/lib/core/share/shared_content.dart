@@ -97,8 +97,36 @@ class SharedContentParser {
             (uri.scheme == 'http' || uri.scheme == 'https') &&
             uri.host.isNotEmpty) {
           // Extract text outside the URL to suggest as title and keep as note context
-          var remainingRaw = trimmedRaw.replaceFirst(rawMatch, '');
-          // If the URL was wrapped in quotes or parens (e.g. `(URL)` or `"URL"`), remove leftover wrappers
+          final urlStartIndex = match.start;
+          var beforeUrl = trimmedRaw.substring(0, urlStartIndex).trimRight();
+          final afterRawMatch = trimmedRaw.substring(match.end);
+          final strippedSuffix = rawMatch.substring(cleanUrl.length);
+          var fullAfter = (strippedSuffix + afterRawMatch).trimLeft();
+
+          // Check if the URL was wrapped in matching quotes or brackets
+          if (beforeUrl.endsWith('(') && fullAfter.startsWith(')')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
+            fullAfter = fullAfter.substring(1).trimLeft();
+          } else if (beforeUrl.endsWith('[') && fullAfter.startsWith(']')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
+            fullAfter = fullAfter.substring(1).trimLeft();
+          } else if (beforeUrl.endsWith('<') && fullAfter.startsWith('>')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
+            fullAfter = fullAfter.substring(1).trimLeft();
+          } else if (beforeUrl.endsWith('"') && fullAfter.startsWith('"')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
+            fullAfter = fullAfter.substring(1).trimLeft();
+          } else if (beforeUrl.endsWith("'") && fullAfter.startsWith("'")) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
+            fullAfter = fullAfter.substring(1).trimLeft();
+          }
+
+          // If there was no text after the matched URL, any remaining fullAfter was just trailing punctuation
+          if (afterRawMatch.trim().isEmpty) {
+            fullAfter = '';
+          }
+
+          var remainingRaw = '$beforeUrl $fullAfter';
           remainingRaw = remainingRaw
               .replaceAll('()', '')
               .replaceAll('[]', '')

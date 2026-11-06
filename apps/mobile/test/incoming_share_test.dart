@@ -203,6 +203,164 @@ void main() {
       service.dispose();
       fakePlatform.dispose();
     });
+
+    // 16. URL boundary sentence punctuation trimming
+    test('16. URL boundary sentence punctuation trimming (. , ; : ! ? " \' )', () {
+      final periodShare = SharedContentParser.parse(
+        rawText: 'Check this article: https://example.com/guide.',
+      );
+      expect(periodShare, isNotNull);
+      expect(periodShare!.type, SharedContentType.url);
+      expect(periodShare.url, 'https://example.com/guide');
+      expect(periodShare.text, 'Check this article:');
+
+      final commaShare = SharedContentParser.parse(
+        rawText: 'https://example.com/item,',
+      );
+      expect(commaShare, isNotNull);
+      expect(commaShare!.type, SharedContentType.url);
+      expect(commaShare.url, 'https://example.com/item');
+      expect(commaShare.text, isNull);
+
+      final exclamationShare = SharedContentParser.parse(
+        rawText: 'Breaking news https://example.com/news!',
+      );
+      expect(exclamationShare, isNotNull);
+      expect(exclamationShare!.type, SharedContentType.url);
+      expect(exclamationShare.url, 'https://example.com/news');
+      expect(exclamationShare.text, 'Breaking news');
+
+      final questionShare = SharedContentParser.parse(
+        rawText: 'Have you seen https://example.com/faq?',
+      );
+      expect(questionShare, isNotNull);
+      expect(questionShare!.type, SharedContentType.url);
+      expect(questionShare.url, 'https://example.com/faq');
+      expect(questionShare.text, 'Have you seen');
+    });
+
+    // 17. Parentheses handling: wrapped URL vs balanced Wikipedia URLs
+    test('17. Parentheses handling: wrapped URL vs balanced Wikipedia URLs', () {
+      // Wrapped URL in parentheses
+      final wrapped = SharedContentParser.parse(
+        rawText: '(https://example.com/doc)',
+      );
+      expect(wrapped, isNotNull);
+      expect(wrapped!.type, SharedContentType.url);
+      expect(wrapped.url, 'https://example.com/doc');
+      expect(wrapped.text, isNull);
+
+      // Wikipedia balanced parentheses
+      final wiki = SharedContentParser.parse(
+        rawText: 'https://en.wikipedia.org/wiki/LENS_(disambiguation)',
+      );
+      expect(wiki, isNotNull);
+      expect(wiki!.type, SharedContentType.url);
+      expect(wiki.url, 'https://en.wikipedia.org/wiki/LENS_(disambiguation)');
+      expect(wiki.text, isNull);
+
+      // Wrapped Wikipedia URL with surrounding context
+      final wrappedWiki = SharedContentParser.parse(
+        rawText:
+            'Read about disambiguation (https://en.wikipedia.org/wiki/LENS_(disambiguation)) for details',
+      );
+      expect(wrappedWiki, isNotNull);
+      expect(wrappedWiki!.type, SharedContentType.url);
+      expect(
+        wrappedWiki.url,
+        'https://en.wikipedia.org/wiki/LENS_(disambiguation)',
+      );
+      expect(wrappedWiki.text, 'Read about disambiguation for details');
+      expect(wrappedWiki.title, 'Read about disambiguation for details');
+    });
+
+    // 18. Multiple URLs in single text: first extracted, remainder preserved in context
+    test('18. Multiple URLs in single text extracts first URL and retains second URL in context', () {
+      final multiUrl = SharedContentParser.parse(
+        rawText:
+            'Primary: https://primary.example.com and secondary: https://secondary.example.com for backup',
+      );
+      expect(multiUrl, isNotNull);
+      expect(multiUrl!.type, SharedContentType.url);
+      expect(multiUrl.url, 'https://primary.example.com');
+      expect(
+        multiUrl.text,
+        'Primary: and secondary: https://secondary.example.com for backup',
+      );
+      expect(
+        multiUrl.title,
+        'Primary: and secondary: https://secondary.example.com for backup',
+      );
+    });
+
+    // 19. Oversized URL candidate exceeds 2048 chars falls back safely to text note
+    test('19. Oversized URL candidate exceeding 2048 chars is treated as text note', () {
+      final hugeUrl = 'https://example.com/${'a' * 2050}';
+      final content = SharedContentParser.parse(rawText: hugeUrl);
+
+      expect(content, isNotNull);
+      expect(content!.type, SharedContentType.text);
+      expect(content.url, isNull);
+      expect(content.text, isNotNull);
+    });
+
+    // 20. Deduplication window expiry allows identical share after window expires
+    test('20. Deduplication window expiry allows identical share after debounce duration', () async {
+      DateTime simulatedNow = DateTime(2026, 3, 1, 10, 0, 0);
+      final fakePlatform = FakeIncomingSharePlatform();
+      final service = IncomingShareService(
+        platform: fakePlatform,
+        debounceDuration: const Duration(milliseconds: 1500),
+        clock: () => simulatedNow,
+      );
+
+      final received = <SharedContent>[];
+      final sub = service.onIncomingShare.listen(received.add);
+
+      // Share 1
+      fakePlatform.emitShare({
+        'text': 'https://re-share.example.com',
+        'subject': 'Daily Read',
+      });
+      await pumpEventQueue();
+      expect(received.length, 1);
+
+      // Share 1 duplicated within 500ms -> suppressed
+      simulatedNow = simulatedNow.add(const Duration(milliseconds: 500));
+      fakePlatform.emitShare({
+        'text': 'https://re-share.example.com',
+        'subject': 'Daily Read',
+      });
+      await pumpEventQueue();
+      expect(received.length, 1);
+
+      // Advance clock past 1500ms window (1600ms total from first share)
+      simulatedNow = simulatedNow.add(const Duration(milliseconds: 1100));
+      fakePlatform.emitShare({
+        'text': 'https://re-share.example.com',
+        'subject': 'Daily Read',
+      });
+      await pumpEventQueue();
+      expect(received.length, 2);
+
+      await sub.cancel();
+      service.dispose();
+      fakePlatform.dispose();
+    });
+
+    // 21. Multi-line text representation (simulating ACTION_SEND_MULTIPLE newline joining)
+    test('21. Multi-line text representation preserves all lines cleanly', () {
+      final multiLine = SharedContentParser.parse(
+        rawText:
+            'Item 1: Note on architecture\n\nItem 2: Link to specs\n\nItem 3: Action items',
+      );
+      expect(multiLine, isNotNull);
+      expect(multiLine!.type, SharedContentType.text);
+      expect(
+        multiLine.text,
+        'Item 1: Note on architecture\n\nItem 2: Link to specs\n\nItem 3: Action items',
+      );
+    });
   });
 
   group('Stage 17: Incoming Share Review Experience & App Lifecycle', () {
@@ -493,6 +651,61 @@ void main() {
         mockClient.lastCreatePayload?.originalUrl,
         'https://direct-capture.example.com',
       );
+      expect(find.byType(CaptureDetailScreen), findsOneWidget);
+    });
+
+    // 16 (Lifecycle). URL context preservation in review screen and CaptureCreate payload
+    testWidgets(
+        '16. URL context preservation in review screen and CaptureCreate payload',
+        (tester) async {
+      final mockClient = MockApiClient();
+      final shared = SharedContent(
+        type: SharedContentType.url,
+        url: 'https://context.example.com/article',
+        title: 'Initial Title',
+        text: 'Surrounding explanatory context from author',
+        rawText:
+            'Surrounding explanatory context from author https://context.example.com/article',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ShareReviewScreen(
+            sharedContent: shared,
+            apiClient: mockClient,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Verify the URL, Title, and Context / Notes fields are rendered
+      expect(find.text('https://context.example.com/article'), findsOneWidget);
+      expect(find.text('Initial Title'), findsOneWidget);
+      expect(
+        find.text('Surrounding explanatory context from author'),
+        findsOneWidget,
+      );
+
+      // Edit context field
+      final contextField = find.widgetWithText(
+        TextFormField,
+        'Surrounding explanatory context from author',
+      );
+      await tester.enterText(contextField, 'User edited notes and thoughts');
+
+      // Submit
+      await tester.ensureVisible(find.text('Ingest Web Link'));
+      await tester.tap(find.text('Ingest Web Link'));
+      await tester.pumpAndSettle();
+
+      // Assert submitted payload preserves originalUrl, title, and edited context
+      expect(mockClient.createCaptureCallCount, 1);
+      final payload = mockClient.lastCreatePayload;
+      expect(payload, isNotNull);
+      expect(payload!.sourceType, SourceType.url);
+      expect(payload.originalUrl, 'https://context.example.com/article');
+      expect(payload.title, 'Initial Title');
+      expect(payload.content, 'User edited notes and thoughts');
       expect(find.byType(CaptureDetailScreen), findsOneWidget);
     });
   });
