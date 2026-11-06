@@ -239,6 +239,83 @@ void main() {
       expect(questionShare.text, 'Have you seen');
     });
 
+    // Finding A Required Behaviors: Standalone URL vs Trailing Prose vs Balanced Parentheses
+    test('Finding A: Distinct standalone URL, wrapped URL, trailing punctuation, and trailing prose', () {
+      // 1. Standalone URL
+      final standalone = SharedContentParser.parse(rawText: 'https://example.com');
+      expect(standalone, isNotNull);
+      expect(standalone!.type, SharedContentType.url);
+      expect(standalone.url, 'https://example.com');
+      expect(standalone.text, isNull);
+
+      // 2. Wrapped in punctuation
+      final wrapped = SharedContentParser.parse(rawText: '(https://example.com)');
+      expect(wrapped, isNotNull);
+      expect(wrapped!.type, SharedContentType.url);
+      expect(wrapped.url, 'https://example.com');
+      expect(wrapped.text, isNull);
+
+      // 3. Followed by sentence punctuation (standalone)
+      final withPeriod = SharedContentParser.parse(rawText: 'https://example.com.');
+      expect(withPeriod, isNotNull);
+      expect(withPeriod!.type, SharedContentType.url);
+      expect(withPeriod.url, 'https://example.com');
+      expect(withPeriod.text, isNull);
+
+      // 4. Standalone URL followed by explanatory prose
+      final urlWithProse = SharedContentParser.parse(rawText: 'https://example.com. read this');
+      expect(urlWithProse, isNotNull);
+      expect(urlWithProse!.type, SharedContentType.url);
+      expect(urlWithProse.url, 'https://example.com');
+      expect(urlWithProse.text, 'read this');
+      expect(urlWithProse.title, 'read this');
+
+      // 5. Prose before URL
+      final proseBeforeUrl = SharedContentParser.parse(rawText: 'Read this: https://example.com/article');
+      expect(proseBeforeUrl, isNotNull);
+      expect(proseBeforeUrl!.type, SharedContentType.url);
+      expect(proseBeforeUrl.url, 'https://example.com/article');
+      expect(proseBeforeUrl.text, 'Read this:');
+      expect(proseBeforeUrl.title, 'Read this:');
+
+      // 6. Preserves balanced parentheses that are part of the URL
+      final wikiBalanced = SharedContentParser.parse(rawText: 'https://en.wikipedia.org/wiki/LENS_(disambiguation)');
+      expect(wikiBalanced, isNotNull);
+      expect(wikiBalanced!.type, SharedContentType.url);
+      expect(wikiBalanced.url, 'https://en.wikipedia.org/wiki/LENS_(disambiguation)');
+      expect(wikiBalanced.text, isNull);
+
+      // 7. Multiple URLs: Primary URL plus retained secondary URL/context
+      final multiUrls = SharedContentParser.parse(rawText: 'See https://example.com and https://other.example');
+      expect(multiUrls, isNotNull);
+      expect(multiUrls!.type, SharedContentType.url);
+      expect(multiUrls.url, 'https://example.com');
+      expect(multiUrls.text, 'See and https://other.example');
+      expect(multiUrls.title, 'See and https://other.example');
+
+      // 8. Separator punctuation (colon or dash) between URL and prose
+      final colonProse = SharedContentParser.parse(rawText: 'https://example.com: read this');
+      expect(colonProse, isNotNull);
+      expect(colonProse!.type, SharedContentType.url);
+      expect(colonProse.url, 'https://example.com');
+      expect(colonProse.text, 'read this');
+
+      final dashProse = SharedContentParser.parse(rawText: 'https://example.com - read this');
+      expect(dashProse, isNotNull);
+      expect(dashProse!.type, SharedContentType.url);
+      expect(dashProse.url, 'https://example.com');
+      expect(dashProse.text, 'read this');
+
+      // 9. URL with prose before and after
+      final beforeAndAfter = SharedContentParser.parse(
+        rawText: 'Check out https://example.com/guide. It has great info.',
+      );
+      expect(beforeAndAfter, isNotNull);
+      expect(beforeAndAfter!.type, SharedContentType.url);
+      expect(beforeAndAfter.url, 'https://example.com/guide');
+      expect(beforeAndAfter.text, 'Check out. It has great info.');
+    });
+
     // 17. Parentheses handling: wrapped URL vs balanced Wikipedia URLs
     test('17. Parentheses handling: wrapped URL vs balanced Wikipedia URLs', () {
       // Wrapped URL in parentheses

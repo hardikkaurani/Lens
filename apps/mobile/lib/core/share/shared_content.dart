@@ -60,31 +60,7 @@ class SharedContentParser {
         ? _boundString(subject!.trim(), maxTitleLength)
         : null;
 
-    // 1. Direct standalone URL: the entire text is a single valid HTTP/HTTPS URL
-    final cleanStandalone = _cleanUrlCandidate(trimmedRaw);
-    if (ApiConfig.isValidUrl(cleanStandalone) && cleanStandalone.length <= maxUrlLength) {
-      final uri = Uri.tryParse(cleanStandalone);
-      if (uri != null &&
-          uri.hasScheme &&
-          (uri.scheme == 'http' || uri.scheme == 'https') &&
-          uri.host.isNotEmpty) {
-        // If wrapped in punctuation like "(https://...)" or "https://...", ensure no other text exists
-        final remaining = trimmedRaw
-            .replaceFirst(cleanStandalone, '')
-            .replaceAll(RegExp(r'[\s\(\)\[\]{}<>".,;:!?]+'), '');
-        if (remaining.isEmpty) {
-          return SharedContent(
-            type: SharedContentType.url,
-            url: cleanStandalone,
-            title: cleanSubject,
-            rawText: trimmedRaw,
-            subject: cleanSubject,
-          );
-        }
-      }
-    }
-
-    // 2. Text containing an embedded HTTP/HTTPS URL
+    // 1. Check for HTTP/HTTPS URL in text
     final match = _urlRegex.firstMatch(trimmedRaw);
     if (match != null) {
       final rawMatch = match.group(0)!;
@@ -96,54 +72,70 @@ class SharedContentParser {
             uri.hasScheme &&
             (uri.scheme == 'http' || uri.scheme == 'https') &&
             uri.host.isNotEmpty) {
-          // Extract text outside the URL to suggest as title and keep as note context
+          // Track exact URL boundaries using match indexes
           final urlStartIndex = match.start;
-          var beforeUrl = trimmedRaw.substring(0, urlStartIndex).trimRight();
-          final afterRawMatch = trimmedRaw.substring(match.end);
-          final strippedSuffix = rawMatch.substring(cleanUrl.length);
-          var fullAfter = (strippedSuffix + afterRawMatch).trimLeft();
+          final urlEndIndex = match.start + cleanUrl.length;
 
-          // Check if the URL was wrapped in matching quotes or brackets
-          if (beforeUrl.endsWith('(') && fullAfter.startsWith(')')) {
-            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
-            fullAfter = fullAfter.substring(1).trimLeft();
-          } else if (beforeUrl.endsWith('[') && fullAfter.startsWith(']')) {
-            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
-            fullAfter = fullAfter.substring(1).trimLeft();
-          } else if (beforeUrl.endsWith('<') && fullAfter.startsWith('>')) {
-            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
-            fullAfter = fullAfter.substring(1).trimLeft();
-          } else if (beforeUrl.endsWith('"') && fullAfter.startsWith('"')) {
-            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
-            fullAfter = fullAfter.substring(1).trimLeft();
-          } else if (beforeUrl.endsWith("'") && fullAfter.startsWith("'")) {
-            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trimRight();
-            fullAfter = fullAfter.substring(1).trimLeft();
+          var beforeUrl = trimmedRaw.substring(0, urlStartIndex).trim();
+          var afterUrl = trimmedRaw.substring(urlEndIndex).trim();
+
+          // Strip matching enclosing quotes or brackets around the URL
+          if (beforeUrl.endsWith('(') && afterUrl.startsWith(')')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trim();
+            afterUrl = afterUrl.substring(1).trim();
+          } else if (beforeUrl.endsWith('[') && afterUrl.startsWith(']')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trim();
+            afterUrl = afterUrl.substring(1).trim();
+          } else if (beforeUrl.endsWith('<') && afterUrl.startsWith('>')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trim();
+            afterUrl = afterUrl.substring(1).trim();
+          } else if (beforeUrl.endsWith('"') && afterUrl.startsWith('"')) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trim();
+            afterUrl = afterUrl.substring(1).trim();
+          } else if (beforeUrl.endsWith("'") && afterUrl.startsWith("'")) {
+            beforeUrl = beforeUrl.substring(0, beforeUrl.length - 1).trim();
+            afterUrl = afterUrl.substring(1).trim();
           }
 
-          // If there was no text after the matched URL, any remaining fullAfter was just trailing punctuation
-          if (afterRawMatch.trim().isEmpty) {
-            fullAfter = '';
-          }
-
-          var remainingRaw = '$beforeUrl $fullAfter';
-          remainingRaw = remainingRaw
-              .replaceAll('()', '')
-              .replaceAll('[]', '')
-              .replaceAll('""', '')
-              .replaceAll("''", '');
-
-          // Normalize whitespace: collapse multiple spaces/newlines into a single space
-          final remainingNormalized = remainingRaw
-              .replaceAll(RegExp(r'[ \t\r\n]+'), ' ')
-              .trim();
-
-          // Check if there is meaningful text beyond bare punctuation
-          final hasMeaningfulText = remainingNormalized
+          final beforeHasProse = beforeUrl
+              .replaceAll(RegExp(r'[\s\(\)\[\]{}<>".,;:!?]+'), '')
+              .isNotEmpty;
+          final afterHasProse = afterUrl
               .replaceAll(RegExp(r'[\s\(\)\[\]{}<>".,;:!?]+'), '')
               .isNotEmpty;
 
-          final remainingText = hasMeaningfulText ? remainingNormalized : null;
+          String? remainingText;
+          if (beforeHasProse || afterHasProse) {
+            String remainingRaw;
+            if (beforeHasProse && afterHasProse) {
+              if (RegExp(r'^[.,;:!?]').hasMatch(afterUrl) &&
+                  !RegExp(r'[.,;:!?]$').hasMatch(beforeUrl)) {
+                remainingRaw = '$beforeUrl$afterUrl';
+              } else {
+                remainingRaw = '$beforeUrl $afterUrl';
+              }
+            } else if (beforeHasProse) {
+              remainingRaw = beforeUrl;
+            } else {
+              // Only afterUrl has prose (URL was at start):
+              // strip any leading sentence or separator punctuation leftover from URL
+              remainingRaw = afterUrl.replaceFirst(RegExp(r'^[.,;:!?\-–—]+\s*'), '');
+            }
+
+            remainingRaw = remainingRaw
+                .replaceAll('()', '')
+                .replaceAll('[]', '')
+                .replaceAll('""', '')
+                .replaceAll("''", '');
+
+            final normalized = remainingRaw
+                .replaceAll(RegExp(r'[ \t\r\n]+'), ' ')
+                .trim();
+
+            if (normalized.replaceAll(RegExp(r'[\s\(\)\[\]{}<>".,;:!?]+'), '').isNotEmpty) {
+              remainingText = normalized;
+            }
+          }
 
           String? derivedTitle = cleanSubject;
           if (derivedTitle == null && remainingText != null) {
