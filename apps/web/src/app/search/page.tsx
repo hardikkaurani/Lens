@@ -170,17 +170,30 @@ function SearchContent() {
 
     setActiveQuery(trimmed);
     const filterParam = selectedFilter !== "all" ? `&source_type=${encodeURIComponent(selectedFilter)}` : "";
-    router.push(`/search?q=${encodeURIComponent(trimmed)}${filterParam}`);
-    executeSearch(trimmed, selectedFilter);
+    const isUrlChanging = trimmed !== initialQuery.trim() || selectedFilter !== initialSourceType;
+
+    if (isUrlChanging) {
+      setLoading(true);
+      setError(null);
+      router.push(`/search?q=${encodeURIComponent(trimmed)}${filterParam}`);
+    } else {
+      executeSearch(trimmed, selectedFilter);
+    }
   };
 
   const handleFilterSelect = (filterId: string) => {
     setSelectedFilter(filterId);
     const queryToUse = activeQuery.trim() || inputVal.trim();
     if (queryToUse) {
-      const filterParam = filterId !== "all" ? `&source_type=${encodeURIComponent(filterId)}` : "";
-      router.push(`/search?q=${encodeURIComponent(queryToUse)}${filterParam}`);
-      executeSearch(queryToUse, filterId);
+      const isUrlChanging = filterId !== initialSourceType || queryToUse !== initialQuery.trim();
+      if (isUrlChanging) {
+        setLoading(true);
+        setError(null);
+        const filterParam = filterId !== "all" ? `&source_type=${encodeURIComponent(filterId)}` : "";
+        router.push(`/search?q=${encodeURIComponent(queryToUse)}${filterParam}`);
+      } else {
+        executeSearch(queryToUse, filterId);
+      }
     }
   };
 

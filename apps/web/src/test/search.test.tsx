@@ -5,19 +5,40 @@ import SearchPage from "@/app/search/page";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import type { SearchResponse } from "@/types/api";
 
-const mockRouterPush = vi.fn();
 let mockSearchParams = new URLSearchParams();
+const navListeners = new Set<() => void>();
+
+function setMockSearchParams(params: URLSearchParams) {
+  mockSearchParams = params;
+  navListeners.forEach((listener) => listener());
+}
+
+const mockRouterPush = vi.fn((url: string) => {
+  const queryIndex = url.indexOf("?");
+  const queryString = queryIndex !== -1 ? url.slice(queryIndex + 1) : "";
+  setMockSearchParams(new URLSearchParams(queryString));
+});
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockRouterPush }),
-  useSearchParams: () => mockSearchParams,
+  useSearchParams: () => {
+    const [, setTick] = React.useState(0);
+    React.useEffect(() => {
+      const listener = () => setTick((t) => t + 1);
+      navListeners.add(listener);
+      return () => {
+        navListeners.delete(listener);
+      };
+    }, []);
+    return mockSearchParams;
+  },
 }));
 
 describe("Search Experience & UX (Tests 20-26, 31)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    mockRouterPush.mockReset();
-    mockSearchParams = new URLSearchParams();
+    mockRouterPush.mockClear();
+    setMockSearchParams(new URLSearchParams());
   });
 
   // 20. Search success
@@ -535,7 +556,7 @@ describe("Search Experience & UX (Tests 20-26, 31)", () => {
 
   // Stage 16.1 Finding D: URL search params synchronization and clearing
   it("Stage 16.1 Finding D: URL search params synchronize input and filter, and clearing query clears results", async () => {
-    mockSearchParams = new URLSearchParams("q=initial+query&source_type=issue");
+    setMockSearchParams(new URLSearchParams("q=initial+query&source_type=issue"));
 
     const mockResponse: SearchResponse = {
       query: "initial query",
@@ -576,12 +597,237 @@ describe("Search Experience & UX (Tests 20-26, 31)", () => {
     });
 
     // Now simulate back/forward navigation that clears query parameters
-    mockSearchParams = new URLSearchParams("");
+    setMockSearchParams(new URLSearchParams(""));
     rerender(<SearchPage />);
 
     await waitFor(() => {
       expect(input.value).toBe("");
       expect(screen.queryByText("Initial Issue")).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe("Duplicate Request Elimination & Single Effective Request (Stage 16.1 Follow-up)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockRouterPush.mockClear();
+    setMockSearchParams(new URLSearchParams());
+  });
+
+  const mockSearchResult: SearchResponse = {
+    query: "kubernetes architecture",
+    total: 1,
+    limit: 20,
+    degraded: false,
+    results: [
+      {
+        capture_id: "cap-k8s-1",
+        title: "Kubernetes Control Plane",
+        original_url: "https://kubernetes.io/docs",
+        source_type: "url",
+        best_score: 0.95,
+        best_lexical_score: 0.9,
+        best_semantic_score: 1.0,
+        matching_chunks: [
+          {
+            chunk_id: "chunk-k8s-1",
+            chunk_index: 0,
+            content_excerpt: "The control plane makes global decisions about the cluster...",
+            score: 0.95,
+            lexical_score: 0.9,
+            semantic_score: 1.0,
+          },
+        ],
+      },
+    ],
+  };
+
+  it("submitting a new query triggers exactly one API request via URL-driven effect", async () => {
+    const searchSpy = vi.spyOn(apiClient, "search").mockResolvedValue(mockSearchResult);
+
+    render(<SearchPage />);
+    expect(searchSpy).not.toHaveBeenCalled();
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    const submitBtn = screen.getByTestId("search-submit-btn");
+
+    fireEvent.change(searchInput, { target: { value: "kubernetes architecture" } });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Kubernetes Control Plane")).toBeInTheDocument();
+    });
+
+    // Verify exactly one search request was dispatched
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+    expect(searchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "kubernetes architecture", limit: 20 })
+    );
+    expect(mockRouterPush).toHaveBeenCalledTimes(1);
+    expect(mockRouterPush).toHaveBeenCalledWith("/search?q=kubernetes%20architecture");
+  });
+
+  it("changing the filter triggers exactly one API request via URL-driven effect", async () => {
+    const searchSpy = vi.spyOn(apiClient, "search").mockResolvedValue({
+      ...mockSearchResult,
+      source_filter: "pull_request",
+    });
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "kubernetes architecture" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Now change filter to PRs
+    const prFilterBtn = screen.getByTestId("filter-btn-pull_request");
+    fireEvent.click(prFilterBtn);
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+      expect(searchSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          q: "kubernetes architecture",
+          source_type: "pull_request",
+        })
+      );
+    });
+
+    expect(mockRouterPush).toHaveBeenLastCalledWith(
+      "/search?q=kubernetes%20architecture&source_type=pull_request"
+    );
+  });
+
+  it("repeating the same query still works via direct execution without duplicate requests", async () => {
+    const searchSpy = vi.spyOn(apiClient, "search").mockResolvedValue(mockSearchResult);
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    const submitBtn = screen.getByTestId("search-submit-btn");
+
+    // First search
+    fireEvent.change(searchInput, { target: { value: "kubernetes architecture" } });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    mockRouterPush.mockClear();
+
+    // Repeat identical search submission
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    // router.push is not called again because the URL is unchanged
+    expect(mockRouterPush).not.toHaveBeenCalled();
+    expect(searchSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: "kubernetes architecture" })
+    );
+  });
+
+  it("retrying a failed request works via direct execution without double-fetching", async () => {
+    const searchSpy = vi
+      .spyOn(apiClient, "search")
+      .mockRejectedValueOnce(new ApiClientError(500, "Backend search timeout."))
+      .mockResolvedValueOnce(mockSearchResult);
+
+    render(<SearchPage />);
+
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "kubernetes architecture" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Backend search timeout.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+
+    expect(searchSpy).toHaveBeenCalledTimes(1);
+
+    // Click retry
+    const retryBtn = screen.getByRole("button", { name: /Retry/i });
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Kubernetes Control Plane")).toBeInTheDocument();
+    });
+
+    // Exactly one retry call was made (total 2)
+    expect(searchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Backend search timeout.")).not.toBeInTheDocument();
+  });
+
+  it("browser back and forward navigation continues to trigger search for updated URL params", async () => {
+    const searchSpy = vi.spyOn(apiClient, "search").mockImplementation(async (params) => ({
+      query: params.q,
+      total: 1,
+      limit: 20,
+      degraded: false,
+      source_filter: params.source_type,
+      results: [
+        {
+          capture_id: `cap-${params.q}`,
+          title: `Result for ${params.q}`,
+          original_url: null,
+          source_type: params.source_type || "text",
+          best_score: 0.9,
+          best_lexical_score: null,
+          best_semantic_score: null,
+          matching_chunks: [],
+        },
+      ],
+    }));
+
+    render(<SearchPage />);
+
+    // Step 1: Initial search "query-alpha"
+    const searchInput = screen.getByPlaceholderText(/Search concepts, code, links/i);
+    fireEvent.change(searchInput, { target: { value: "query-alpha" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Result for query-alpha")).toBeInTheDocument();
+      expect(searchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Step 2: Second search "query-beta" with filter "issue"
+    fireEvent.change(searchInput, { target: { value: "query-beta" } });
+    fireEvent.click(screen.getByTestId("search-submit-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Result for query-beta")).toBeInTheDocument();
+      expect(searchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    // Step 3: Simulate browser Back navigation back to "query-alpha" (no filter)
+    setMockSearchParams(new URLSearchParams("q=query-alpha"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Result for query-alpha")).toBeInTheDocument();
+      expect(searchSpy).toHaveBeenCalledTimes(3);
+      expect(searchSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ q: "query-alpha", source_type: undefined })
+      );
+    });
+
+    // Step 4: Simulate browser Forward navigation back to "query-beta" with "issue"
+    setMockSearchParams(new URLSearchParams("q=query-beta&source_type=issue"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Result for query-beta")).toBeInTheDocument();
+      expect(searchSpy).toHaveBeenCalledTimes(4);
+      expect(searchSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ q: "query-beta", source_type: "issue" })
+      );
     });
   });
 });
