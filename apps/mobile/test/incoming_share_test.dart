@@ -406,6 +406,7 @@ void main() {
       expect(find.text('Edited Title Before Retry'), findsOneWidget);
 
       // Attempt 2: Succeeds on retry
+      await tester.ensureVisible(find.text('Ingest Web Link'));
       await tester.tap(find.text('Ingest Web Link'));
       await tester.pumpAndSettle();
 

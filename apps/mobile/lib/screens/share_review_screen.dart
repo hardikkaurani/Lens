@@ -55,7 +55,10 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
     );
 
     _contentController = TextEditingController(
-      text: widget.sharedContent.text ?? widget.sharedContent.rawText,
+      text: widget.sharedContent.text ??
+          (widget.sharedContent.type == SharedContentType.text
+              ? widget.sharedContent.rawText
+              : ''),
     );
   }
 
@@ -92,7 +95,7 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
         title: _titleController.text.trim().isNotEmpty
             ? _titleController.text.trim()
             : null,
-        content: _selectedType == SourceType.text
+        content: _contentController.text.trim().isNotEmpty
             ? _contentController.text.trim()
             : null,
       );
@@ -306,10 +309,29 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
                 const SizedBox(height: 8),
                 TextFormField(
                   controller: _titleController,
-                  textInputAction: TextInputAction.done,
+                  textInputAction: TextInputAction.next,
                   maxLength: 512,
                   decoration: const InputDecoration(
                     hintText: 'Custom title for this web page',
+                    counterText: '',
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Context / Notes (Optional)',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _contentController,
+                  maxLines: 4,
+                  maxLength: 1000000,
+                  decoration: const InputDecoration(
+                    hintText: 'Explanatory context or personal notes for this link',
                     counterText: '',
                   ),
                 ),
