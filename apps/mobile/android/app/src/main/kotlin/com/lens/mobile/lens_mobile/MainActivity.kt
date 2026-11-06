@@ -65,7 +65,8 @@ class MainActivity : FlutterActivity() {
         val type = intent.type
 
         if ((Intent.ACTION_SEND == action || Intent.ACTION_SEND_MULTIPLE == action) && type != null) {
-            if (type.startsWith("text/")) {
+            // Strictly require text/plain or text/* MIME type consistent with AndroidManifest
+            if (type == "text/plain" || type.startsWith("text/")) {
                 val data = extractTextData(intent)
                 if (data != null) {
                     if (isInitial || eventSink == null) {
@@ -80,6 +81,14 @@ class MainActivity : FlutterActivity() {
 
     private fun extractTextData(intent: Intent): Map<String, Any?>? {
         val action = intent.action ?: return null
+
+        // Explicit contract: LENS supports textual content only.
+        // If EXTRA_STREAM is present (binary file, photo, media, or mixed stream+text payload),
+        // reject immediately to avoid misleading, partial, or ambiguous text captures.
+        if (intent.hasExtra(Intent.EXTRA_STREAM)) {
+            return null
+        }
+
         val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
             ?: intent.getCharSequenceExtra(Intent.EXTRA_SUBJECT)?.toString()
 
