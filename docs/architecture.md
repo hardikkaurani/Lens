@@ -78,12 +78,15 @@ flowchart TD
   * Instant capture creation interface for web URLs and text notes (`NewCaptureScreen`).
   * Android Share Sheet integration for native incoming content capture (Stage 17):
     * `ACTION_SEND` and `ACTION_SEND_MULTIPLE` intent filters registered for `text/plain` MIME types.
+    * Hardened native Android contract (`MainActivity.kt`): bounds incoming single and multi-line extractions at 1,000,000 characters to prevent OOM, joins `ACTION_SEND_MULTIPLE` text elements with `\n\n`, and safely ignores binary stream payloads lacking text without crashing.
     * Kotlin native channels: MethodChannel (`com.lens.mobile/share_channel`) and EventChannel (`com.lens.mobile/share_events`).
     * Resilient cold-start (`getInitialShare`) and warm-start (`onNewIntent` event stream) lifecycle management.
-    * Safe `SharedContentParser` handling standalone HTTP/HTTPS URLs, plain text notes, and text containing embedded URLs.
-    * Strict URL scheme security: accepts `http`/`https` exclusively, rejecting `javascript:`, `file:`, `data:`.
-    * Dedicated incoming share review experience (`ShareReviewScreen`) with type badge, title and content editing, explicit Save/Cancel, and transition to `CaptureDetailScreen`.
-    * Deduplication window (1500ms) and double-tap submission locks to prevent duplicate captures.
+    * Safe `SharedContentParser` handling standalone HTTP/HTTPS URLs, plain text notes, and text containing embedded URLs with whitespace normalization.
+    * Robust URL boundary cleaning: trims sentence punctuation (`.`, `,`, `;`, `:`, `!`, `?`, quotes), strips unbalanced enclosing parentheses, and preserves balanced parentheses (e.g. Wikipedia URLs like `https://en.wikipedia.org/wiki/LENS_(disambiguation)`).
+    * Strict URL scheme security: accepts `http`/`https` exclusively, safely treating `javascript:`, `file:`, `data:`, `ftp:`, or oversized (>2048 chars) URLs as plain text notes.
+    * URL context preservation: surrounding explanatory text is extracted, displayed in an editable "Context / Notes (Optional)" field in `ShareReviewScreen`, and persisted via `CaptureCreate.content` using the existing backend capture schema.
+    * In-memory 1500ms platform callback debounce guard absorbing immediate OS duplicate intent deliveries (e.g. Activity recreation or OEM skin double-firing) without restricting subsequent intentional user shares.
+    * Dedicated incoming share review experience (`ShareReviewScreen`) with type badge, title and content editing, explicit Save/Cancel, double-tap submission guards, and transition to `CaptureDetailScreen`.
   * Paginated capture list with newest-first ordering, status indicators, and pull-to-refresh (`CapturesScreen`).
   * Capture detail inspector displaying processing status, chunks, and metadata with bounded polling (`CaptureDetailScreen`).
   * Hybrid search screen querying the FastAPI backend with relevance score breakdowns (`SearchScreen`).
