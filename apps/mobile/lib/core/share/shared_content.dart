@@ -60,9 +60,9 @@ class SharedContentParser {
         ? _boundString(subject!.trim(), maxTitleLength)
         : null;
 
-    // 1. Check for HTTP/HTTPS URL in text
-    final match = _urlRegex.firstMatch(trimmedRaw);
-    if (match != null) {
+    // 1. Search for first valid HTTP/HTTPS URL candidate in text
+    final matches = _urlRegex.allMatches(trimmedRaw);
+    for (final match in matches) {
       final rawMatch = match.group(0)!;
       final cleanUrl = _cleanUrlCandidate(rawMatch);
 
@@ -122,18 +122,12 @@ class SharedContentParser {
               remainingRaw = afterUrl.replaceFirst(RegExp(r'^[.,;:!?\-–—]+\s*'), '');
             }
 
-            remainingRaw = remainingRaw
-                .replaceAll('()', '')
-                .replaceAll('[]', '')
-                .replaceAll('""', '')
-                .replaceAll("''", '');
-
             final normalized = remainingRaw
                 .replaceAll(RegExp(r'[ \t\r\n]+'), ' ')
                 .trim();
 
             if (normalized.replaceAll(RegExp(r'[\s\(\)\[\]{}<>".,;:!?]+'), '').isNotEmpty) {
-              remainingText = normalized;
+              remainingText = _boundString(normalized, maxTextLength);
             }
           }
 
@@ -154,7 +148,7 @@ class SharedContentParser {
       }
     }
 
-    // 3. Plain text note
+    // 2. Plain text note
     final boundedText = _boundString(trimmedRaw, maxTextLength);
     return SharedContent(
       type: SharedContentType.text,
@@ -165,47 +159,77 @@ class SharedContentParser {
     );
   }
 
-  /// Trims trailing sentence punctuation and unbalanced closing parenthesis/bracket from URL candidate.
+  /// Trims trailing sentence punctuation and unbalanced closing parenthesis/bracket from URL candidate
+  /// in a single linear pass $O(N)$, preventing UI freeze on large delimiter sequences.
   /// Preserves balanced parentheses like Wikipedia URLs (e.g. `https://en.wikipedia.org/wiki/LENS_(disambiguation)`).
   static String _cleanUrlCandidate(String candidate) {
-    var cleaned = candidate.trim();
-    bool changed = true;
+    if (candidate.isEmpty) return candidate;
 
-    while (changed && cleaned.isNotEmpty) {
-      changed = false;
+    // Single pass to count delimiter balance
+    int openParen = 0;
+    int closeParen = 0;
+    int openBracket = 0;
+    int closeBracket = 0;
 
-      // 1. Strip trailing standard sentence punctuation
-      final punctMatch = RegExp(r'[.,;:!?"”’]+$').firstMatch(cleaned);
-      if (punctMatch != null) {
-        cleaned = cleaned.substring(0, punctMatch.start);
-        changed = true;
-        continue;
-      }
-
-      // 2. Strip trailing closing parenthesis ONLY if unbalanced
-      if (cleaned.endsWith(')')) {
-        final openCount = '('.allMatches(cleaned).length;
-        final closeCount = ')'.allMatches(cleaned).length;
-        if (closeCount > openCount) {
-          cleaned = cleaned.substring(0, cleaned.length - 1);
-          changed = true;
-          continue;
-        }
-      }
-
-      // 3. Strip trailing closing bracket ONLY if unbalanced
-      if (cleaned.endsWith(']')) {
-        final openCount = '['.allMatches(cleaned).length;
-        final closeCount = ']'.allMatches(cleaned).length;
-        if (closeCount > openCount) {
-          cleaned = cleaned.substring(0, cleaned.length - 1);
-          changed = true;
-          continue;
-        }
+    for (int i = 0; i < candidate.length; i++) {
+      final codeUnit = candidate.codeUnitAt(i);
+      if (codeUnit == 0x28) {
+        // '('
+        openParen++;
+      } else if (codeUnit == 0x29) {
+        // ')'
+        closeParen++;
+      } else if (codeUnit == 0x5B) {
+        // '['
+        openBracket++;
+      } else if (codeUnit == 0x5D) {
+        // ']'
+        closeBracket++;
       }
     }
 
-    return cleaned;
+    int excessParen = closeParen > openParen ? closeParen - openParen : 0;
+    int excessBracket = closeBracket > openBracket ? closeBracket - openBracket : 0;
+
+    int end = candidate.length;
+    while (end > 0) {
+      final char = candidate[end - 1];
+
+      // 1. Check for trailing sentence punctuation / quotes
+      // [.,;:!?"”'’]
+      if (char == '.' ||
+          char == ',' ||
+          char == ';' ||
+          char == ':' ||
+          char == '!' ||
+          char == '?' ||
+          char == '"' ||
+          char == '”' ||
+          char == "'" ||
+          char == '’') {
+        end--;
+        continue;
+      }
+
+      // 2. Check for unbalanced closing parenthesis
+      if (char == ')' && excessParen > 0) {
+        excessParen--;
+        end--;
+        continue;
+      }
+
+      // 3. Check for unbalanced closing bracket
+      if (char == ']' && excessBracket > 0) {
+        excessBracket--;
+        end--;
+        continue;
+      }
+
+      // No more trailing delimiters or excess closing brackets to strip
+      break;
+    }
+
+    return candidate.substring(0, end).trim();
   }
 
   static String _boundString(String input, int maxLength) {
@@ -213,4 +237,3 @@ class SharedContentParser {
     return input.substring(0, maxLength);
   }
 }
-

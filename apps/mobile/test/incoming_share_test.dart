@@ -7,6 +7,7 @@ import 'package:lens_mobile/core/share/incoming_share_service.dart';
 import 'package:lens_mobile/core/share/shared_content.dart';
 import 'package:lens_mobile/main.dart';
 import 'package:lens_mobile/models/capture.dart';
+import 'package:lens_mobile/models/content_chunk.dart';
 import 'package:lens_mobile/screens/capture_detail_screen.dart';
 import 'package:lens_mobile/screens/captures_screen.dart';
 import 'package:lens_mobile/screens/new_capture_screen.dart';
@@ -784,6 +785,307 @@ void main() {
       expect(payload.title, 'Initial Title');
       expect(payload.content, 'User edited notes and thoughts');
       expect(find.byType(CaptureDetailScreen), findsOneWidget);
+    });
+  });
+
+  group('Stage 17.1: PR #9 Forensic Remediation Regressions', () {
+    test('1. Deduplication collision prevention across discrete text and subject fields', () async {
+      final fakePlatform = FakeIncomingSharePlatform();
+      final now = DateTime(2026, 11, 6, 12, 0, 0);
+      final service = IncomingShareService(
+        platform: fakePlatform,
+        debounceDuration: const Duration(milliseconds: 1500),
+        clock: () => now,
+      );
+
+      final receivedShares = <SharedContent>[];
+      final sub = service.onIncomingShare.listen((content) {
+        receivedShares.add(content);
+      });
+
+      // Pair A: text: "alpha|beta", subject: "gamma"
+      fakePlatform.emitShare({
+        'text': 'alpha|beta',
+        'subject': 'gamma',
+      });
+
+      // Pair B: text: "alpha", subject: "beta|gamma" (same delimiter string, but different fields)
+      fakePlatform.emitShare({
+        'text': 'alpha',
+        'subject': 'beta|gamma',
+      });
+
+      await pumpEventQueue();
+
+      expect(receivedShares.length, 2);
+      expect(receivedShares[0].rawText, 'alpha|beta');
+      expect(receivedShares[0].subject, 'gamma');
+      expect(receivedShares[1].rawText, 'alpha');
+      expect(receivedShares[1].subject, 'beta|gamma');
+
+      await sub.cancel();
+      service.dispose();
+      fakePlatform.dispose();
+    });
+
+    test('2. Search past invalid candidate to first valid HTTP/HTTPS URL', () {
+      // First candidate is invalid (missing host or malformed), second is valid
+      final content = SharedContentParser.parse(
+        rawText: 'See http:// and https://flutter.dev/docs for guide',
+      );
+
+      expect(content, isNotNull);
+      expect(content!.type, SharedContentType.url);
+      expect(content.url, 'https://flutter.dev/docs');
+      expect(content.text, contains('See http:// and for guide'));
+
+      // Also verify pure HTTP scheme
+      final httpContent = SharedContentParser.parse(
+        rawText: 'http://example.com/legacy-api',
+      );
+      expect(httpContent, isNotNull);
+      expect(httpContent!.type, SharedContentType.url);
+      expect(httpContent.url, 'http://example.com/legacy-api');
+    });
+
+    test('3. Preserve meaningful code and markdown punctuation in surrounding context', () {
+      final content = SharedContentParser.parse(
+        rawText: 'Call refresh() before opening https://example.com/docs',
+      );
+
+      expect(content, isNotNull);
+      expect(content!.type, SharedContentType.url);
+      expect(content.url, 'https://example.com/docs');
+      expect(content.text, 'Call refresh() before opening');
+      expect(content.title, 'Call refresh() before opening');
+    });
+
+    test('4. Bound URL context text to maxTextLength', () {
+      final oversizedText = 'https://example.com/doc ${'X' * 1500000}';
+      final content = SharedContentParser.parse(
+        rawText: oversizedText,
+      );
+
+      expect(content, isNotNull);
+      expect(content!.type, SharedContentType.url);
+      expect(content.url, 'https://example.com/doc');
+      expect(content.text, isNotNull);
+      expect(content.text!.length, SharedContentParser.maxTextLength);
+    });
+
+    test('5. Remove matched single quotes around URL while preserving internal apostrophes', () {
+      // Enclosed in matching single quotes without extra text
+      final enclosed = SharedContentParser.parse(
+        rawText: "'https://example.com/article'",
+      );
+      expect(enclosed, isNotNull);
+      expect(enclosed!.type, SharedContentType.url);
+      expect(enclosed.url, 'https://example.com/article');
+      expect(enclosed.text, isNull);
+
+      // Enclosed in matching single quotes with surrounding text
+      final enclosedWithText = SharedContentParser.parse(
+        rawText: "Check out 'https://example.com/article' today",
+      );
+      expect(enclosedWithText, isNotNull);
+      expect(enclosedWithText!.type, SharedContentType.url);
+      expect(enclosedWithText.url, 'https://example.com/article');
+      expect(enclosedWithText.text, 'Check out today');
+
+      // Internal apostrophe preserved
+      final apostrophe = SharedContentParser.parse(
+        rawText: "https://example.com/o'reilly",
+      );
+      expect(apostrophe, isNotNull);
+      expect(apostrophe!.type, SharedContentType.url);
+      expect(apostrophe.url, "https://example.com/o'reilly");
+    });
+
+    test('6. Linear candidate cleanup performance with 50,000 trailing parentheses', () {
+      final raw = 'https://example.com/test${')' * 50000}';
+      final stopwatch = Stopwatch()..start();
+      final content = SharedContentParser.parse(rawText: raw);
+      stopwatch.stop();
+
+      expect(content, isNotNull);
+      expect(content!.type, SharedContentType.url);
+      expect(content.url, 'https://example.com/test');
+      expect(stopwatch.elapsedMilliseconds, lessThan(1000));
+    });
+
+    testWidgets('7a. Preserve shared URL and surrounding prose when switching to Text Note tab', (tester) async {
+      final withProse = SharedContent(
+        type: SharedContentType.url,
+        url: 'https://example.com/article',
+        title: 'Initial Title',
+        text: 'Important read',
+        rawText: 'Important read https://example.com/article',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ShareReviewScreen(
+            sharedContent: withProse,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Switch to Text Note
+      await tester.tap(find.text('Text Note'));
+      await tester.pumpAndSettle();
+
+      // Note content field should now contain both the prose and the URL
+      expect(find.text('Important read\n\nhttps://example.com/article'), findsOneWidget);
+    });
+
+    testWidgets('7b. Standalone shared URL populates note content when switching to Text Note tab', (tester) async {
+      final standalone = SharedContent(
+        type: SharedContentType.url,
+        url: 'https://example.com/standalone',
+        rawText: 'https://example.com/standalone',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ShareReviewScreen(
+            sharedContent: standalone,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Switch to Text Note
+      await tester.tap(find.text('Text Note'));
+      await tester.pumpAndSettle();
+
+      // Note content field should contain the standalone URL
+      expect(find.text('https://example.com/standalone'), findsOneWidget);
+    });
+
+    testWidgets('8. PopScope blocks back navigation while save is pending', (tester) async {
+      final completer = Completer<Capture>();
+      final mockClient = MockApiClient(
+        onCreateCapture: (payload) => completer.future,
+      );
+
+      final shared = SharedContent(
+        type: SharedContentType.url,
+        url: 'https://popscope.example.com',
+        rawText: 'https://popscope.example.com',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ShareReviewScreen(
+            sharedContent: shared,
+            apiClient: mockClient,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Initially canPop is true
+      final popScopeBefore = tester.widget<PopScope>(find.byType(PopScope));
+      expect(popScopeBefore.canPop, isTrue);
+
+      // Tap Ingest Web Link to start async submission
+      await tester.tap(find.text('Ingest Web Link'));
+      await tester.pump();
+
+      // While submitting, canPop must be false to block system Back
+      final popScopeSubmitting = tester.widget<PopScope>(find.byType(PopScope));
+      expect(popScopeSubmitting.canPop, isFalse);
+
+      // Complete submission
+      completer.complete(Capture(
+        id: 'cap-complete-1',
+        sourceType: SourceType.url,
+        processingStatus: ProcessingStatus.completed,
+        originalUrl: 'https://popscope.example.com',
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CaptureDetailScreen), findsOneWidget);
+    });
+
+    testWidgets('9a. CaptureDetailScreen renders saved URL context alongside extracted chunks', (tester) async {
+      final captureWithContext = Capture(
+        id: 'cap-with-ctx',
+        sourceType: SourceType.url,
+        processingStatus: ProcessingStatus.completed,
+        originalUrl: 'https://example.com/with-context',
+        title: 'Context Article',
+        content: 'User personal notes on this link',
+        chunks: [
+          ContentChunk(
+            id: 'chk-1',
+            chunkIndex: 0,
+            content: 'Extracted article body from website',
+            createdAt: DateTime.now(),
+          ),
+        ],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CaptureDetailScreen(
+            captureId: captureWithContext.id,
+            initialCapture: captureWithContext,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Expect to find Context / Notes section with user notes
+      expect(find.text('Context / Notes'), findsOneWidget);
+      expect(find.text('User personal notes on this link'), findsOneWidget);
+
+      // Expect to find Extracted Chunks section
+      expect(find.text('Extracted Chunks (1)'), findsOneWidget);
+      expect(find.text('Extracted article body from website'), findsOneWidget);
+    });
+
+    testWidgets('9b. CaptureDetailScreen suppresses duplicate context when content matches chunks (backfill)', (tester) async {
+      final captureWithBackfill = Capture(
+        id: 'cap-backfilled',
+        sourceType: SourceType.url,
+        processingStatus: ProcessingStatus.completed,
+        originalUrl: 'https://example.com/backfilled',
+        title: 'Backfilled Article',
+        content: 'Extracted article body from website',
+        chunks: [
+          ContentChunk(
+            id: 'chk-1',
+            chunkIndex: 0,
+            content: 'Extracted article body from website',
+            createdAt: DateTime.now(),
+          ),
+        ],
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CaptureDetailScreen(
+            captureId: captureWithBackfill.id,
+            initialCapture: captureWithBackfill,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Expect Context / Notes to NOT be rendered (avoids duplicate page text)
+      expect(find.text('Context / Notes'), findsNothing);
+
+      // Extracted Chunks section is rendered
+      expect(find.text('Extracted Chunks (1)'), findsOneWidget);
+      expect(find.text('Extracted article body from website'), findsOneWidget);
     });
   });
 }

@@ -13,14 +13,27 @@ class MainActivity : FlutterActivity() {
         private const val METHOD_CHANNEL = "com.lens.mobile/share_channel"
         private const val EVENT_CHANNEL = "com.lens.mobile/share_events"
         private const val MAX_TEXT_LENGTH = 1_000_000
+        private const val KEY_LAUNCH_INTENT_CONSUMED = "com.lens.mobile.launch_intent_consumed"
     }
 
     private var initialShareData: Map<String, Any?>? = null
     private var eventSink: EventChannel.EventSink? = null
+    private var isLaunchIntentConsumed = false
+    private val pendingWarmShares = mutableListOf<Map<String, Any?>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        intent?.let { handleIntent(it, isInitial = true) }
+        if (savedInstanceState != null) {
+            isLaunchIntentConsumed = savedInstanceState.getBoolean(KEY_LAUNCH_INTENT_CONSUMED, false)
+        }
+        if (!isLaunchIntentConsumed) {
+            intent?.let { handleIntent(it, isInitial = true) }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_LAUNCH_INTENT_CONSUMED, isLaunchIntentConsumed)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -38,10 +51,12 @@ class MainActivity : FlutterActivity() {
                     "getInitialShare" -> {
                         val data = initialShareData
                         initialShareData = null
+                        isLaunchIntentConsumed = true
                         result.success(data)
                     }
                     "clearInitialShare" -> {
                         initialShareData = null
+                        isLaunchIntentConsumed = true
                         result.success(true)
                     }
                     else -> result.notImplemented()
@@ -52,6 +67,12 @@ class MainActivity : FlutterActivity() {
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                     eventSink = events
+                    if (events != null && pendingWarmShares.isNotEmpty()) {
+                        for (item in pendingWarmShares) {
+                            events.success(item)
+                        }
+                        pendingWarmShares.clear()
+                    }
                 }
 
                 override fun onCancel(arguments: Any?) {
@@ -69,10 +90,15 @@ class MainActivity : FlutterActivity() {
             if (type == "text/plain" || type.startsWith("text/")) {
                 val data = extractTextData(intent)
                 if (data != null) {
-                    if (isInitial || eventSink == null) {
+                    if (isInitial) {
                         initialShareData = data
+                        isLaunchIntentConsumed = true
                     } else {
-                        eventSink?.success(data)
+                        if (eventSink != null) {
+                            eventSink?.success(data)
+                        } else {
+                            pendingWarmShares.add(data)
+                        }
                     }
                 }
             }
@@ -103,29 +129,46 @@ class MainActivity : FlutterActivity() {
                 }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
-                val list: List<CharSequence?>? = intent.getCharSequenceArrayListExtra(Intent.EXTRA_TEXT)
-                    ?: intent.getStringArrayListExtra(Intent.EXTRA_TEXT)
+                // Safeguard against Android 12 ClassCastException when non-CharSequence items exist
+                val rawList: List<*>? = try {
+                    val extra = intent.extras?.get(Intent.EXTRA_TEXT)
+                    if (extra is List<*>) extra else null
+                } catch (e: Exception) {
+                    null
+                }
 
-                if (list != null) {
+                if (rawList != null) {
                     val builder = StringBuilder()
-                    for (item in list) {
-                        if (item == null) continue
+                    for (item in rawList) {
+                        if (item !is CharSequence) continue
                         val str = item.toString().trim()
                         if (str.isEmpty()) continue
                         if (builder.isNotEmpty()) {
-                            if (builder.length >= MAX_TEXT_LENGTH) break
+                            // Check if separator fits without exceeding max length
+                            if (builder.length + 2 > MAX_TEXT_LENGTH) break
                             builder.append("\n\n")
                         }
-                        if (builder.length + str.length > MAX_TEXT_LENGTH) {
-                            builder.append(str.substring(0, MAX_TEXT_LENGTH - builder.length))
+                        val remainingCapacity = MAX_TEXT_LENGTH - builder.length
+                        if (remainingCapacity <= 0) break
+                        if (str.length > remainingCapacity) {
+                            builder.append(str.substring(0, remainingCapacity))
                             break
                         } else {
                             builder.append(str)
                         }
                     }
-                    if (builder.isEmpty()) null else builder.toString()
+                    if (builder.isNotEmpty()) {
+                        builder.toString()
+                    } else {
+                        val raw = intent.getStringExtra(Intent.EXTRA_TEXT)
+                            ?: intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                        if (raw != null && raw.length > MAX_TEXT_LENGTH) {
+                            raw.substring(0, MAX_TEXT_LENGTH)
+                        } else {
+                            raw
+                        }
+                    }
                 } else {
-                    // Fallback to single text extra if present
                     val raw = intent.getStringExtra(Intent.EXTRA_TEXT)
                         ?: intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
                     if (raw != null && raw.length > MAX_TEXT_LENGTH) {

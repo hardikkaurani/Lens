@@ -36,6 +36,23 @@ class MethodChannelIncomingSharePlatform implements IncomingSharePlatform {
   }
 }
 
+/// In-memory record tracking the most recent platform share for debounce comparison.
+class _LastShareRecord {
+  final String text;
+  final String? subject;
+  final DateTime timestamp;
+
+  const _LastShareRecord({
+    required this.text,
+    required this.subject,
+    required this.timestamp,
+  });
+
+  bool matches(String otherText, String? otherSubject) {
+    return text == otherText && subject == otherSubject;
+  }
+}
+
 /// Service managing incoming platform share intents with platform callback debounce and parsing.
 ///
 /// **Debounce Semantics:**
@@ -57,8 +74,7 @@ class IncomingShareService {
 
   StreamSubscription<Map<String, dynamic>>? _platformSubscription;
 
-  String? _lastShareHash;
-  DateTime? _lastShareTime;
+  _LastShareRecord? _lastShareRecord;
 
   IncomingShareService({
     IncomingSharePlatform? platform,
@@ -94,15 +110,12 @@ class IncomingShareService {
       return null;
     }
 
-    // Deduplication check: suppress duplicate platform callbacks within debounce window (default 1500ms).
-    // Note: This is an in-memory intent delivery debounce guard to absorb immediate OS duplicates
-    // (e.g. during Activity recreation or Android intent double-delivery), NOT durable deduplication.
-    // Identical content shared after the window expires is processed as a fresh capture.
-    final hash = '$text|$subject';
+    // Deduplication check: compare text and subject as discrete fields rather than
+    // a joined delimiter string, preventing delimiter collisions across different pairs.
     final now = _clock();
-    if (_lastShareHash == hash &&
-        _lastShareTime != null &&
-        now.difference(_lastShareTime!) < debounceDuration) {
+    if (_lastShareRecord != null &&
+        _lastShareRecord!.matches(text, subject) &&
+        now.difference(_lastShareRecord!.timestamp) < debounceDuration) {
       return null;
     }
 
@@ -112,8 +125,11 @@ class IncomingShareService {
     );
 
     if (parsed != null) {
-      _lastShareHash = hash;
-      _lastShareTime = now;
+      _lastShareRecord = _LastShareRecord(
+        text: text,
+        subject: subject,
+        timestamp: now,
+      );
     }
 
     return parsed;
@@ -124,4 +140,3 @@ class IncomingShareService {
     _shareController.close();
   }
 }
-

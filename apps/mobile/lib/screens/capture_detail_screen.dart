@@ -59,6 +59,23 @@ class _CaptureDetailScreenState extends State<CaptureDetailScreen> {
   }
 
   @override
+  void didUpdateWidget(CaptureDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.captureId != widget.captureId ||
+        oldWidget.initialCapture != widget.initialCapture) {
+      if (widget.initialCapture != null) {
+        _capture = widget.initialCapture;
+        _isLoading = false;
+        _errorMessage = null;
+        _isNotFound = false;
+        _checkStartPolling();
+      } else if (oldWidget.captureId != widget.captureId) {
+        _fetchDetail();
+      }
+    }
+  }
+
+  @override
   void dispose() {
     _pollTimer?.cancel();
     _pollTimer = null;
@@ -138,6 +155,45 @@ class _CaptureDetailScreenState extends State<CaptureDetailScreen> {
         _fetchDetail(background: true);
       });
     }
+  }
+
+  /// Determines whether [capture] contains user-provided context/notes that should be
+  /// rendered alongside extracted webpage chunks, while avoiding duplicate display
+  /// when `capture.content` was backfilled with the normalized extracted page text.
+  bool _shouldShowContextNotes(Capture capture) {
+    if (capture.sourceType != SourceType.url) return false;
+    if (capture.content == null || capture.content!.trim().isEmpty) return false;
+    if (capture.chunks.isEmpty) return false;
+
+    final trimmedContent = capture.content!.trim();
+
+    // If only 1 chunk and its content equals capture.content, it's extracted page text backfill
+    if (capture.chunks.length == 1 &&
+        capture.chunks.first.content.trim() == trimmedContent) {
+      return false;
+    }
+
+    // Check if concatenated chunks match content (normalized text backfill)
+    final allChunksText = capture.chunks.map((c) => c.content.trim()).join();
+    final strippedContent = trimmedContent.replaceAll(RegExp(r'\s+'), '');
+    final strippedChunks = allChunksText.replaceAll(RegExp(r'\s+'), '');
+    if (strippedContent == strippedChunks) {
+      return false;
+    }
+
+    // If content starts with the first chunk and ends with the last chunk, it's extracted page text
+    if (capture.chunks.length > 1) {
+      final firstSnippet = capture.chunks.first.content.trim();
+      final lastSnippet = capture.chunks.last.content.trim();
+      if (firstSnippet.length >= 20 &&
+          lastSnippet.length >= 20 &&
+          trimmedContent.startsWith(firstSnippet.substring(0, 20)) &&
+          trimmedContent.endsWith(lastSnippet.substring(lastSnippet.length - 20))) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   @override
@@ -369,6 +425,40 @@ class _CaptureDetailScreenState extends State<CaptureDetailScreen> {
           ],
 
           const SizedBox(height: 20),
+
+          // Context / Notes Section (when user provided context alongside a URL capture with chunks)
+          if (_shouldShowContextNotes(capture)) ...[
+            const Row(
+              children: [
+                Icon(Icons.notes_rounded, size: 16, color: AppTheme.primaryLight),
+                SizedBox(width: 6),
+                Text(
+                  'Context / Notes',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Card(
+              color: AppTheme.surfaceElevated,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: SelectableText(
+                  capture.content!,
+                  style: const TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
 
           // Chunks / Content Section
           Row(

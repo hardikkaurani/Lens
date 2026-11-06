@@ -37,6 +37,7 @@ class _LensAppState extends State<LensApp> {
   late final IncomingShareService _shareService;
   StreamSubscription<SharedContent>? _shareSub;
   bool _isReviewOpen = false;
+  int _currentReviewId = 0;
 
   @override
   void initState() {
@@ -63,6 +64,7 @@ class _LensAppState extends State<LensApp> {
     }
 
     _isReviewOpen = true;
+    final int reviewId = ++_currentReviewId;
     _navigatorKey.currentState
         ?.push(
       MaterialPageRoute(
@@ -70,16 +72,22 @@ class _LensAppState extends State<LensApp> {
           sharedContent: content,
           apiClient: widget.apiClient,
           onCancel: () {
-            _isReviewOpen = false;
+            if (_currentReviewId == reviewId) {
+              _isReviewOpen = false;
+            }
           },
           onSaved: (created) {
-            _isReviewOpen = false;
+            if (_currentReviewId == reviewId) {
+              _isReviewOpen = false;
+            }
           },
         ),
       ),
     )
         .then((_) {
-      _isReviewOpen = false;
+      if (_currentReviewId == reviewId) {
+        _isReviewOpen = false;
+      }
     });
   }
 

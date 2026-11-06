@@ -111,7 +111,7 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
             builder: (_) => CaptureDetailScreen(
               captureId: created.id,
               initialCapture: created,
-              apiClient: _client,
+              apiClient: widget.apiClient,
             ),
           ),
         );
@@ -139,94 +139,112 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
   Widget build(BuildContext context) {
     final isUrl = _selectedType == SourceType.url;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Review Shared Content'),
-        leading: IconButton(
-          icon: const Icon(Icons.close_rounded),
-          tooltip: 'Cancel share',
-          onPressed: _isSubmitting ? null : _cancel,
+    return PopScope(
+      canPop: !_isSubmitting,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Review Shared Content'),
+          leading: IconButton(
+            icon: const Icon(Icons.close_rounded),
+            tooltip: 'Cancel share',
+            onPressed: _isSubmitting ? null : _cancel,
+          ),
         ),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Detected Type Banner
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: AppTheme.surface,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppTheme.border),
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      widget.sharedContent.type == SharedContentType.url
-                          ? Icons.share_location_rounded
-                          : Icons.article_outlined,
-                      size: 18,
-                      color: AppTheme.primaryLight,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Detected Type Banner
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppTheme.border),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
                         widget.sharedContent.type == SharedContentType.url
-                            ? 'Detected Web Link from Android Share Sheet'
-                            : 'Detected Text Note from Android Share Sheet',
-                        style: const TextStyle(
-                          color: AppTheme.textPrimary,
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
+                            ? Icons.share_location_rounded
+                            : Icons.article_outlined,
+                        size: 18,
+                        color: AppTheme.primaryLight,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          widget.sharedContent.type == SharedContentType.url
+                              ? 'Detected Web Link from Android Share Sheet'
+                              : 'Detected Text Note from Android Share Sheet',
+                          style: const TextStyle(
+                            color: AppTheme.textPrimary,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
 
-              const SizedBox(height: 18),
+                const SizedBox(height: 18),
 
-              // Segmented Type Selector
-              Container(
-                decoration: BoxDecoration(
-                  color: AppTheme.surface,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppTheme.border),
-                ),
-                padding: const EdgeInsets.all(4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: _TypeTab(
-                        label: 'Web Link',
-                        icon: Icons.link_rounded,
-                        isSelected: isUrl,
-                        onTap: () => setState(() {
-                          _selectedType = SourceType.url;
-                          _submitError = null;
-                        }),
+                // Segmented Type Selector
+                Container(
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppTheme.border),
+                  ),
+                  padding: const EdgeInsets.all(4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _TypeTab(
+                          label: 'Web Link',
+                          icon: Icons.link_rounded,
+                          isSelected: isUrl,
+                          onTap: () => setState(() {
+                            if (_urlController.text.trim().isEmpty &&
+                                widget.sharedContent.url != null) {
+                              _urlController.text = widget.sharedContent.url!;
+                            }
+                            _selectedType = SourceType.url;
+                            _submitError = null;
+                          }),
+                        ),
                       ),
-                    ),
-                    Expanded(
-                      child: _TypeTab(
-                        label: 'Text Note',
-                        icon: Icons.edit_note_rounded,
-                        isSelected: !isUrl,
-                        onTap: () => setState(() {
-                          _selectedType = SourceType.text;
-                          _submitError = null;
-                        }),
+                      Expanded(
+                        child: _TypeTab(
+                          label: 'Text Note',
+                          icon: Icons.edit_note_rounded,
+                          isSelected: !isUrl,
+                          onTap: () => setState(() {
+                            final sharedUrl = _urlController.text.trim().isNotEmpty
+                                ? _urlController.text.trim()
+                                : (widget.sharedContent.url ?? '');
+                            if (sharedUrl.isNotEmpty &&
+                                !_contentController.text.contains(sharedUrl)) {
+                              if (_contentController.text.trim().isEmpty) {
+                                _contentController.text = sharedUrl;
+                              } else {
+                                _contentController.text =
+                                    '${_contentController.text.trim()}\n\n$sharedUrl';
+                              }
+                            }
+                            _selectedType = SourceType.text;
+                            _submitError = null;
+                          }),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
 
               const SizedBox(height: 20),
 
@@ -442,8 +460,9 @@ class _ShareReviewScreenState extends State<ShareReviewScreen> {
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }
 
 class _TypeTab extends StatelessWidget {
