@@ -62,10 +62,9 @@ class IncomingShareService {
 
   IncomingShareService({
     IncomingSharePlatform? platform,
-    Duration debounceDuration = const Duration(milliseconds: 1500),
+    this.debounceDuration = const Duration(milliseconds: 1500),
     DateTime Function()? clock,
   })  : _platform = platform ?? MethodChannelIncomingSharePlatform(),
-        debounceDuration = debounceDuration,
         _clock = clock ?? DateTime.now {
     _platformSubscription = _platform.onShareReceived.listen(_handleRawShare);
   }
