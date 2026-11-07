@@ -215,3 +215,53 @@ def test_auth_lifecycle_login_tokens_and_profile():
         )
         assert deact_res.status_code == 401
         assert "deactivated" in deact_res.json()["detail"].lower()
+
+
+def test_auth_enforcement_token_anomalies_and_protected_routes():
+    """Verify denial of missing, expired, tampered, or wrong-type JWTs across protected routes."""
+    user = User(
+        id=uuid.uuid4(),
+        email="dave@example.com",
+        hashed_password=hash_password("DavePassword123!"),
+        is_active=True,
+    )
+    test_db.users[user.id] = user
+
+    with TestClient(app) as client:
+        # 1. Missing Authorization header -> 401
+        res_missing = client.get("/auth/me")
+        assert res_missing.status_code == 401
+        assert "credentials were not provided" in res_missing.json()["detail"].lower()
+
+        # 2. Expired JWT -> 401 with standard WWW-Authenticate header
+        expired_token = create_access_token(
+            subject=user.id,
+            email=user.email,
+            expires_delta=timedelta(seconds=-10),
+        )
+        res_expired = client.get("/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
+        assert res_expired.status_code == 401
+        assert "expired" in res_expired.json()["detail"].lower()
+        assert 'Bearer error="invalid_token"' in res_expired.headers.get("www-authenticate", "")
+
+        # 3. Tampered signature -> 401
+        valid_token = create_access_token(subject=user.id, email=user.email)
+        header_part, payload_part, sig_part = valid_token.split(".")
+        tampered_token = f"{header_part}.{payload_part}.{sig_part[:-4]}XXXX"
+        res_tampered = client.get("/auth/me", headers={"Authorization": f"Bearer {tampered_token}"})
+        assert res_tampered.status_code == 401
+
+        # 4. Wrong token type (e.g. oauth_connect ticket used on API route) -> 401
+        oauth_ticket = create_oauth_ticket(subject=user.id)
+        res_wrong_type = client.get("/auth/me", headers={"Authorization": f"Bearer {oauth_ticket}"})
+        assert res_wrong_type.status_code == 401
+        assert "invalid token type" in res_wrong_type.json()["detail"].lower()
+
+        # 5. Protected routes fail closed when unauthenticated
+        assert client.get("/captures").status_code == 401
+        assert client.post("/captures", json={"source_type": "text", "content": "hi"}).status_code == 401
+        assert client.post("/captures/upload").status_code == 401
+        assert client.get(f"/captures/{uuid.uuid4()}").status_code == 401
+        assert client.get("/search?q=test").status_code == 401
+        assert client.get("/integrations/github").status_code == 401
+        assert client.delete("/integrations/github").status_code == 401
