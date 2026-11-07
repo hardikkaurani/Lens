@@ -33,8 +33,9 @@ from app.captures.validation import (
     validate_pdf_content_type,
     validate_pdf_magic_bytes,
 )
+from app.core.auth import get_current_user
 from app.core.config import Settings, get_settings
-from app.db.models import Capture, ProcessingStatus, SourceMetadata, SourceType
+from app.db.models import Capture, ProcessingStatus, SourceMetadata, SourceType, User
 from app.db.session import get_db
 from app.queue.job import enqueue_file_ingest_job, enqueue_url_ingest_job
 from app.storage import StorageClient, get_storage_client
@@ -54,9 +55,10 @@ router = APIRouter(prefix="/captures", tags=["captures"])
 )
 async def create_capture(
     payload: CaptureCreate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CaptureDetailResponse:
-    """Create a new Capture record and optional SourceMetadata atomically."""
+    """Create a new Capture record owned by current_user and optional SourceMetadata atomically."""
     try:
         is_url = payload.source_type == "url"
         initial_status = ProcessingStatus.PENDING if is_url else ProcessingStatus.COMPLETED
@@ -64,6 +66,7 @@ async def create_capture(
 
         async with db.begin():
             capture = Capture(
+                user_id=current_user.id,
                 source_type=SourceType(payload.source_type),
                 processing_status=initial_status,
                 processed_at=processed_at,
@@ -134,6 +137,7 @@ async def create_capture(
 async def upload_capture(
     file: UploadFile = File(..., description="Binary document to upload (PDF format)."),
     title: Optional[str] = Form(None, description="Optional human-readable title for the capture."),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: StorageClient = Depends(get_storage_client),
     settings: Settings = Depends(get_settings),
@@ -196,9 +200,13 @@ async def upload_capture(
     buffer.seek(0)
     file_sha256 = hasher.hexdigest()
 
-    # 4. Generate secure internal object key
+    # 4. Generate secure internal object key partitioned by authenticated tenant
     capture_id = uuid.uuid4()
-    object_key = storage.generate_secure_object_key(capture_id, extension=".pdf")
+    object_key = storage.generate_secure_object_key(
+        capture_id,
+        extension=".pdf",
+        user_id=current_user.id,
+    )
 
     # 5. Put object into storage
     try:
@@ -222,6 +230,7 @@ async def upload_capture(
         async with db.begin():
             capture = Capture(
                 id=capture_id,
+                user_id=current_user.id,
                 source_type=SourceType.PDF,
                 processing_status=ProcessingStatus.PENDING,
                 processed_at=None,
@@ -309,17 +318,23 @@ async def list_captures(
         ge=0,
         description="Number of items to skip.",
     ),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CaptureListResponse:
-    """Return paginated captures ordered by created_at descending."""
+    """Return paginated captures owned by current_user ordered by created_at descending."""
     try:
-        # Total count query
-        count_stmt = select(func.count()).select_from(Capture)
+        # Total count query scoped to current user
+        count_stmt = (
+            select(func.count())
+            .select_from(Capture)
+            .where(Capture.user_id == current_user.id)
+        )
         total = (await db.execute(count_stmt)).scalar() or 0
 
-        # Items query (do not eagerly load child relationships for listing)
+        # Items query scoped to current user
         items_stmt = (
             select(Capture)
+            .where(Capture.user_id == current_user.id)
             .order_by(Capture.created_at.desc(), Capture.id.desc())
             .limit(limit)
             .offset(offset)
@@ -349,9 +364,10 @@ async def list_captures(
 )
 async def get_capture(
     capture_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> CaptureDetailResponse:
-    """Retrieve a single capture by ID."""
+    """Retrieve a single capture owned by current_user by ID. Returns 404 if not found or not owned."""
     try:
         query = (
             select(Capture)
@@ -359,7 +375,7 @@ async def get_capture(
                 selectinload(Capture.source_metadata),
                 selectinload(Capture.chunks),
             )
-            .where(Capture.id == capture_id)
+            .where(Capture.id == capture_id, Capture.user_id == current_user.id)
         )
         result = await db.execute(query)
         capture = result.scalar_one_or_none()
