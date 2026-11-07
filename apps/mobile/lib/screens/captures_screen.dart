@@ -5,6 +5,7 @@ import '../core/utils/formatters.dart';
 import '../core/utils/security_utils.dart';
 import '../models/capture.dart';
 import '../widgets/error_view.dart';
+import '../widgets/lens_logo.dart';
 import '../widgets/loading_view.dart';
 import '../widgets/server_config_dialog.dart';
 import '../widgets/source_badge.dart';
@@ -121,8 +122,8 @@ class _CapturesScreenState extends State<CapturesScreen> {
       appBar: AppBar(
         title: const Row(
           children: [
-            Icon(Icons.lens_blur_rounded, color: AppTheme.primaryLight, size: 22),
-            SizedBox(width: 8),
+            LensLogo(height: 20),
+            SizedBox(width: 10),
             Text('LENS Captures'),
           ],
         ),
