@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
+import { useAuth } from "@/lib/auth-context";
 import { LensLogo } from "./LensLogo";
 
 interface AppShellProps {
@@ -12,6 +13,7 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   const pathname = usePathname();
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState<"checking" | "connected" | "disconnected">("checking");
 
@@ -34,6 +36,15 @@ export function AppShell({ children }: AppShellProps) {
       isMounted = false;
     };
   }, []);
+
+  // For dedicated auth pages, render clean centered layout without navigation chrome
+  if (pathname === "/login" || pathname === "/register") {
+    return (
+      <div className="min-h-screen bg-[#0a0d14] text-slate-100 flex flex-col justify-center items-center p-4">
+        {children}
+      </div>
+    );
+  }
 
   const navItems = [
     {
@@ -124,7 +135,36 @@ export function AppShell({ children }: AppShellProps) {
               <span>{item.label}</span>
             </Link>
           ))}
-          <div className="pt-3 border-t border-white/5 flex items-center gap-2 text-xs text-slate-400">
+          {/* Mobile Auth actions */}
+          <div className="pt-3 border-t border-white/5 space-y-2">
+            {isAuthenticated && user ? (
+              <div className="flex items-center justify-between px-2 py-1.5 rounded-lg bg-slate-900/60 border border-white/5">
+                <span className="text-xs text-slate-300 truncate" title={user.email}>
+                  {user.email}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    logout();
+                  }}
+                  className="text-xs text-rose-400 hover:text-rose-300 font-medium px-2 py-1 rounded bg-rose-950/40 border border-rose-800/30"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : !isLoading ? (
+              <Link
+                href="/login"
+                onClick={() => setMobileMenuOpen(false)}
+                className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-medium bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition-colors"
+              >
+                Sign in
+              </Link>
+            ) : null}
+          </div>
+
+          <div className="pt-2 border-t border-white/5 flex items-center gap-2 text-xs text-slate-400">
             <span
               className={`w-2 h-2 rounded-full ${
                 backendStatus === "connected"
@@ -168,8 +208,37 @@ export function AppShell({ children }: AppShellProps) {
           </nav>
         </div>
 
-        {/* Backend health footer */}
-        <div className="pt-4 border-t border-white/5">
+        {/* User profile & Backend health footer */}
+        <div className="pt-4 border-t border-white/10 space-y-3">
+          {isAuthenticated && user ? (
+            <div className="flex flex-col gap-2">
+              <div className="px-2.5 py-2 rounded-lg bg-slate-900/60 border border-white/5 flex items-center justify-between">
+                <div className="truncate text-xs">
+                  <p className="text-slate-400 text-[10px] uppercase font-semibold tracking-wider">Signed in as</p>
+                  <p className="text-slate-200 font-medium truncate" title={user.email}>{user.email}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => logout()}
+                className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-medium text-rose-300 hover:text-rose-200 hover:bg-rose-950/40 border border-transparent hover:border-rose-800/40 transition-colors"
+                aria-label="Sign out"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                <span>Sign out</span>
+              </button>
+            </div>
+          ) : !isLoading ? (
+            <Link
+              href="/login"
+              className="flex items-center justify-center gap-2 w-full px-3 py-2 rounded-lg text-xs font-medium bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 border border-indigo-500/30 transition-colors"
+            >
+              <span>Sign in</span>
+            </Link>
+          ) : null}
+
           <div className="flex items-center justify-between px-2 text-xs text-slate-400">
             <div className="flex items-center gap-2">
               <span
