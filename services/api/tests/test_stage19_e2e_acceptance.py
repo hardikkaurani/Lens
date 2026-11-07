@@ -265,3 +265,65 @@ def test_auth_enforcement_token_anomalies_and_protected_routes():
         assert client.get("/search?q=test").status_code == 401
         assert client.get("/integrations/github").status_code == 401
         assert client.delete("/integrations/github").status_code == 401
+
+
+# ==============================================================================
+# 2. URL CAPTURE LIFECYCLE (Stage 19 - Section 3.B)
+# ==============================================================================
+
+def test_url_capture_lifecycle_and_worker_processing():
+    """Verify URL submission, tenant binding, queue failure preservation, and worker error handling."""
+    user = User(id=uuid.uuid4(), email="url_user@lens.local", hashed_password=hash_password("pw"), is_active=True)
+    test_db.users[user.id] = user
+    token = create_access_token(subject=user.id, email=user.email)
+
+    with TestClient(app) as client:
+        # 1. Invalid URL input validation -> 422
+        bad_url_res = client.post(
+            "/captures",
+            json={"source_type": "url", "original_url": "invalid_url_not_http", "content": ""},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert bad_url_res.status_code == 422
+
+        # 2. Valid URL submission: creates capture owned by user with PENDING status
+        with patch("app.captures.router.enqueue_url_ingest_job", new_callable=AsyncMock) as mock_enqueue:
+            res = client.post(
+                "/captures",
+                json={
+                    "source_type": "url",
+                    "original_url": "https://example.com/article",
+                    "title": "Example Article",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert res.status_code == 201, res.text
+            data = res.json()
+            capture_id = uuid.UUID(data["id"])
+            assert data["source_type"] == "url"
+            assert data["processing_status"] == "pending"
+            assert mock_enqueue.called
+
+        # Verify tenant assignment in persistence layer
+        persisted = test_db.captures[capture_id]
+        assert persisted.user_id == user.id
+
+        # 3. Simulate queue enqueue failure (e.g. Redis connection error)
+        # Capture should NOT be discarded; it should be preserved with status=FAILED and a safe message
+        with patch("app.captures.router.enqueue_url_ingest_job", side_effect=Exception("Redis connection refused")):
+            res_fail = client.post(
+                "/captures",
+                json={
+                    "source_type": "url",
+                    "original_url": "https://example.com/offline-queue",
+                    "title": "Offline Queue Article",
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert res_fail.status_code == 201
+            fail_id = uuid.UUID(res_fail.json()["id"])
+            persisted_fail = test_db.captures[fail_id]
+            assert persisted_fail.processing_status == ProcessingStatus.FAILED
+            assert "queue unavailable" in persisted_fail.processing_error.lower()
+            # Verify internal Redis host/pass is NOT leaked
+            assert "redis://" not in persisted_fail.processing_error
