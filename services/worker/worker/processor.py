@@ -116,6 +116,12 @@ async def process_url_capture(
                 logger.warning("Capture %s not found in database; abandoning job", capture_id)
                 return False
 
+            if not getattr(capture, "user_id", None):
+                logger.warning("Capture %s lacks tenant user_id; abandoning unowned job", capture_id)
+                capture.processing_status = ProcessingStatus.FAILED
+                capture.processing_error = "Tenant validation failed: capture is unowned."
+                return False
+
             if capture.source_type != SourceType.URL:
                 logger.info(
                     "Capture %s has source_type '%s', skipping URL ingestion",
@@ -253,6 +259,12 @@ async def process_file_capture(
 
             if not capture:
                 logger.warning("Capture %s not found in database; abandoning job", capture_id)
+                return False
+
+            if not getattr(capture, "user_id", None):
+                logger.warning("Capture %s lacks tenant user_id; abandoning unowned job", capture_id)
+                capture.processing_status = ProcessingStatus.FAILED
+                capture.processing_error = "Tenant validation failed: capture is unowned."
                 return False
 
             if capture.source_type != SourceType.PDF:
