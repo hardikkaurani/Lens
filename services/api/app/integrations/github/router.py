@@ -14,7 +14,7 @@ from fastapi import (
     Response,
     status,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -23,6 +23,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.core.auth import get_current_user, get_current_user_from_token, http_bearer
 from app.core.config import Settings, get_settings
 from app.core.encryption import EncryptionError
+from app.core.security import TokenSecurityError, create_oauth_ticket, validate_oauth_ticket
 from app.db.models import GitHubRepository, User
 from app.db.session import get_db
 from app.integrations.github.client import (
@@ -102,19 +103,32 @@ def _validate_safe_redirect(target_url: str, allowed_base: str) -> bool:
         return False
 
 
+@router.post(
+    "/connect/ticket",
+    summary="Generate single-use browser OAuth ticket",
+    description="Issues a short-lived (60s), purpose-scoped ticket for top-level browser redirect without exposing reusable access JWT in URLs.",
+)
+async def generate_oauth_connect_ticket(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    ticket = create_oauth_ticket(current_user.id)
+    return {"ticket": ticket, "expires_in": 60}
+
+
 @router.get(
     "/connect",
     summary="Initiate GitHub OAuth connection",
-    description="Generates cryptographically random state, binds it to session cookie, and redirects to GitHub authorization URL.",
+    description="Generates cryptographically random state, binds it to session cookie, and redirects to GitHub authorization URL or returns JSON.",
 )
 async def github_oauth_connect(
     request: Request,
     redirect: Optional[str] = Query(None, description="Optional safe frontend path to return to after completion."),
-    token: Optional[str] = Query(None, description="Optional JWT bearer token for direct browser navigation links."),
+    ticket: Optional[str] = Query(None, description="Optional short-lived (60s) single-use OAuth connect ticket."),
+    return_json: bool = Query(False, alias="json", description="Return JSON payload containing authorization URL instead of HTTP redirect."),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> RedirectResponse:
+) -> Response:
     """Initiate OAuth authorization with GitHub bound to authenticated tenant."""
     if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
         raise HTTPException(
@@ -122,15 +136,31 @@ async def github_oauth_connect(
             detail="GitHub OAuth is not configured on this server.",
         )
 
-    # Authenticate from either Authorization Bearer header or direct browser token query parameter
-    raw_token = credentials.credentials if credentials and credentials.credentials else token
-    if not raw_token:
+    # Authenticate from either Authorization Bearer header or short-lived connect ticket
+    current_user: Optional[User] = None
+    if credentials and credentials.credentials:
+        current_user = await get_current_user_from_token(credentials.credentials, session=db)
+    elif ticket and ticket.strip():
+        try:
+            user_id = validate_oauth_ticket(ticket.strip())
+            current_user = await db.get(User, user_id)
+            if not current_user or not current_user.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account associated with this ticket is inactive or does not exist.",
+                )
+        except TokenSecurityError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(e),
+                headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+            ) from e
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication credentials were not provided.",
+            detail="Authentication credentials were not provided. Pass an Authorization Bearer header or a single-use connect ticket.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    current_user = await get_current_user_from_token(raw_token, session=db)
 
     # 1. Generate cryptographic state and independent browser session binding
     state = generate_oauth_state()
@@ -163,11 +193,18 @@ async def github_oauth_connect(
     authorize_url = f"{settings.GITHUB_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
 
     # 4. Set HttpOnly, SameSite=Lax cookie bound to user browser session
-    response = RedirectResponse(
-        url=authorize_url,
-        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-    )
     is_secure = settings.APP_ENV != "development"
+    if return_json or request.headers.get("accept") == "application/json":
+        response = JSONResponse(
+            content={"authorization_url": authorize_url, "state": state},
+            status_code=status.HTTP_200_OK,
+        )
+    else:
+        response = RedirectResponse(
+            url=authorize_url,
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        )
+
     response.set_cookie(
         key=OAUTH_COOKIE_NAME,
         value=session_binding,

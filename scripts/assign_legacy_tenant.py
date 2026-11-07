@@ -80,11 +80,12 @@ async def assign_to_user(session: AsyncSession, email: str) -> None:
         )
     ).scalar() or 0
 
-    if existing_conn and unowned_conns_count > 0:
+    if unowned_conns_count > 1 or (existing_conn and unowned_conns_count > 0):
         logger.error(
-            "Conflict detected: Target user '%s' already has an active GitHub connection. "
-            "Assigning unowned GitHub connections would violate unique constraints (user_id, provider). "
+            "Conflict detected: assigning %d unowned GitHub connection(s) to user '%s' "
+            "would violate unique constraints (user_id, provider). "
             "Please resolve or purge unowned GitHub connections first.",
+            unowned_conns_count,
             user.email,
         )
         sys.exit(1)

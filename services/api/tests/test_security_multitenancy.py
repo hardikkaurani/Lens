@@ -747,18 +747,37 @@ def test_cors_credentials_wildcard_prohibited():
 # SECTION 7: STAGE 18.2 ENHANCED HARDENING & FAIL-CLOSED CHECKS
 # ==============================================================================
 
-def test_github_connect_with_query_token_authenticates_browser_navigation(client: TestClient, monkeypatch):
-    """Browser navigation via <a href="/integrations/github/connect?token=..."> succeeds with 307 redirect."""
+def test_github_connect_with_single_use_ticket_and_json_response(client: TestClient, monkeypatch):
+    """Verify single-use connect ticket authentication and JSON authorization_url response."""
     user = create_test_user("browser_nav@example.com")
-    token = create_access_token(subject=user.id, email=user.email)
+    access_token = create_access_token(subject=user.id, email=user.email)
 
     monkeypatch.setattr(settings, "GITHUB_CLIENT_ID", "mock_client_id")
     monkeypatch.setattr(settings, "GITHUB_CLIENT_SECRET", "mock_client_secret")
 
-    # Connect using ?token= query parameter without Authorization header
-    resp = client.get(f"/integrations/github/connect?token={token}", follow_redirects=False)
+    # 1. Generate short-lived ticket via POST /integrations/github/connect/ticket
+    ticket_resp = client.post("/integrations/github/connect/ticket", headers=auth_headers(user))
+    assert ticket_resp.status_code == 200
+    ticket_data = ticket_resp.json()
+    assert "ticket" in ticket_data
+    assert ticket_data["expires_in"] == 60
+    ticket = ticket_data["ticket"]
+
+    # 2. Browser navigation using ?ticket= query parameter succeeds with 307
+    resp = client.get(f"/integrations/github/connect?ticket={ticket}", follow_redirects=False)
     assert resp.status_code == 307
     assert "github.com/login/oauth/authorize" in resp.headers["location"]
+
+    # 3. Passing reusable access JWT in ticket query param is strictly rejected with 401
+    bad_resp = client.get(f"/integrations/github/connect?ticket={access_token}", follow_redirects=False)
+    assert bad_resp.status_code == 401
+    assert "Reusable access tokens cannot be passed in URLs" in bad_resp.json()["detail"]
+
+    # 4. Authenticated request with json=true returns 200 JSON with authorization_url
+    json_resp = client.get("/integrations/github/connect?json=true", headers=auth_headers(user))
+    assert json_resp.status_code == 200
+    assert "authorization_url" in json_resp.json()
+    assert "github.com/login/oauth/authorize" in json_resp.json()["authorization_url"]
 
 
 def test_github_disconnect_deletes_only_target_user_connection(client: TestClient):

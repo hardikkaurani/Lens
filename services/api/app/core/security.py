@@ -157,3 +157,62 @@ def decode_access_token(token: str) -> dict[str, Any]:
 
     return payload
 
+
+def create_oauth_ticket(subject: str | uuid.UUID, expires_seconds: int = 60) -> str:
+    """Generate a short-lived (default 60s), purpose-scoped OAuth connect ticket.
+
+    Used exclusively for top-level browser navigation handoff so long-lived access JWTs
+    are never leaked into URL query strings, server logs, or Referer headers.
+    """
+    settings = get_settings()
+    secret = get_jwt_secret()
+    algorithm = settings.JWT_ALGORITHM or "HS256"
+
+    now_utc = datetime.now(timezone.utc)
+    expire_utc = now_utc + timedelta(seconds=expires_seconds)
+
+    payload: dict[str, Any] = {
+        "sub": str(subject),
+        "iat": int(now_utc.timestamp()),
+        "exp": int(expire_utc.timestamp()),
+        "type": "oauth_connect",
+    }
+    return jwt.encode(payload, secret, algorithm=algorithm)
+
+
+def validate_oauth_ticket(ticket: str) -> uuid.UUID:
+    """Decode and verify a purpose-scoped OAuth connect ticket.
+
+    Enforces strict signature verification, expiration, and ensures type == 'oauth_connect'.
+    """
+    settings = get_settings()
+    secret = get_jwt_secret()
+    algorithm = settings.JWT_ALGORITHM or "HS256"
+
+    try:
+        payload = jwt.decode(
+            ticket,
+            secret,
+            algorithms=[algorithm],
+            options={
+                "require": ["sub", "exp", "iat", "type"],
+                "verify_exp": True,
+                "verify_iat": True,
+            },
+        )
+    except jwt.ExpiredSignatureError as e:
+        raise TokenSecurityError("OAuth connect ticket has expired.") from e
+    except jwt.InvalidTokenError as e:
+        raise TokenSecurityError(f"Invalid OAuth connect ticket: {e}") from e
+
+    token_type = payload.get("type")
+    if token_type != "oauth_connect":
+        raise TokenSecurityError(
+            f"Invalid ticket type: expected 'oauth_connect', got '{token_type}'. Reusable access tokens cannot be passed in URLs."
+        )
+
+    try:
+        return uuid.UUID(payload["sub"])
+    except (ValueError, TypeError) as e:
+        raise TokenSecurityError("Malformed subject in OAuth connect ticket.") from e
+
