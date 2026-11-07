@@ -1,7 +1,7 @@
 # LENS — Architecture Specification
 
-> **Document Status**: Stage 17 Active Implementation (Android Share Sheet Daily Capture Workflow)  
-> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), Flutter mobile client (`apps/mobile`), GitHub OAuth & activity ingestion, Unified Knowledge Search (Stage 16), and Android Share Sheet daily capture integration (Stage 17) are **ACTIVE**. Offline SQLite storage and advanced recommendation engines remain **PLANNED**.
+> **Document Status**: Stage 19 Active Implementation (Product Integration, Multi-Tenant Security & Acceptance Testing)
+> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), Flutter mobile client (`apps/mobile`), GitHub OAuth & activity ingestion, Unified Knowledge Search (Stage 16), Android Share Sheet daily capture integration (Stage 17), and Foundational Multi-Tenancy & Authentication (Stage 18) are **ACTIVE**. Comprehensive Stage 19 End-to-End Acceptance test suites verify cross-tenant security and reliability. Client-side authentication UI/token persistence and offline SQLite storage remain **PLANNED**.
 
 ---
 
@@ -589,3 +589,45 @@ flowchart TD
 
 * **Native Share Sheet**: Android `IntentFilter` (`ACTION_SEND`) to receive URLs and text shared from mobile browsers directly into LENS.
 * **Offline Capture Queue**: SQLite storage for captures created while disconnected, syncing automatically upon network restoration.
+
+---
+
+## 11. Multi-Tenancy, Authentication & Product Integration (Stages 18 & 19)
+
+### 11.1 Tenant Isolation & Security Architecture
+
+1. **Row-Level Tenant Isolation**:
+   - Primary entities (`captures`, `github_connections`) are owned by `User.id` via foreign key `user_id`.
+   - Child entities (`content_chunks`, `source_metadata`, `github_repositories`, `github_activities`) inherit tenant ownership through relational foreign keys.
+   - All API endpoints enforce strict `user_id` scoping.
+   - Cross-tenant capture lookups return HTTP 404 (IDOR defense) to prevent existence leakage.
+
+2. **Stateless JWT & Cryptographic Standards**:
+   - Passwords hashed with **Argon2id** (memory cost 65,536 KiB, time cost 3, 4 parallelism threads). Constant-time dummy verification defeats user enumeration.
+   - Tokens issued as stateless HS256 JWTs with explicit token types (`access`, `oauth_connect`).
+   - Production environments strictly mandate 32+ character entropy for `JWT_SECRET` and `TOKEN_ENCRYPTION_KEY`.
+
+3. **Tenant-Partitioned S3 Storage**:
+   - S3/MinIO storage keys strictly follow the hierarchy: `captures/{user_id}/{capture_id}/{object_id}.pdf`.
+
+4. **GitHub OAuth Handoff Security**:
+   - OAuth initiation uses short-lived, purpose-scoped connect tickets (`oauth_connect`) instead of placing long-lived access tokens in browser URLs, history, or logs (tickets can be reused before expiration).
+   - OAuth state parameters are cryptographically signed and bound to `user_id`.
+   - GitHub access tokens are encrypted at rest with AES-256-GCM.
+
+### 11.2 Stage 19 End-to-End Acceptance & Verification
+
+The product integration test suite (`services/api/tests/test_stage19_e2e_acceptance.py`) validates:
+- Full authentication lifecycle (registration, login, profile, token expiry, tampering, and wrong-type rejection).
+- URL capture lifecycle, worker job processing, and SSRF/timeout error classification.
+- File capture lifecycle, MIME validation, magic byte verification, and S3 cleanup on database rollback.
+- Cross-tenant security matrix (User A vs User B isolation across captures, IDOR 404 defense, zero-leakage search, and GitHub activities).
+- Failure and recovery testing (health check degradation upon DB/Redis outage, safe error sanitization without credentials).
+- Production configuration audit (enforcement of secrets and entropy in production).
+
+### 11.3 Client Compatibility Boundary & Known Limitations
+
+- **Web Client (`apps/web`)**: Next.js client does not yet store JWT tokens or inject `Authorization: Bearer <token>` headers into `api-client.ts`. Backend endpoints correctly fail closed with HTTP 401 until client authentication UI and session management are wired.
+- **Mobile Client (`apps/mobile`)**: Flutter client does not yet store JWT tokens or inject Bearer headers into `api_client.dart`. Backend endpoints correctly return HTTP 401.
+- **External Services**: GitHub OAuth is tested via local cryptographic state signing and client mocks; live OAuth requires a registered GitHub OAuth Application in production.
+- **Device-Level Testing**: Android Share Sheet was verified via Flutter widget and unit test suites; physical device and emulator runs require connected Android hardware.
