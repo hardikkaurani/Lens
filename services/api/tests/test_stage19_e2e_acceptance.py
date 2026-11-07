@@ -334,3 +334,69 @@ def test_url_capture_lifecycle_and_worker_processing():
 
         timeout_err = FetchTimeoutError("ReadTimeout to remote host")
         assert "timeout" in sanitize_error_message(timeout_err).lower()
+
+
+# ==============================================================================
+# 3. FILE CAPTURE LIFECYCLE (Stage 19 - Section 3.C)
+# ==============================================================================
+
+def test_file_capture_lifecycle_and_tenant_partitioned_storage():
+    """Verify authenticated PDF upload, magic-byte validation, tenant-isolated S3 keys, and error handling."""
+    user = User(id=uuid.uuid4(), email="file_user@lens.local", hashed_password=hash_password("pw"), is_active=True)
+    test_db.users[user.id] = user
+    token = create_access_token(subject=user.id, email=user.email)
+
+    with TestClient(app) as client:
+        # 1. Rejection of unsupported mime type -> 415
+        unsupported_res = client.post(
+            "/captures/upload",
+            files={"file": ("image.png", b"\x89PNG\r\n\x1a\nfake image content", "image/png")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert unsupported_res.status_code == 415
+        assert "unsupported media type" in unsupported_res.json()["detail"].lower()
+
+        # 2. Rejection of spoofed mime type (declared PDF, but invalid magic bytes) -> 415 Unsupported Media Type
+        spoofed_res = client.post(
+            "/captures/upload",
+            files={"file": ("malicious.pdf", b"NOT_A_PDF_CONTENT_STREAM", "application/pdf")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert spoofed_res.status_code == 415
+        assert "magic bytes" in spoofed_res.json()["detail"].lower()
+
+        # 3. Rejection of oversized file (> 10MB) -> 413
+        with patch.object(settings, "MAX_UPLOAD_SIZE_BYTES", 500):  # Mock small 500 byte limit
+            oversized_res = client.post(
+                "/captures/upload",
+                files={"file": ("large.pdf", b"%PDF-1.4" + b"A" * 600, "application/pdf")},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert oversized_res.status_code == 413
+            assert "exceeds maximum permitted limit" in oversized_res.json()["detail"].lower()
+
+        # 4. Valid PDF upload with tenant-partitioned storage key
+        mock_storage = MagicMock()
+        mock_storage.generate_secure_object_key.side_effect = StorageClient.generate_secure_object_key
+        mock_storage.put_object.return_value = MagicMock(key="captures/test/key.pdf")
+        app.dependency_overrides[get_storage_client] = lambda: mock_storage
+
+        valid_pdf_content = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF"
+        with patch("app.captures.router.enqueue_file_ingest_job", new_callable=AsyncMock) as mock_enqueue:
+            res_upload = client.post(
+                "/captures/upload",
+                files={"file": ("annual_report.pdf", valid_pdf_content, "application/pdf")},
+                data={"title": "Annual Report 2026"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert res_upload.status_code == 201, res_upload.text
+            upload_data = res_upload.json()
+            capture_id = uuid.UUID(upload_data["id"])
+            assert upload_data["source_type"] == "pdf"
+            assert upload_data["processing_status"] == "pending"
+
+            # Verify tenant partitioned storage key format: captures/{user_id}/{capture_id}/{filename}
+            uploaded_key = mock_storage.put_object.call_args.kwargs["key"]
+            expected_prefix = f"captures/{user.id}/{capture_id}/"
+            assert uploaded_key.startswith(expected_prefix)
+            assert uploaded_key.endswith(".pdf")
