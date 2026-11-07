@@ -18,24 +18,8 @@ logger = logging.getLogger(__name__)
 http_bearer = HTTPBearer(auto_error=False)
 
 
-async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
-    session: AsyncSession = Depends(get_db),
-) -> User:
-    """FastAPI dependency that enforces valid JWT Bearer authentication.
-
-    Extracts token from Authorization header, validates claims, and returns the active User.
-    Raises HTTP 401 Unauthorized with WWW-Authenticate header on any failure.
-    """
-    if credentials is None or not credentials.credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication credentials were not provided.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    token = credentials.credentials
-
+async def get_current_user_from_token(token: str, session: AsyncSession) -> User:
+    """Validate a JWT access token string and return the active User entity."""
     try:
         payload = decode_access_token(token)
     except TokenSecurityError as e:
@@ -78,4 +62,23 @@ async def get_current_user(
         )
 
     return user
+
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
+    session: AsyncSession = Depends(get_db),
+) -> User:
+    """FastAPI dependency that enforces valid JWT Bearer authentication.
+
+    Extracts token from Authorization header, validates claims, and returns the active User.
+    Raises HTTP 401 Unauthorized with WWW-Authenticate header on any failure.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await get_current_user_from_token(credentials.credentials, session=session)
 

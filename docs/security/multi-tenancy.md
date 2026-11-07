@@ -14,8 +14,9 @@ LENS adopts a **SaaS Row-Level Tenant Isolation** architecture within a unified 
 ### Why Row-Level Isolation?
 - LENS requires efficient vector indexing across user collections using `pgvector` (`hnsw` / `ivfflat`), high-throughput async processing via worker workers, and lean operational overhead.
 - Schema-per-tenant or database-per-tenant approaches add prohibitive connection pool, migration, and memory overhead for developer personal knowledge bases.
-- Instead, every tenant-scoped entity strictly contains a non-nullable foreign key `user_id` pointing to `users(id)` with `ON DELETE CASCADE`.
-- All database queries, whether via SQLAlchemy ORM or raw SQL execution for vector search, enforce an explicit `user_id` predicate at the data access layer.
+- Instead, root tenant-scoped entities (`captures`, `github_connections`) strictly contain a foreign key `user_id` pointing to `users(id)` with `ON DELETE CASCADE`.
+- Child entities (`content_chunks`, `source_metadata`, `github_repositories`, `github_activities`) inherit tenant ownership through foreign keys to their parent records (`capture_id` -> `captures.user_id` and `repository_id` -> `github_repositories.connection_id` -> `github_connections.user_id`).
+- All database queries, whether via SQLAlchemy ORM or raw SQL execution for vector search, enforce an explicit tenant ownership predicate at the data access layer.
 
 ---
 

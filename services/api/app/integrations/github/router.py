@@ -19,7 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.core.auth import get_current_user
+from fastapi.security import HTTPAuthorizationCredentials
+from app.core.auth import get_current_user, get_current_user_from_token, http_bearer
 from app.core.config import Settings, get_settings
 from app.core.encryption import EncryptionError
 from app.db.models import GitHubRepository, User
@@ -109,7 +110,9 @@ def _validate_safe_redirect(target_url: str, allowed_base: str) -> bool:
 async def github_oauth_connect(
     request: Request,
     redirect: Optional[str] = Query(None, description="Optional safe frontend path to return to after completion."),
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = Query(None, description="Optional JWT bearer token for direct browser navigation links."),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(http_bearer),
+    db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> RedirectResponse:
     """Initiate OAuth authorization with GitHub bound to authenticated tenant."""
@@ -118,6 +121,16 @@ async def github_oauth_connect(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GitHub OAuth is not configured on this server.",
         )
+
+    # Authenticate from either Authorization Bearer header or direct browser token query parameter
+    raw_token = credentials.credentials if credentials and credentials.credentials else token
+    if not raw_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    current_user = await get_current_user_from_token(raw_token, session=db)
 
     # 1. Generate cryptographic state and independent browser session binding
     state = generate_oauth_state()
@@ -226,8 +239,10 @@ async def github_oauth_callback(
             detail="OAuth state is invalid, expired, or not bound to this browser session.",
         )
 
+    # 5. Extract bound tenant user ID
     # 5. Extract bound tenant user ID (strictly required)
     user_id_str = consumed_state.get("user_id")
+    target_user_id = uuid.UUID(user_id_str) if user_id_str else None
     if not user_id_str:
         logger.warning("OAuth state missing user_id tenant association.")
         raise HTTPException(

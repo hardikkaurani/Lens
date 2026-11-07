@@ -155,7 +155,7 @@ class SearchService:
         self,
         query: str,
         session: AsyncSession,
-        user_id: Optional[uuid.UUID] = None,
+        user_id: uuid.UUID,
         limit: Optional[int] = None,
         lexical_weight: Optional[float] = None,
         semantic_weight: Optional[float] = None,

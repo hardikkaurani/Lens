@@ -200,8 +200,10 @@ async def upload_capture(
     buffer.seek(0)
     file_sha256 = hasher.hexdigest()
 
+    # 4. Generate secure internal object key
     # 4. Generate secure internal object key partitioned by authenticated tenant
     capture_id = uuid.uuid4()
+    object_key = storage.generate_secure_object_key(capture_id, extension=".pdf")
     object_key = storage.generate_secure_object_key(
         capture_id,
         extension=".pdf",

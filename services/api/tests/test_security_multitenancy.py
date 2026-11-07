@@ -264,6 +264,19 @@ class FakeAsyncSession:
                 matched = [c for c in matched if c.id == target_id]
             return MockQueryResult(matched)
 
+        # Handle Delete GitHubConnection (MUST be before "from github_connections" check)
+        if "delete from github_connections" in stmt_str:
+            target_user_id = compiled_params.get("user_id_1") or compiled_params.get("user_id")
+            if target_user_id is not None:
+                to_delete = [k for k, v in self.db.github_connections.items() if v.user_id == target_user_id]
+            else:
+                to_delete = list(self.db.github_connections.keys())
+            for k in to_delete:
+                del self.db.github_connections[k]
+            res = MockQueryResult()
+            res.rowcount = len(to_delete)
+            return res
+
         # Handle GitHubConnection select
         if "from github_connections" in stmt_str:
             target_user_id = compiled_params.get("user_id_1") or compiled_params.get("user_id")
@@ -282,19 +295,6 @@ class FakeAsyncSession:
             if target_repo_id is not None:
                 matched = [r for r in matched if r.id == target_repo_id]
             return MockQueryResult(matched)
-
-        # Handle Delete GitHubConnection
-        if "delete from github_connections" in stmt_str:
-            target_user_id = compiled_params.get("user_id_1") or compiled_params.get("user_id")
-            if target_user_id is not None:
-                to_delete = [k for k, v in self.db.github_connections.items() if v.user_id == target_user_id]
-            else:
-                to_delete = list(self.db.github_connections.keys())
-            for k in to_delete:
-                del self.db.github_connections[k]
-            res = MockQueryResult()
-            res.rowcount = len(to_delete)
-            return res
 
         return MockQueryResult([])
 
@@ -741,3 +741,121 @@ def test_cors_credentials_wildcard_prohibited():
 
     if allow_credentials:
         assert "*" not in allow_origins, "CORS misconfiguration: allow_origins=['*'] is prohibited when allow_credentials=True."
+
+
+# ==============================================================================
+# SECTION 7: STAGE 18.2 ENHANCED HARDENING & FAIL-CLOSED CHECKS
+# ==============================================================================
+
+def test_github_connect_with_query_token_authenticates_browser_navigation(client: TestClient, monkeypatch):
+    """Browser navigation via <a href="/integrations/github/connect?token=..."> succeeds with 307 redirect."""
+    user = create_test_user("browser_nav@example.com")
+    token = create_access_token(subject=user.id, email=user.email)
+
+    monkeypatch.setattr(settings, "GITHUB_CLIENT_ID", "mock_client_id")
+    monkeypatch.setattr(settings, "GITHUB_CLIENT_SECRET", "mock_client_secret")
+
+    # Connect using ?token= query parameter without Authorization header
+    resp = client.get(f"/integrations/github/connect?token={token}", follow_redirects=False)
+    assert resp.status_code == 307
+    assert "github.com/login/oauth/authorize" in resp.headers["location"]
+
+
+def test_github_disconnect_deletes_only_target_user_connection(client: TestClient):
+    """Disconnecting User B removes User B's connection while User A's connection remains intact."""
+    user_a = create_test_user("user_a_persist@example.com")
+    user_b = create_test_user("user_b_remove@example.com")
+
+    conn_a = GitHubConnection(
+        id=uuid.uuid4(),
+        user_id=user_a.id,
+        provider="github",
+        github_user_id="99001",
+        github_username="gh_persist",
+        encrypted_access_token="v1:encrypted",
+    )
+    conn_b = GitHubConnection(
+        id=uuid.uuid4(),
+        user_id=user_b.id,
+        provider="github",
+        github_user_id="99002",
+        github_username="gh_remove",
+        encrypted_access_token="v1:encrypted",
+    )
+    test_db.github_connections[conn_a.id] = conn_a
+    test_db.github_connections[conn_b.id] = conn_b
+
+    # User B calls disconnect
+    resp = client.delete("/integrations/github", headers=auth_headers(user_b))
+    assert resp.status_code == 200
+
+    # User B is removed; User A is preserved
+    assert conn_b.id not in test_db.github_connections
+    assert conn_a.id in test_db.github_connections
+
+
+@pytest.mark.asyncio
+async def test_github_service_functions_fail_closed_without_user_id():
+    """Verify get_github_connection, delete_github_connection, and upsert_github_connection fail closed."""
+    from app.integrations.github.service import (
+        delete_github_connection,
+        get_github_connection,
+        upsert_github_connection,
+    )
+
+    fake_session = FakeAsyncSession(test_db)
+
+    # get_github_connection returns None when user_id is None
+    res = await get_github_connection(fake_session, user_id=None)
+    assert res is None
+
+    # delete_github_connection raises ValueError when user_id is None
+    with pytest.raises(ValueError, match="user_id is strictly required to delete"):
+        await delete_github_connection(fake_session, user_id=None)
+
+    # upsert_github_connection raises ValueError when user_id is None
+    with pytest.raises(ValueError, match="user_id is strictly required to upsert"):
+        await upsert_github_connection(
+            fake_session,
+            github_user_id="123",
+            github_username="test",
+            access_token="tok",
+            user_id=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_worker_processors_reject_unowned_jobs():
+    """Verify worker repo sync and activity sync abandon jobs if the connection is unowned."""
+    import sys
+    from pathlib import Path
+    worker_path = str(Path(__file__).resolve().parent.parent.parent / "worker")
+    if worker_path not in sys.path:
+        sys.path.insert(0, worker_path)
+
+    from worker.processor import process_github_activity_sync, process_github_repo_sync
+
+    unowned_conn = GitHubConnection(
+        id=uuid.uuid4(),
+        user_id=None,  # unowned
+        provider="github",
+        github_user_id="unowned_gh",
+        github_username="unowned",
+        encrypted_access_token="v1:enc",
+    )
+    test_db.github_connections[unowned_conn.id] = unowned_conn
+
+    def mock_session_factory():
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _ctx():
+            yield FakeAsyncSession(test_db)
+        return _ctx()
+
+    # Both must fail closed (return False) without syncing
+    repo_result = await process_github_repo_sync(unowned_conn.id, session_factory=mock_session_factory)
+    assert repo_result is False
+
+    act_result = await process_github_activity_sync(unowned_conn.id, session_factory=mock_session_factory)
+    assert act_result is False

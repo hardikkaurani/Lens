@@ -217,11 +217,21 @@ async def get_github_connection(
     db: AsyncSession,
     user_id: Optional[uuid.UUID] = None,
 ) -> Optional[GitHubConnection]:
-    """Retrieve the active GitHub connection record for a user."""
-    stmt = select(GitHubConnection).where(GitHubConnection.provider == "github")
-    if user_id is not None:
-        stmt = stmt.where(GitHubConnection.user_id == user_id)
-    result = await db.execute(stmt.limit(1))
+    """Retrieve the active GitHub connection record for a user.
+
+    Fails closed: if user_id is None, returns None to prevent unauthenticated unscoped lookups.
+    """
+    if user_id is None:
+        return None
+    stmt = (
+        select(GitHubConnection)
+        .where(
+            GitHubConnection.provider == "github",
+            GitHubConnection.user_id == user_id,
+        )
+        .limit(1)
+    )
+    result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
 
@@ -236,6 +246,9 @@ async def upsert_github_connection(
     token_metadata: Optional[dict[str, Any]] = None,
 ) -> GitHubConnection:
     """Encrypt access token and persist or update the GitHub connection record."""
+    if user_id is None:
+        raise ValueError("user_id is strictly required to upsert a GitHub connection.")
+
     encrypted_token = encrypt_secret(access_token)
     now = datetime.now(timezone.utc)
 
@@ -276,10 +289,17 @@ async def delete_github_connection(
     db: AsyncSession,
     user_id: Optional[uuid.UUID] = None,
 ) -> bool:
-    """Delete stored GitHub connection record for a user."""
-    stmt = delete(GitHubConnection).where(GitHubConnection.provider == "github")
-    if user_id is not None:
-        stmt = stmt.where(GitHubConnection.user_id == user_id)
+    """Delete stored GitHub connection record for a user.
+
+    Fails closed: strictly requires user_id to prevent accidental bulk un-scoped deletion.
+    """
+    if user_id is None:
+        raise ValueError("user_id is strictly required to delete a GitHub connection.")
+
+    stmt = delete(GitHubConnection).where(
+        GitHubConnection.provider == "github",
+        GitHubConnection.user_id == user_id,
+    )
     result = await db.execute(stmt)
     rowcount = getattr(result, "rowcount", 0)
     await db.commit()

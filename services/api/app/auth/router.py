@@ -4,7 +4,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.schemas import (
     TokenResponse,
@@ -14,6 +16,7 @@ from app.auth.schemas import (
 )
 from app.core.auth import get_current_user
 from app.core.config import get_settings
+from app.core.security import create_access_token, hash_password, verify_password
 from app.core.security import (
     DUMMY_PASSWORD_HASH,
     create_access_token,
@@ -82,15 +85,17 @@ async def login_user(
     user = (await session.execute(stmt)).scalar_one_or_none()
 
     if user is None:
-        # Constant-time dummy verification to defeat timing-based email enumeration attacks
-        verify_password(request.password, DUMMY_PASSWORD_HASH)
+        # Constant-time dummy verification in threadpool to defeat timing-based email enumeration attacks
+        await run_in_threadpool(verify_password, request.password, DUMMY_PASSWORD_HASH)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not verify_password(request.password, user.hashed_password):
+    # Offload password verification to threadpool
+    is_valid = await run_in_threadpool(verify_password, request.password, user.hashed_password)
+    if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
