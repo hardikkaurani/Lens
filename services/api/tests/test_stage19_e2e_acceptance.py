@@ -148,3 +148,70 @@ def test_auth_lifecycle_registration_and_validation():
             json={"email": "bob@example.com", "password": "short"},
         )
         assert short_pw.status_code == 422
+
+
+def test_auth_lifecycle_login_tokens_and_profile():
+    """Verify login authentication, constant-time verification, JWT claims, and /auth/me profile access."""
+    # Pre-populate active user
+    user = User(
+        id=uuid.uuid4(),
+        email="carol@example.com",
+        hashed_password=hash_password("CarolPassword123!"),
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+    )
+    test_db.users[user.id] = user
+
+    with TestClient(app) as client:
+        # 1. Successful login
+        res = client.post(
+            "/auth/login",
+            json={"email": "Carol@example.com", "password": "CarolPassword123!"},
+        )
+        assert res.status_code == 200, res.text
+        token_data = res.json()
+        assert token_data["token_type"] == "bearer"
+        assert token_data["expires_in"] > 0
+        access_token = token_data["access_token"]
+
+        # Validate token payload
+        payload = decode_access_token(access_token)
+        assert payload["sub"] == str(user.id)
+        assert payload["email"] == "carol@example.com"
+        assert payload["type"] == "access"
+
+        # 2. Access /auth/me with valid Bearer token
+        profile_res = client.get(
+            "/auth/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        assert profile_res.status_code == 200
+        assert profile_res.json()["id"] == str(user.id)
+        assert profile_res.json()["email"] == "carol@example.com"
+
+        # 3. Invalid password -> 401
+        bad_pw_res = client.post(
+            "/auth/login",
+            json={"email": "carol@example.com", "password": "WrongPassword123!"},
+        )
+        assert bad_pw_res.status_code == 401
+        assert "invalid email or password" in bad_pw_res.json()["detail"].lower()
+
+        # 4. Non-existent email -> 401 (defeats enumeration via constant-time dummy verification)
+        with patch("app.auth.router.verify_password", wraps=verify_password) as verify_spy:
+            missing_res = client.post(
+                "/auth/login",
+                json={"email": "nonexistent@example.com", "password": "AnyPassword123!"},
+            )
+        assert missing_res.status_code == 401
+        assert "invalid email or password" in missing_res.json()["detail"].lower()
+        verify_spy.assert_called_once_with("AnyPassword123!", DUMMY_PASSWORD_HASH)
+
+        # 5. Deactivated user -> 401
+        user.is_active = False
+        deact_res = client.post(
+            "/auth/login",
+            json={"email": "carol@example.com", "password": "CarolPassword123!"},
+        )
+        assert deact_res.status_code == 401
+        assert "deactivated" in deact_res.json()["detail"].lower()
