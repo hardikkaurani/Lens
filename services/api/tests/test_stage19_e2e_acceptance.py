@@ -625,3 +625,52 @@ def test_cross_tenant_security_acceptance_matrix():
         assert res_pdf is False
         assert unowned_pdf_cap.processing_status == ProcessingStatus.FAILED
         assert "unowned" in unowned_pdf_cap.processing_error.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_sql_query_tenant_isolation_and_ownership_predicates():
+    """Verify that PostgreSQL lexical and vector search SQL queries strictly enforce tenant isolation predicates."""
+    from app.search.service import SearchService
+
+    user_id = uuid.uuid4()
+    foreign_user_id = uuid.uuid4()
+
+    class MockAsyncContext:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    mock_db = MagicMock()
+    mock_db.begin_nested.side_effect = MockAsyncContext
+    service = SearchService()
+
+    # 1. Unauthenticated / missing user_id immediately short-circuits
+    empty_res = await service.search(query="test", session=mock_db, user_id=None)
+    assert empty_res.total == 0
+    assert len(empty_res.results) == 0
+
+    # 2. Authenticated user search executes SQL containing mandatory tenant constraints
+    executed_statements = []
+
+    async def fake_execute(statement, params=None):
+        executed_statements.append((str(statement), params or {}))
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        return mock_result
+
+    mock_db.execute = AsyncMock(side_effect=fake_execute)
+
+    await service.search(query="test", session=mock_db, user_id=user_id, source_type="all")
+
+    assert len(executed_statements) >= 2
+    for sql_text, params in executed_statements:
+        # Mandatory tenant parameters must match user_id
+        assert "user_id" in params
+        assert params["user_id"] == user_id
+        assert params["user_id"] != foreign_user_id
+
+        # Mandatory SQL tenant constraints must be present
+        has_capture_tenant_pred = "c.user_id = :user_id" in sql_text
+        has_github_tenant_pred = "gc.user_id = :user_id" in sql_text
+        assert has_capture_tenant_pred or has_github_tenant_pred
