@@ -19,9 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.core.auth import get_current_user
 from app.core.config import Settings, get_settings
 from app.core.encryption import EncryptionError
-from app.db.models import GitHubRepository
+from app.db.models import GitHubRepository, User
 from app.db.session import get_db
 from app.integrations.github.client import (
     GitHubAuthError,
@@ -108,9 +109,10 @@ def _validate_safe_redirect(target_url: str, allowed_base: str) -> bool:
 async def github_oauth_connect(
     request: Request,
     redirect: Optional[str] = Query(None, description="Optional safe frontend path to return to after completion."),
+    current_user: User = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ) -> RedirectResponse:
-    """Initiate OAuth authorization with GitHub."""
+    """Initiate OAuth authorization with GitHub bound to authenticated tenant."""
     if not settings.GITHUB_CLIENT_ID or not settings.GITHUB_CLIENT_SECRET:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -121,7 +123,7 @@ async def github_oauth_connect(
     state = generate_oauth_state()
     session_binding = generate_session_binding()
 
-    state_meta = {}
+    state_meta = {"user_id": str(current_user.id)}
     if redirect and _validate_safe_redirect(redirect, settings.FRONTEND_URL):
         state_meta["redirect"] = redirect
 
@@ -224,14 +226,24 @@ async def github_oauth_callback(
             detail="OAuth state is invalid, expired, or not bound to this browser session.",
         )
 
-    # 5. Validate authorization code
+    # 5. Extract bound tenant user ID (strictly required)
+    user_id_str = consumed_state.get("user_id")
+    if not user_id_str:
+        logger.warning("OAuth state missing user_id tenant association.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OAuth state is missing tenant association.",
+        )
+    target_user_id = uuid.UUID(user_id_str)
+
+    # 6. Validate authorization code
     if not code or not code.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Missing OAuth authorization code.",
         )
 
-    # 6. Exchange authorization code for access token
+    # 7. Exchange authorization code for access token
     redirect_uri = settings.GITHUB_REDIRECT_URI
     if not redirect_uri:
         redirect_uri = str(request.url_for("github_oauth_callback"))
@@ -256,7 +268,7 @@ async def github_oauth_callback(
 
     access_token = token_data["access_token"]
 
-    # 7. Fetch authenticated GitHub user identity
+    # 8. Fetch authenticated GitHub user identity
     try:
         user_info = await github_client.get_authenticated_user(access_token)
     except GitHubTimeoutError:
@@ -275,13 +287,14 @@ async def github_oauth_callback(
             detail=f"Failed to verify GitHub user identity: {client_err.message}",
         )
 
-    # 8. Persist verified connection with encrypted access token
+    # 9. Persist verified connection with encrypted access token
     try:
         await upsert_github_connection(
             db=db,
             github_user_id=user_info["id"],
             github_username=user_info["login"],
             access_token=access_token,
+            user_id=target_user_id,
             scope=token_data.get("scope"),
             token_type=token_data.get("token_type"),
             token_metadata={"token_type": token_data.get("token_type")},
@@ -310,10 +323,11 @@ async def github_oauth_callback(
     description="Returns public connection metadata without sensitive access tokens or credentials.",
 )
 async def get_github_status(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubConnectionStatus:
-    """Retrieve connection status of GitHub integration."""
-    connection = await get_github_connection(db)
+    """Retrieve connection status of GitHub integration for authenticated user."""
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         return GitHubConnectionStatus(connected=False)
 
@@ -355,10 +369,11 @@ async def get_github_status(
     description="Removes stored credentials and connection records. Idempotent.",
 )
 async def disconnect_github(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubDisconnectResponse:
-    """Disconnect and delete the GitHub integration."""
-    await delete_github_connection(db)
+    """Disconnect and delete the GitHub integration for authenticated user."""
+    await delete_github_connection(db, user_id=current_user.id)
     return GitHubDisconnectResponse(
         status="disconnected",
         message="GitHub connection disconnected successfully.",
@@ -373,11 +388,12 @@ async def disconnect_github(
 )
 async def sync_github_repositories(
     async_sync: bool = Query(False, description="Enqueue in background worker instead of synchronous discovery."),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     github_client: GitHubClient = Depends(get_github_client),
 ) -> GitHubRepoSyncResponse:
     """Trigger repository synchronization for the authenticated GitHub user."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -544,10 +560,11 @@ async def list_github_repositories(
     limit: int = Query(50, ge=1, le=100, description="Page limit."),
     offset: int = Query(0, ge=0, description="Page offset."),
     search: Optional[str] = Query(None, max_length=100, description="Filter by repository name."),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubRepoListResponse:
     """Retrieve discovered GitHub repositories with pagination and filtering."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -579,10 +596,11 @@ async def list_github_repositories(
 async def update_github_repository_selection(
     repository_id: uuid.UUID,
     payload: GitHubRepositorySelectRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubRepositoryResponse:
     """Toggle repository selection state without triggering content ingestion."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -613,11 +631,12 @@ async def update_github_repository_selection(
 async def sync_github_activities(
     payload: Optional[GitHubActivitySyncRequest] = None,
     async_sync: bool = Query(False, description="Enqueue in background worker instead of synchronous processing."),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     github_client: GitHubClient = Depends(get_github_client),
 ) -> GitHubActivitySyncResponse:
     """Trigger activity synchronization for selected repositories."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -804,10 +823,11 @@ async def list_github_activities(
     activity_type: Optional[str] = Query(None, description="Filter by type: pull_request, issue, commit, or review."),
     limit: int = Query(50, ge=1, le=100, description="Page limit."),
     offset: int = Query(0, ge=0, description="Page offset."),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> GitHubActivityListResponse:
     """Retrieve ingested GitHub activities with pagination and filtering."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -850,10 +870,11 @@ async def list_github_activities(
     description="Returns aggregate activity synchronization status and per-repository breakdown.",
 )
 async def get_github_activity_status(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Retrieve current activity sync state across selected repositories."""
-    connection = await get_github_connection(db)
+    connection = await get_github_connection(db, user_id=current_user.id)
     if not connection:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

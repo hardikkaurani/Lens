@@ -213,10 +213,15 @@ async def validate_and_consume_oauth_state(
     return data
 
 
-async def get_github_connection(db: AsyncSession) -> Optional[GitHubConnection]:
-    """Retrieve the active GitHub connection record, if one exists."""
-    stmt = select(GitHubConnection).where(GitHubConnection.provider == "github").limit(1)
-    result = await db.execute(stmt)
+async def get_github_connection(
+    db: AsyncSession,
+    user_id: Optional[uuid.UUID] = None,
+) -> Optional[GitHubConnection]:
+    """Retrieve the active GitHub connection record for a user."""
+    stmt = select(GitHubConnection).where(GitHubConnection.provider == "github")
+    if user_id is not None:
+        stmt = stmt.where(GitHubConnection.user_id == user_id)
+    result = await db.execute(stmt.limit(1))
     return result.scalar_one_or_none()
 
 
@@ -225,6 +230,7 @@ async def upsert_github_connection(
     github_user_id: str,
     github_username: str,
     access_token: str,
+    user_id: Optional[uuid.UUID] = None,
     scope: Optional[str] = None,
     token_type: Optional[str] = "bearer",
     token_metadata: Optional[dict[str, Any]] = None,
@@ -233,7 +239,7 @@ async def upsert_github_connection(
     encrypted_token = encrypt_secret(access_token)
     now = datetime.now(timezone.utc)
 
-    existing = await get_github_connection(db)
+    existing = await get_github_connection(db, user_id=user_id)
     if existing:
         existing.github_user_id = github_user_id
         existing.github_username = github_username
@@ -248,6 +254,7 @@ async def upsert_github_connection(
         return existing
 
     connection = GitHubConnection(
+        user_id=user_id,
         provider="github",
         github_user_id=github_user_id,
         github_username=github_username,
@@ -265,9 +272,14 @@ async def upsert_github_connection(
     return connection
 
 
-async def delete_github_connection(db: AsyncSession) -> bool:
-    """Delete all stored GitHub connection records idempotently."""
+async def delete_github_connection(
+    db: AsyncSession,
+    user_id: Optional[uuid.UUID] = None,
+) -> bool:
+    """Delete stored GitHub connection record for a user."""
     stmt = delete(GitHubConnection).where(GitHubConnection.provider == "github")
+    if user_id is not None:
+        stmt = stmt.where(GitHubConnection.user_id == user_id)
     result = await db.execute(stmt)
     rowcount = getattr(result, "rowcount", 0)
     await db.commit()
