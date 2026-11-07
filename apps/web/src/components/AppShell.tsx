@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
+import { LensLogo } from "./LensLogo";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -82,14 +83,8 @@ export function AppShell({ children }: AppShellProps) {
     <div className="min-h-screen flex flex-col md:flex-row bg-[#0a0d14] text-slate-100">
       {/* Mobile Top Header */}
       <header className="md:hidden flex items-center justify-between p-4 border-b border-white/10 bg-[#111726]/90 backdrop-blur sticky top-0 z-30">
-        <Link href="/captures" className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-violet-500 flex items-center justify-center font-bold text-white shadow-md">
-            L
-          </div>
-          <div>
-            <span className="font-bold text-base tracking-wide text-white">LENS</span>
-            <span className="text-[10px] block text-slate-400 font-mono leading-none">WORKSPACE</span>
-          </div>
+        <Link href="/captures" className="flex items-center group">
+          <LensLogo size="sm" subtitle="WORKSPACE" />
         </Link>
         <button
           type="button"
@@ -150,19 +145,8 @@ export function AppShell({ children }: AppShellProps) {
       <aside className="hidden md:flex flex-col w-64 border-r border-white/10 bg-[#111726] p-5 shrink-0 sticky top-0 h-screen justify-between">
         <div className="space-y-6">
           {/* Logo / Branding */}
-          <Link href="/captures" className="flex items-center gap-3 group">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 via-indigo-600 to-violet-500 flex items-center justify-center font-bold text-white text-lg shadow-lg shadow-indigo-500/25 group-hover:scale-105 transition-transform">
-              L
-            </div>
-            <div>
-              <div className="font-extrabold text-lg tracking-wider text-white flex items-center gap-2">
-                <span>LENS</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  v0.1
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">Personal Knowledge</p>
-            </div>
+          <Link href="/captures" className="flex items-center group">
+            <LensLogo size="lg" subtitle="Personal Knowledge" priority />
           </Link>
 
           {/* Nav links */}
