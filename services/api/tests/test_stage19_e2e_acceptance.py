@@ -419,3 +419,209 @@ def test_file_capture_lifecycle_and_tenant_partitioned_storage():
         pdf_err = MalformedPDFError("Syntax error in PDF xref table")
         safe_msg = sanitize_error_message(pdf_err)
         assert safe_msg == "Corrupted or unreadable PDF document format."
+
+
+# ==============================================================================
+# 4. CROSS-TENANT SECURITY ACCEPTANCE MATRIX (Stage 19 - Section 4)
+# ==============================================================================
+
+def test_cross_tenant_security_acceptance_matrix():
+    """Verify strict multi-tenant isolation across all operations in Section 4 table."""
+    # User A (Alice)
+    user_a = User(
+        id=uuid.uuid4(),
+        email="alice@corp.local",
+        hashed_password=hash_password("pwA"),
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+    )
+    test_db.users[user_a.id] = user_a
+    token_a = create_access_token(subject=user_a.id, email=user_a.email)
+
+    # User B (Bob)
+    user_b = User(
+        id=uuid.uuid4(),
+        email="bob@corp.local",
+        hashed_password=hash_password("pwB"),
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+    )
+    test_db.users[user_b.id] = user_b
+    token_b = create_access_token(subject=user_b.id, email=user_b.email)
+
+    # Pre-populate Capture A for User A
+    cap_a = Capture(
+        id=uuid.uuid4(),
+        user_id=user_a.id,
+        source_type=SourceType.TEXT,
+        processing_status=ProcessingStatus.COMPLETED,
+        title="Alice Secret Roadmap",
+        content="Project Manhattan classified research document.",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    test_db.captures[cap_a.id] = cap_a
+    chunk_a = ContentChunk(
+        id=uuid.uuid4(),
+        capture_id=cap_a.id,
+        chunk_index=0,
+        content=cap_a.content,
+    )
+    test_db.chunks[chunk_a.id] = chunk_a
+
+    # Pre-populate Capture B for User B
+    cap_b = Capture(
+        id=uuid.uuid4(),
+        user_id=user_b.id,
+        source_type=SourceType.TEXT,
+        processing_status=ProcessingStatus.COMPLETED,
+        title="Bob Secret Financials",
+        content="Project Apollo classified revenue projections.",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    test_db.captures[cap_b.id] = cap_b
+    chunk_b = ContentChunk(
+        id=uuid.uuid4(),
+        capture_id=cap_b.id,
+        chunk_index=0,
+        content=cap_b.content,
+    )
+    test_db.chunks[chunk_b.id] = chunk_b
+
+    with TestClient(app) as client:
+        # Table Row 1: User A lists captures -> Only A's captures
+        res_list_a = client.get("/captures", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_list_a.status_code == 200
+        items_a = res_list_a.json()["items"]
+        assert len(items_a) == 1
+        assert items_a[0]["id"] == str(cap_a.id)
+        assert all(item["id"] != str(cap_b.id) for item in items_a)
+
+        # Table Row 2: User A retrieves B's capture -> 404 (IDOR defense)
+        res_get_b = client.get(f"/captures/{cap_b.id}", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_get_b.status_code == 404
+        assert "not found" in res_get_b.json()["detail"].lower()
+
+        # Table Row 3: User A modifies B's capture -> Denied (405 Method Not Allowed)
+        res_put_b = client.put(
+            f"/captures/{cap_b.id}",
+            json={"title": "Hacked"},
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        assert res_put_b.status_code == 405
+
+        # Table Row 4: User A deletes B's capture -> Denied (405 Method Not Allowed)
+        res_del_b = client.delete(
+            f"/captures/{cap_b.id}",
+            headers={"Authorization": f"Bearer {token_a}"},
+        )
+        assert res_del_b.status_code == 405
+
+        # Table Row 5: User A downloads B's file -> Secure key partitioning prevents cross-tenant access
+        key_a = StorageClient.generate_secure_object_key(cap_a.id, ".pdf", user_id=user_a.id)
+        key_b = StorageClient.generate_secure_object_key(cap_b.id, ".pdf", user_id=user_b.id)
+        assert str(user_a.id) in key_a
+        assert str(user_b.id) in key_b
+        assert key_a != key_b
+
+        # Table Row 6: User A searches B's content -> No B results
+        # User A searching for Bob's keyword "Apollo" never receives Bob's capture
+        res_search_apollo = client.get("/search?q=Apollo", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_search_apollo.status_code == 200
+        assert not any(r["capture_id"] == str(cap_b.id) for r in res_search_apollo.json()["results"])
+
+        # User A searching for Alice's keyword "Manhattan" returns Capture A
+        res_search_manhattan = client.get("/search?q=Manhattan", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_search_manhattan.status_code == 200
+        assert any(r["capture_id"] == str(cap_a.id) for r in res_search_manhattan.json()["results"])
+
+        # Conversely, User B searching for "Manhattan" never sees Alice's capture
+        res_search_b = client.get("/search?q=Manhattan", headers={"Authorization": f"Bearer {token_b}"})
+        assert res_search_b.status_code == 200
+        assert not any(r["capture_id"] == str(cap_a.id) for r in res_search_b.json()["results"])
+
+        # Table Row 7: User A accesses B's GitHub activity -> Denied (isolated)
+        # Pre-populate GitHub connection and activity for Bob
+        conn_b = GitHubConnection(
+            id=uuid.uuid4(),
+            user_id=user_b.id,
+            provider="github",
+            github_user_id="bob-gh",
+            github_username="bob_developer",
+            encrypted_access_token=encrypt_secret("ghp_bob_secret"),
+            scope="read:user,repo",
+        )
+        test_db.github_connections[conn_b.id] = conn_b
+        repo_b = GitHubRepository(
+            id=uuid.uuid4(),
+            connection_id=conn_b.id,
+            github_repository_id="9999",
+            name="bob-private-repo",
+            full_name="bob/bob-private-repo",
+            owner_login="bob_developer",
+            is_private=True,
+            is_selected=True,
+        )
+        test_db.github_repositories[repo_b.id] = repo_b
+        act_b = GitHubActivity(
+            id=uuid.uuid4(),
+            repository_id=repo_b.id,
+            activity_type=GitHubActivityType.PULL_REQUEST,
+            external_id="101",
+            title="Bob Secret PR",
+            body="Top secret feature implementation",
+            author_login="bob_developer",
+            html_url="https://github.com/bob/bob-private-repo/pull/101",
+        )
+        test_db.github_activities[act_b.id] = act_b
+
+        # User A querying GitHub status sees connected=False
+        res_gh_status_a = client.get("/integrations/github", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_gh_status_a.status_code == 200
+        assert res_gh_status_a.json()["connected"] is False
+
+        # Positive control: User B (Bob) searching for his own PR finds act_b
+        res_search_gh_b = client.get("/search?q=Feature&source_type=github", headers={"Authorization": f"Bearer {token_b}"})
+        assert res_search_gh_b.status_code == 200
+        assert res_search_gh_b.json()["total"] == 1
+        assert res_search_gh_b.json()["results"][0]["title"] == "Bob Secret PR"
+
+        # User A searching for Bob's GitHub PR receives 0 results
+        res_search_gh_a = client.get("/search?q=Feature&source_type=github", headers={"Authorization": f"Bearer {token_a}"})
+        assert res_search_gh_a.status_code == 200
+        assert res_search_gh_a.json()["total"] == 0
+
+        # Table Row 8: Worker processes unowned capture -> Rejected / abandoned with FAILED status
+        from worker.processor import process_url_capture, process_file_capture
+        import asyncio
+
+        unowned_url_cap = Capture(
+            id=uuid.uuid4(),
+            user_id=None,
+            source_type=SourceType.URL,
+            original_url="https://example.com/unowned",
+            processing_status=ProcessingStatus.PENDING,
+        )
+        test_db.captures[unowned_url_cap.id] = unowned_url_cap
+
+        unowned_pdf_cap = Capture(
+            id=uuid.uuid4(),
+            user_id=None,
+            source_type=SourceType.PDF,
+            source_id="captures/unowned/unowned.pdf",
+            processing_status=ProcessingStatus.PENDING,
+        )
+        test_db.captures[unowned_pdf_cap.id] = unowned_pdf_cap
+
+        # Execute worker URL path: rejects unowned capture, sets FAILED status
+        res_url = asyncio.run(process_url_capture(unowned_url_cap.id, session_factory=lambda: FakeAsyncSession(test_db)))
+        assert res_url is False
+        assert unowned_url_cap.processing_status == ProcessingStatus.FAILED
+        assert "unowned" in unowned_url_cap.processing_error.lower()
+
+        # Execute worker PDF path: rejects unowned capture, sets FAILED status
+        res_pdf = asyncio.run(process_file_capture(unowned_pdf_cap.id, session_factory=lambda: FakeAsyncSession(test_db)))
+        assert res_pdf is False
+        assert unowned_pdf_cap.processing_status == ProcessingStatus.FAILED
+        assert "unowned" in unowned_pdf_cap.processing_error.lower()
