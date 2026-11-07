@@ -5,6 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import get_current_user
+from app.db.models import User
 from app.db.session import get_db
 from app.search.schemas import SearchResponse
 from app.search.service import parse_source_filter, search_service
@@ -48,6 +50,7 @@ async def search_knowledge(
         default=None,
         description="Optional filter by source or activity category (e.g. 'all', 'captures', 'text', 'url', 'pdf', 'github', 'pull_request', 'issue', 'commit', 'review').",
     ),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> SearchResponse:
     """Execute unified search across all captured items and ingested GitHub activities."""
@@ -71,6 +74,7 @@ async def search_knowledge(
     return await search_service.search(
         query=sanitized,
         session=db,
+        user_id=current_user.id,
         limit=limit,
         lexical_weight=w_lex,
         semantic_weight=w_sem,

@@ -116,6 +116,12 @@ async def process_url_capture(
                 logger.warning("Capture %s not found in database; abandoning job", capture_id)
                 return False
 
+            if not getattr(capture, "user_id", None):
+                logger.warning("Capture %s lacks tenant user_id; abandoning unowned job", capture_id)
+                capture.processing_status = ProcessingStatus.FAILED
+                capture.processing_error = "Tenant validation failed: capture is unowned."
+                return False
+
             if capture.source_type != SourceType.URL:
                 logger.info(
                     "Capture %s has source_type '%s', skipping URL ingestion",
@@ -253,6 +259,12 @@ async def process_file_capture(
 
             if not capture:
                 logger.warning("Capture %s not found in database; abandoning job", capture_id)
+                return False
+
+            if not getattr(capture, "user_id", None):
+                logger.warning("Capture %s lacks tenant user_id; abandoning unowned job", capture_id)
+                capture.processing_status = ProcessingStatus.FAILED
+                capture.processing_error = "Tenant validation failed: capture is unowned."
                 return False
 
             if capture.source_type != SourceType.PDF:
@@ -407,6 +419,10 @@ async def process_github_repo_sync(
                 logger.warning("GitHub connection %s not found; skipping sync", connection_id)
                 return False
 
+            if not getattr(connection, "user_id", None):
+                logger.warning("GitHub connection %s lacks tenant user_id; abandoning unowned sync", connection_id)
+                return False
+
             res = await discover_and_sync_repositories(session, connection)
             logger.info(
                 "Worker completed GitHub repo sync for connection %s: %s repos synced (total: %s)",
@@ -457,6 +473,10 @@ async def process_github_activity_sync(
             connection = result.scalar_one_or_none()
             if not connection:
                 logger.warning("GitHub connection %s not found; skipping activity sync", connection_id)
+                return False
+
+            if not getattr(connection, "user_id", None):
+                logger.warning("GitHub connection %s lacks tenant user_id; abandoning unowned sync", connection_id)
                 return False
 
             res = await sync_selected_repositories_activities(

@@ -246,10 +246,13 @@ class StorageClient:
     def generate_secure_object_key(
         capture_id: uuid.UUID,
         extension: str = ".pdf",
+        user_id: Optional[uuid.UUID] = None,
     ) -> str:
         """Generate a cryptographically safe, traversal-proof internal object key.
 
-        Format: captures/<capture_uuid>/<object_uuid>.<ext>
+        Format:
+        With user_id: captures/<user_uuid>/<capture_uuid>/<object_uuid>.<ext>
+        Without user_id: captures/<capture_uuid>/<object_uuid>.<ext>
         Never interpolates user-provided filenames or relative path components.
         """
         clean_ext = extension.lower().strip()
@@ -261,6 +264,8 @@ class StorageClient:
             clean_ext = ".bin"
 
         object_id = uuid.uuid4().hex
+        if user_id is not None:
+            return f"captures/{user_id}/{capture_id}/{object_id}{clean_ext}"
         return f"captures/{capture_id}/{object_id}{clean_ext}"
 
 

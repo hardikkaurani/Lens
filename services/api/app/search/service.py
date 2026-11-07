@@ -155,6 +155,7 @@ class SearchService:
         self,
         query: str,
         session: AsyncSession,
+        user_id: uuid.UUID,
         limit: Optional[int] = None,
         lexical_weight: Optional[float] = None,
         semantic_weight: Optional[float] = None,
@@ -165,7 +166,7 @@ class SearchService:
         sanitized_query = query.strip()
         canonical_filter, capture_types, github_types = parse_source_filter(source_type)
 
-        if not sanitized_query:
+        if not sanitized_query or user_id is None:
             return SearchResponse(
                 query=query,
                 total=0,
@@ -223,6 +224,7 @@ class SearchService:
                 JOIN captures c ON cc.capture_id = c.id
                 WHERE (cc.tsv @@ websearch_to_tsquery('english', :query)
                    OR c.tsv @@ websearch_to_tsquery('english', :query))
+                  AND c.user_id = :user_id
                   AND c.source_type::text = ANY(:capture_types)
                 ORDER BY raw_lex_score DESC, cc.capture_id ASC, cc.chunk_index ASC
                 LIMIT :candidate_limit
@@ -235,6 +237,7 @@ class SearchService:
                         lexical_query_sql,
                         {
                             "query": sanitized_query,
+                            "user_id": user_id,
                             "capture_types": list(capture_types),
                             "candidate_limit": candidate_limit,
                         },
@@ -289,6 +292,7 @@ class SearchService:
                     FROM content_chunks cc
                     JOIN captures c ON cc.capture_id = c.id
                     WHERE cc.embedding IS NOT NULL
+                      AND c.user_id = :user_id
                       AND (cc.embedding <=> CAST(:query_vector AS vector)) <= :max_dist
                       AND c.source_type::text = ANY(:capture_types)
                     ORDER BY cc.embedding <=> CAST(:query_vector AS vector) ASC, cc.capture_id ASC, cc.chunk_index ASC
@@ -302,6 +306,7 @@ class SearchService:
                             vector_query_sql,
                             {
                                 "query_vector": vec_str,
+                                "user_id": user_id,
                                 "max_dist": max_dist,
                                 "capture_types": list(capture_types),
                                 "candidate_limit": candidate_limit,
@@ -366,6 +371,7 @@ class SearchService:
                     OR ga.author_login ILIKE :exact_pattern ESCAPE '\\'
                     OR gr.full_name ILIKE :exact_pattern ESCAPE '\\'
                 )
+                AND gc.user_id = :user_id
                 AND ga.activity_type::text = ANY(:github_types)
                 ORDER BY (
                     ts_rank_cd(ga.tsv, websearch_to_tsquery('english', :query))
@@ -386,6 +392,7 @@ class SearchService:
                             "query": sanitized_query,
                             "raw_query": sanitized_query,
                             "exact_pattern": exact_pattern,
+                            "user_id": user_id,
                             "github_types": list(github_types),
                             "candidate_limit": candidate_limit,
                         },

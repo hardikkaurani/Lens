@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.router import router as auth_router
 from app.captures.router import router as captures_router
 from app.core.config import get_settings
 from app.db.session import close_connections
@@ -27,10 +28,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for local web development
+# Secure CORS configuration: Restrict to explicit origins when credentials are supported
+cors_origins = list(settings.CORS_ORIGINS)
+if settings.FRONTEND_URL and settings.FRONTEND_URL not in cors_origins:
+    cors_origins.append(settings.FRONTEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,6 +43,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(captures_router)
 app.include_router(search_router)
 app.include_router(github_router)

@@ -3,6 +3,7 @@
 from app.db.base import Base
 from app.db.models import (
     DEFAULT_EMBEDDING_DIMENSION,
+    User,
     Capture,
     ContentChunk,
     GitHubActivity,
@@ -25,6 +26,7 @@ from app.db.session import (
 
 __all__ = [
     "Base",
+    "User",
     "SourceType",
     "Capture",
     "ContentChunk",

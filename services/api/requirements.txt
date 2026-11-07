@@ -26,3 +26,7 @@ minio>=7.2.0,<8.0.0
 # Cryptography & Encryption (Stage 13)
 pycryptodome>=3.20.0,<4.0.0
 
+# Authentication & Multi-Tenancy (Stage 18)
+pyjwt>=2.8.0,<3.0.0
+argon2-cffi>=23.1.0,<26.0.0
+
