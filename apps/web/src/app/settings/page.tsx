@@ -6,6 +6,7 @@ import { apiClient, ApiClientError } from "@/lib/api-client";
 import { formatDate } from "@/lib/format";
 import type { GitHubActivity, GitHubConnectionStatus, GitHubRepository } from "@/types/api";
 import { ErrorMessage } from "@/components/ErrorMessage";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 function getCategoryCounts(repo: GitHubRepository): Array<[string, number]> {
   const meta = repo.activity_sync_metadata;
@@ -956,8 +957,10 @@ export function SettingsContent() {
 
 export default function SettingsPage() {
   return (
-    <Suspense fallback={<div className="p-8 text-center text-xs text-slate-500">Loading settings...</div>}>
-      <SettingsContent />
-    </Suspense>
+    <ProtectedRoute>
+      <Suspense fallback={<div className="p-8 text-center text-xs text-slate-500">Loading settings...</div>}>
+        <SettingsContent />
+      </Suspense>
+    </ProtectedRoute>
   );
 }
