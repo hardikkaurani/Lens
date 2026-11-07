@@ -400,3 +400,22 @@ def test_file_capture_lifecycle_and_tenant_partitioned_storage():
             expected_prefix = f"captures/{user.id}/{capture_id}/"
             assert uploaded_key.startswith(expected_prefix)
             assert uploaded_key.endswith(".pdf")
+
+        # 4b. Verify S3 cleanup rollback when DB persistence fails
+        with patch.object(FakeAsyncSession, "flush", side_effect=RuntimeError("Simulated DB flush failure")):
+            res_fail = client.post(
+                "/captures/upload",
+                files={"file": ("fail_doc.pdf", valid_pdf_content, "application/pdf")},
+                data={"title": "Failing Document"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert res_fail.status_code == 500
+            assert "cleaned up safely" in res_fail.json()["detail"].lower()
+            mock_storage.delete_object.assert_called_once()
+            cleaned_key = mock_storage.delete_object.call_args[0][0]
+            assert f"captures/{user.id}/" in cleaned_key
+
+        # 5. Worker corrupted PDF error sanitization
+        pdf_err = MalformedPDFError("Syntax error in PDF xref table")
+        safe_msg = sanitize_error_message(pdf_err)
+        assert safe_msg == "Corrupted or unreadable PDF document format."
