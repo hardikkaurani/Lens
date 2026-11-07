@@ -93,3 +93,58 @@ def setup_stage19_env():
     yield
     test_db.clear()
     app.dependency_overrides.clear()
+
+
+# ==============================================================================
+# 1. AUTHENTICATION LIFECYCLE (Stage 19 - Section 3.A)
+# ==============================================================================
+
+def test_auth_lifecycle_registration_and_validation():
+    """Verify user registration, input validation, case-insensitive uniqueness, and Argon2id hashing."""
+    with TestClient(app) as client:
+        # 1. Valid registration
+        res = client.post(
+            "/auth/register",
+            json={"email": "Alice@example.com", "password": "StrongPassword123!"},
+        )
+        assert res.status_code == 201, res.text
+        data = res.json()
+        assert data["email"] == "alice@example.com"  # Normalized to lowercase
+        assert data["is_active"] is True
+        assert "id" in data
+        assert "password" not in data  # Never leak password in response
+
+        user_id = uuid.UUID(data["id"])
+        persisted_user = test_db.users[user_id]
+        assert persisted_user.hashed_password.startswith("$argon2id$")
+        assert verify_password("StrongPassword123!", persisted_user.hashed_password) is True
+
+        # 2. Duplicate registration with exact email -> 400
+        dup_res = client.post(
+            "/auth/register",
+            json={"email": "alice@example.com", "password": "AnotherPassword123!"},
+        )
+        assert dup_res.status_code == 400
+        assert "already exists" in dup_res.json()["detail"].lower()
+
+        # 3. Duplicate registration with case variation -> 400
+        case_res = client.post(
+            "/auth/register",
+            json={"email": "ALICE@EXAMPLE.COM", "password": "AnotherPassword123!"},
+        )
+        assert case_res.status_code == 400
+        assert "already exists" in case_res.json()["detail"].lower()
+
+        # 4. Invalid email format -> 422
+        inv_email = client.post(
+            "/auth/register",
+            json={"email": "not-an-email", "password": "ValidPassword123!"},
+        )
+        assert inv_email.status_code == 422
+
+        # 5. Short password (< 8 chars) -> 422
+        short_pw = client.post(
+            "/auth/register",
+            json={"email": "bob@example.com", "password": "short"},
+        )
+        assert short_pw.status_code == 422
