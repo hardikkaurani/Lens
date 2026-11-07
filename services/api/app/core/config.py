@@ -30,8 +30,10 @@ class Settings(BaseSettings):
 
     # Optional / Planned settings (loaded if present, but never required to start)
     JWT_SECRET: Optional[str] = None
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     GITHUB_CLIENT_ID: Optional[str] = None
     GITHUB_CLIENT_SECRET: Optional[str] = None
     GITHUB_WEBHOOK_SECRET: Optional[str] = None
