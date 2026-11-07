@@ -1,5 +1,6 @@
 import {
   isCaptureDetail,
+  type AuthSessionResponse,
   type CaptureCreatePayload,
   type CaptureDetail,
   type CaptureListResponse,
@@ -14,6 +15,7 @@ import {
   type HealthResponse,
   type SearchResponse,
   type UploadCaptureOptions,
+  type User,
 } from "@/types/api";
 
 /**
@@ -40,13 +42,16 @@ export class ApiClientError extends Error {
 }
 
 /**
- * Resolve the API base URL from client-side public environment variable,
- * falling back safely to local development port 8000.
+ * Resolve the API base URL.
+ * In browser environments without an explicit public override, defaults to the Next.js BFF proxy.
  */
 export function getApiBaseUrl(): string {
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (envUrl && envUrl.trim()) {
     return envUrl.trim().replace(/\/+$/, "");
+  }
+  if (typeof window !== "undefined") {
+    return "/api/proxy";
   }
   return "http://localhost:8000";
 }
@@ -114,6 +119,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     const res = await fetch(url, {
       ...options,
       signal: controller.signal,
+      credentials: "same-origin",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -222,6 +228,7 @@ export const apiClient = {
 
     return new Promise<CaptureDetail>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      xhr.withCredentials = true;
       xhr.open("POST", url);
       xhr.timeout = timeoutMs;
       xhr.responseType = "json";
@@ -487,6 +494,72 @@ export const apiClient = {
       method: "GET",
       signal: params.signal,
     });
+  },
+
+  /**
+   * Register a new user account.
+   */
+  async register(payload: { email: string; password: string; signal?: AbortSignal }): Promise<User> {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ email: payload.email, password: payload.password }),
+      signal: payload.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as User;
+  },
+
+  /**
+   * Authenticate with email and password via Next.js BFF and set HttpOnly session cookie.
+   */
+  async login(payload: { email: string; password: string; signal?: AbortSignal }): Promise<AuthSessionResponse> {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ email: payload.email, password: payload.password }),
+      signal: payload.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as AuthSessionResponse;
+  },
+
+  /**
+   * Fetch authenticated user profile using HttpOnly cookie session.
+   */
+  async getMe(params: { signal?: AbortSignal } = {}): Promise<User> {
+    const res = await fetch("/api/auth/me", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: params.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as User;
+  },
+
+  /**
+   * Log out and terminate the current user session by clearing the HttpOnly cookie.
+   */
+  async logout(params: { signal?: AbortSignal } = {}): Promise<{ success: boolean }> {
+    const res = await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      signal: params.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as { success: boolean };
   },
 };
 

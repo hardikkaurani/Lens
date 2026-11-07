@@ -243,3 +243,16 @@ export interface HealthResponse {
   database?: string;
   redis?: string;
 }
+
+export interface User {
+  id: string;
+  email: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface AuthSessionResponse {
+  success: boolean;
+  user: User;
+}
+
