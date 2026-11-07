@@ -674,3 +674,163 @@ async def test_search_sql_query_tenant_isolation_and_ownership_predicates():
         has_capture_tenant_pred = "c.user_id = :user_id" in sql_text
         has_github_tenant_pred = "gc.user_id = :user_id" in sql_text
         assert has_capture_tenant_pred or has_github_tenant_pred
+
+
+# ==============================================================================
+# 5. GITHUB INTEGRATION SECURITY & TOKEN ENCRYPTION (Stage 19 - Section 3.E)
+# ==============================================================================
+
+def test_github_integration_security_and_encryption():
+    """Verify OAuth state signing, AES-256-GCM token encryption, and disconnect isolation."""
+    user = User(id=uuid.uuid4(), email="gh_user@lens.local", hashed_password=hash_password("pw"), is_active=True)
+    test_db.users[user.id] = user
+    token = create_access_token(subject=user.id, email=user.email)
+
+    # 1. AES-256-GCM authenticated encryption and decryption
+    secret_token = "ghp_secure_github_personal_access_token_999"
+    ciphertext = encrypt_secret(secret_token)
+    assert ciphertext.startswith("v1:")
+    decrypted = decrypt_secret(ciphertext)
+    assert decrypted == secret_token
+
+    # Verify tampering with ciphertext raises EncryptionError
+    tampered_cipher = ciphertext[:-4] + "AAAA"
+    with pytest.raises(EncryptionError):
+        decrypt_secret(tampered_cipher)
+
+    # 2. Purpose-scoped OAuth connect ticket validation
+    ticket = create_oauth_ticket(subject=user.id, expires_seconds=60)
+    validated_subject = validate_oauth_ticket(ticket)
+    assert validated_subject == user.id
+
+    # Tampered ticket raises TokenSecurityError
+    with pytest.raises(TokenSecurityError):
+        validate_oauth_ticket(ticket + "invalid")
+
+    # 3. Disconnect isolation: deleting a connection removes only the calling user's connection
+    conn = GitHubConnection(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        provider="github",
+        github_user_id="gh-123",
+        github_username="lens_tester",
+        encrypted_access_token=ciphertext,
+        scope="read:user",
+    )
+    test_db.github_connections[conn.id] = conn
+
+    with TestClient(app) as client:
+        res_del = client.delete("/integrations/github", headers={"Authorization": f"Bearer {token}"})
+        assert res_del.status_code == 200
+        assert res_del.json()["status"] == "disconnected"
+        assert conn.id not in test_db.github_connections
+
+
+# ==============================================================================
+# 6. FAILURE AND RECOVERY TESTING (Stage 19 - Section 5)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_failure_and_recovery_health_degradation():
+    """Verify health endpoint degradation when PostgreSQL or Redis is unavailable."""
+    with TestClient(app) as client:
+        # 1. When DB fails and Redis is OK -> 503 Service Unavailable, status=degraded
+        with (
+            patch("app.health.router.check_database_health", new_callable=AsyncMock, return_value=False),
+            patch("app.health.router.check_redis_health", new_callable=AsyncMock, return_value=True),
+        ):
+            res = client.get("/health")
+            assert res.status_code == 503
+            data = res.json()
+            assert data["status"] == "degraded"
+            assert data["database"] == "error"
+            assert data["redis"] == "ok"
+
+        # 2. When Redis fails and DB is OK -> 503 Service Unavailable, status=degraded
+        with (
+            patch("app.health.router.check_database_health", new_callable=AsyncMock, return_value=True),
+            patch("app.health.router.check_redis_health", new_callable=AsyncMock, return_value=False),
+        ):
+            res_redis = client.get("/health")
+            assert res_redis.status_code == 503
+            data_redis = res_redis.json()
+            assert data_redis["status"] == "degraded"
+            assert data_redis["database"] == "ok"
+            assert data_redis["redis"] == "error"
+
+        # 3. When both are healthy -> 200 OK, status=ok
+        with (
+            patch("app.health.router.check_database_health", new_callable=AsyncMock, return_value=True),
+            patch("app.health.router.check_redis_health", new_callable=AsyncMock, return_value=True),
+        ):
+            res_ok = client.get("/health")
+            assert res_ok.status_code == 200
+            data_ok = res_ok.json()
+            assert data_ok["status"] == "ok"
+            assert data_ok["database"] == "ok"
+            assert data_ok["redis"] == "ok"
+
+
+# ==============================================================================
+# 7. PRODUCTION CONFIGURATION AUDIT (Stage 19 - Section 6)
+# ==============================================================================
+
+def test_production_configuration_audit_secrets_and_entropy():
+    """Verify fail-safe behavior when required cryptographic secrets or entropy are missing in production."""
+    # 1. In production, missing JWT_SECRET must raise SecurityConfigurationError
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "JWT_SECRET", None):
+        with pytest.raises(SecurityConfigurationError, match="must be configured in production"):
+            get_jwt_secret()
+
+    # 2. In production, short JWT_SECRET (< 32 chars) must raise SecurityConfigurationError
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "JWT_SECRET", "short-secret"):
+        with pytest.raises(SecurityConfigurationError, match="at least 32 characters long"):
+            get_jwt_secret()
+
+    # 3. In production, valid 32+ character JWT_SECRET succeeds
+    valid_prod_secret = "a" * 32
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "JWT_SECRET", valid_prod_secret):
+        assert get_jwt_secret() == valid_prod_secret
+
+    # 4. In production, missing TOKEN_ENCRYPTION_KEY must raise EncryptionError
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "TOKEN_ENCRYPTION_KEY", None):
+        with pytest.raises(EncryptionError, match="TOKEN_ENCRYPTION_KEY must be configured"):
+            _derive_key(None)
+
+    # 5. In production, short TOKEN_ENCRYPTION_KEY (< 32 chars) must raise EncryptionError
+    with patch.object(settings, "APP_ENV", "production"), patch.object(settings, "TOKEN_ENCRYPTION_KEY", "short-key"):
+        with pytest.raises(EncryptionError, match="at least 32 characters"):
+            _derive_key(None)
+
+    # 6. Verify CORS configuration: wildcard '*' with credentials must never be present
+    assert "*" not in settings.CORS_ORIGINS
+    for origin in settings.CORS_ORIGINS:
+        assert origin.startswith("http://") or origin.startswith("https://")
+
+
+# ==============================================================================
+# 8. CLIENT COMPATIBILITY CONTRACT VERIFICATION (Stage 19 - Section 3.A & 3.F)
+# ==============================================================================
+
+def test_client_compatibility_unauthenticated_requests_contract():
+    """Verify that unauthenticated requests from web/mobile clients receive standardized HTTP 401.
+
+    Documents the known client-side integration boundary:
+    Next.js ('apps/web') and Flutter ('apps/mobile') clients do not yet inject Bearer tokens,
+    so backend endpoints correctly fail closed with HTTP 401 until client authentication
+    screens and token persistence are wired in subsequent client stages.
+    """
+    with TestClient(app) as client:
+        # Simulate request from Next.js web client without Authorization header
+        web_res = client.get("/captures", headers={"Accept": "application/json"})
+        assert web_res.status_code == 401
+        assert "credentials were not provided" in web_res.json()["detail"].lower()
+
+        # Simulate request from Flutter mobile client without Authorization header
+        mobile_res = client.post(
+            "/captures",
+            json={"source_type": "url", "original_url": "https://flutter.dev"},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        assert mobile_res.status_code == 401
+        assert "credentials were not provided" in mobile_res.json()["detail"].lower()
