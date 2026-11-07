@@ -35,6 +35,63 @@ class ProcessingStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class User(Base):
+    """User account model for authentication and multi-tenant resource ownership."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    email: Mapped[str] = mapped_column(
+        sa.String(255),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    hashed_password: Mapped[str] = mapped_column(
+        sa.String(255),
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        sa.Boolean,
+        default=True,
+        server_default=sa.text("true"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        nullable=False,
+        index=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True),
+        server_default=sa.func.now(),
+        onupdate=sa.func.now(),
+        nullable=False,
+    )
+
+    # Multi-tenant resource relationships
+    captures: Mapped[list["Capture"]] = relationship(
+        "Capture",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    github_connections: Mapped[list["GitHubConnection"]] = relationship(
+        "GitHubConnection",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} email={self.email!r}>"
+
+
 class Capture(Base):
     """Core domain model representing a captured item saved into LENS."""
 
@@ -44,6 +101,12 @@ class Capture(Base):
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     source_type: Mapped[SourceType] = mapped_column(
         sa.Enum(
@@ -107,6 +170,12 @@ class Capture(Base):
         server_default=sa.func.now(),
         onupdate=sa.func.now(),
         nullable=False,
+    )
+
+    # Multi-tenant user ownership relationship
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="captures",
     )
 
     # One-to-many relationship with ContentChunk (cascade deletion)
@@ -266,6 +335,12 @@ class GitHubConnection(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        sa.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(
         sa.String(32),
         default="github",
@@ -275,7 +350,6 @@ class GitHubConnection(Base):
     github_user_id: Mapped[str] = mapped_column(
         sa.String(64),
         nullable=False,
-        unique=True,
         index=True,
     )
     github_username: Mapped[Optional[str]] = mapped_column(
@@ -317,6 +391,12 @@ class GitHubConnection(Base):
         nullable=True,
     )
 
+    # Multi-tenant user ownership relationship
+    user: Mapped["User"] = relationship(
+        "User",
+        back_populates="github_connections",
+    )
+
     # One-to-many relationship with GitHubRepository (cascade deletion)
     repositories: Mapped[list["GitHubRepository"]] = relationship(
         "GitHubRepository",
@@ -327,9 +407,9 @@ class GitHubConnection(Base):
 
     __table_args__ = (
         sa.UniqueConstraint(
+            "user_id",
             "provider",
-            "github_user_id",
-            name="uq_github_connections_provider_user",
+            name="uq_github_connections_user_provider",
         ),
     )
 
