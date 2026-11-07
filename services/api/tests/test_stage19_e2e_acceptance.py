@@ -327,3 +327,10 @@ def test_url_capture_lifecycle_and_worker_processing():
             assert "queue unavailable" in persisted_fail.processing_error.lower()
             # Verify internal Redis host/pass is NOT leaked
             assert "redis://" not in persisted_fail.processing_error
+
+        # 4. Worker error message sanitization: verify SSRF, Timeout, and Content errors
+        ssrf_err = SSRFBlockedError("SSRF check blocked: 127.0.0.1 loopback prohibited")
+        assert "ssrf security policy blocked" in sanitize_error_message(ssrf_err).lower()
+
+        timeout_err = FetchTimeoutError("ReadTimeout to remote host")
+        assert "timeout" in sanitize_error_message(timeout_err).lower()
