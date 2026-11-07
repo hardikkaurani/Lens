@@ -16,7 +16,6 @@ from app.auth.schemas import (
 )
 from app.core.auth import get_current_user
 from app.core.config import get_settings
-from app.core.security import create_access_token, hash_password, verify_password
 from app.core.security import (
     DUMMY_PASSWORD_HASH,
     create_access_token,
