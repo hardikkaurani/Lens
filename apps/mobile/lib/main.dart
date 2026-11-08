@@ -12,6 +12,7 @@ import 'screens/new_capture_screen.dart';
 import 'screens/register_screen.dart';
 import 'screens/search_screen.dart';
 import 'screens/share_review_screen.dart';
+import 'widgets/lens_logo.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -65,6 +66,9 @@ class _LensAppState extends State<LensApp> {
 
     if (widget.authService != null) {
       widget.authService!.addListener(_handleAuthStateChanged);
+      if (widget.authService!.status == AuthStatus.initial) {
+        unawaited(widget.authService!.restoreSession(() => _apiClient.getMe()));
+      }
     }
 
     // Listen for warm-start incoming shares
@@ -178,32 +182,116 @@ class _LensAppState extends State<LensApp> {
     return ListenableBuilder(
       listenable: widget.authService!,
       builder: (context, _) {
-        if (!widget.authService!.isAuthenticated) {
-          if (_showRegister) {
-            return RegisterScreen(
+        final auth = widget.authService!;
+        switch (auth.status) {
+          case AuthStatus.initial:
+          case AuthStatus.restoring:
+            return const Scaffold(
+              key: Key('auth_splash_scaffold'),
+              body: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    LensLogo(height: 48),
+                    SizedBox(height: 24),
+                    SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white70),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+
+          case AuthStatus.restorationFailed:
+            return Scaffold(
+              key: const Key('auth_restoration_failed_scaffold'),
+              body: SafeArea(
+                child: Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const LensLogo(height: 48),
+                        const SizedBox(height: 24),
+                        const Text(
+                          'Unable to restore session',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Network or server connectivity is currently unavailable. You can retry connection or sign in again.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.white60,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 28),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 46,
+                          child: FilledButton.icon(
+                            key: const Key('retry_restore_button'),
+                            icon: const Icon(Icons.refresh, size: 20),
+                            label: const Text('Retry Connection'),
+                            onPressed: () {
+                              widget.authService!.retryRestoreSession(() => _apiClient.getMe());
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextButton(
+                          key: const Key('switch_to_login_button'),
+                          onPressed: () {
+                            widget.authService!.clearSessionAndLogin();
+                          },
+                          child: const Text('Sign In with Another Account'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+          case AuthStatus.unauthenticated:
+            if (_showRegister) {
+              return RegisterScreen(
+                apiClient: _apiClient,
+                authService: auth,
+                onNavigateToLogin: () {
+                  setState(() => _showRegister = false);
+                },
+                onRegisterSuccess: () {
+                  setState(() => _showRegister = false);
+                },
+              );
+            }
+            return LoginScreen(
               apiClient: _apiClient,
-              authService: widget.authService!,
-              onNavigateToLogin: () {
-                setState(() => _showRegister = false);
-              },
-              onRegisterSuccess: () {
-                setState(() => _showRegister = false);
+              authService: auth,
+              onNavigateToRegister: () {
+                setState(() => _showRegister = true);
               },
             );
-          }
-          return LoginScreen(
-            apiClient: _apiClient,
-            authService: widget.authService!,
-            onNavigateToRegister: () {
-              setState(() => _showRegister = true);
-            },
-          );
-        }
 
-        return MainNavigationShell(
-          apiClient: _apiClient,
-          authService: widget.authService,
-        );
+          case AuthStatus.authenticated:
+            return MainNavigationShell(
+              apiClient: _apiClient,
+              authService: auth,
+            );
+        }
       },
     );
   }
