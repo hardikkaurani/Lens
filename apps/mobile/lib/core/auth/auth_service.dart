@@ -86,10 +86,15 @@ class AuthService extends ChangeNotifier {
         _status = AuthStatus.restorationFailed;
       }
     } finally {
+      _isRestoring = false;
       if (_sessionId == requestSessionId) {
         _isLoading = false;
-        _isRestoring = false;
         notifyListeners();
+      } else {
+        if (_isLoading) {
+          _isLoading = false;
+          notifyListeners();
+        }
       }
     }
   }

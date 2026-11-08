@@ -204,7 +204,7 @@ void main() {
 
   group('3. ApiClient Bearer Token Injection & Expiry Handling', () {
     test('injects Authorization: Bearer token header on protected requests', () async {
-      final storage = InMemoryAuthTokenStorage('bearer_token_xyz');
+      final storage = InMemoryAuthTokenStorage();
       final mockHttp = MockHttpClient((req) async {
         expect(req.headers['authorization'], equals('Bearer bearer_token_xyz'));
         return http.Response(
@@ -223,6 +223,7 @@ void main() {
         httpClient: mockHttp,
         tokenStorage: storage,
       );
+      await storage.saveToken('bearer_token_xyz', backendAuthority: client.currentAuthority);
 
       final res = await client.listCaptures();
       expect(res.total, equals(0));
@@ -250,12 +251,8 @@ void main() {
     });
 
     test('triggers session expiration on 401 response and throws ApiException', () async {
-      final storage = InMemoryAuthTokenStorage('expired_token');
+      final storage = InMemoryAuthTokenStorage();
       final auth = AuthService(storage: storage);
-      await auth.setSession(
-        user: const User(id: 'u-1', email: 'test@lens.app', isActive: true),
-        token: 'expired_token',
-      );
 
       final mockHttp = MockHttpClient((req) async {
         return http.Response(
@@ -269,6 +266,11 @@ void main() {
         httpClient: mockHttp,
         authService: auth,
       );
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'test@lens.app', isActive: true),
+        token: 'expired_token',
+        backendAuthority: client.currentAuthority,
+      );
 
       await expectLater(
         client.listCaptures(),
@@ -277,7 +279,7 @@ void main() {
 
       // Verify token cleared and user logged out
       expect(auth.isAuthenticated, isFalse);
-      expect(await storage.getToken(), isNull);
+      expect(await storage.getToken(backendAuthority: client.currentAuthority), isNull);
     });
 
     test('login sends credentials without bearer and returns access_token', () async {
@@ -763,7 +765,9 @@ void main() {
     });
 
     test('ApiClient rejects plain HTTP for remote sensitive endpoints and accepts HTTPS or loopback', () async {
-      final storage = InMemoryAuthTokenStorage('token123');
+      final storage = InMemoryAuthTokenStorage();
+      await storage.saveToken('token123', backendAuthority: 'remote.lens.app');
+      await storage.saveToken('token123', backendAuthority: '127.0.0.1:8000');
       final mockHttp = MockHttpClient((req) async => http.Response('{"captures": [], "total": 0, "limit": 15, "offset": 0}', 200));
 
       // 1. Insecure remote HTTP -> Rejected
@@ -923,6 +927,134 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('Account created successfully, but automatic sign-in failed'), findsOneWidget);
+    });
+
+    test('authority-scoped token reads never fall back to global token when authority is supplied', () async {
+      final storage = InMemoryAuthTokenStorage();
+
+      // Save a global token without authority
+      await storage.saveToken('global_token_xyz');
+      expect(await storage.getToken(), equals('global_token_xyz'));
+
+      // Explicit authority read MUST NOT fall back to global token
+      expect(await storage.getToken(backendAuthority: 'api.lens.app'), isNull);
+      expect(await storage.hasToken(backendAuthority: 'api.lens.app'), isFalse);
+
+      // Explicit authority read for localhost MUST NOT fall back
+      expect(await storage.getToken(backendAuthority: '127.0.0.1:8000'), isNull);
+      expect(await storage.hasToken(backendAuthority: '127.0.0.1:8000'), isFalse);
+    });
+
+    test('authority-specific token clearing does not wipe global or other authority tokens', () async {
+      final storage = InMemoryAuthTokenStorage();
+
+      await storage.saveToken('global_token');
+      await storage.saveToken('token_alpha', backendAuthority: 'alpha.lens.app');
+      await storage.saveToken('token_beta', backendAuthority: 'beta.lens.app');
+
+      // Clear only alpha authority
+      await storage.clearToken(backendAuthority: 'alpha.lens.app');
+
+      expect(await storage.getToken(backendAuthority: 'alpha.lens.app'), isNull);
+      expect(await storage.getToken(backendAuthority: 'beta.lens.app'), equals('token_beta'));
+      expect(await storage.getToken(), equals('global_token'));
+
+      // Clear global token
+      await storage.clearToken();
+      expect(await storage.getToken(), isNull);
+      expect(await storage.getToken(backendAuthority: 'beta.lens.app'), equals('token_beta'));
+    });
+
+    test('authority key formatting is collision-resistant and handles distinct delimiters and ports', () async {
+      final storage = InMemoryAuthTokenStorage();
+
+      // Delimiter collision test: 'api:8000' vs 'api_8000' vs 'api/8000'
+      final keyColon = InMemoryAuthTokenStorage.formatKey('api:8000');
+      final keyUnderscore = InMemoryAuthTokenStorage.formatKey('api_8000');
+      final keySlash = InMemoryAuthTokenStorage.formatKey('api/8000');
+
+      expect(keyColon, isNot(equals(keyUnderscore)));
+      expect(keyColon, isNot(equals(keySlash)));
+      expect(keyUnderscore, isNot(equals(keySlash)));
+
+      // Secure storage formatKey must also be collision-resistant
+      expect(
+        SecureAuthTokenStorage.formatKey('api:8000'),
+        isNot(equals(SecureAuthTokenStorage.formatKey('api_8000'))),
+      );
+
+      // Verify independent token storage without overwrite
+      await storage.saveToken('token_colon', backendAuthority: 'api:8000');
+      await storage.saveToken('token_underscore', backendAuthority: 'api_8000');
+
+      expect(await storage.getToken(backendAuthority: 'api:8000'), equals('token_colon'));
+      expect(await storage.getToken(backendAuthority: 'api_8000'), equals('token_underscore'));
+
+      await storage.clearToken(backendAuthority: 'api:8000');
+      expect(await storage.getToken(backendAuthority: 'api:8000'), isNull);
+      expect(await storage.getToken(backendAuthority: 'api_8000'), equals('token_underscore'));
+    });
+
+    test('session restoration does not leave isRestoring or isLoading stuck when login supersedes in-flight restoration', () async {
+      final storage = InMemoryAuthTokenStorage();
+      await storage.saveToken('initial_token');
+      final auth = AuthService(storage: storage);
+
+      final completer = Completer<User>();
+      final restoreFuture = auth.restoreSession(() => completer.future);
+
+      // Verify restoration is actively in-flight
+      expect(auth.isRestoring, isTrue);
+      expect(auth.isLoading, isTrue);
+      expect(auth.status, equals(AuthStatus.restoring));
+
+      // User initiates login while restoration is still in-flight
+      await auth.setSession(
+        user: const User(id: 'u-login', email: 'login@lens.app', isActive: true),
+        token: 'token_login_new',
+      );
+
+      // Now complete the delayed background restoration
+      completer.complete(const User(id: 'u-old', email: 'old@lens.app', isActive: true));
+      await restoreFuture;
+
+      // isRestoring and isLoading must NOT be stuck as true
+      expect(auth.isRestoring, isFalse);
+      expect(auth.isLoading, isFalse);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('login@lens.app'));
+
+      // Subsequent session restoration must NOT be blocked by a stuck isRestoring flag
+      bool secondRan = false;
+      await auth.restoreSession(() async {
+        secondRan = true;
+        return const User(id: 'u-subsequent', email: 'sub@lens.app', isActive: true);
+      });
+      expect(secondRan, isTrue);
+      expect(auth.isRestoring, isFalse);
+      expect(auth.isLoading, isFalse);
+    });
+
+    test('session restoration does not leave isRestoring or isLoading stuck when logout supersedes in-flight restoration', () async {
+      final storage = InMemoryAuthTokenStorage();
+      await storage.saveToken('initial_token');
+      final auth = AuthService(storage: storage);
+
+      final completer = Completer<User>();
+      final restoreFuture = auth.restoreSession(() => completer.future);
+
+      expect(auth.isRestoring, isTrue);
+      expect(auth.isLoading, isTrue);
+
+      // Logout during in-flight restoration
+      await auth.logout();
+
+      completer.complete(const User(id: 'u-old', email: 'old@lens.app', isActive: true));
+      await restoreFuture;
+
+      expect(auth.isRestoring, isFalse);
+      expect(auth.isLoading, isFalse);
+      expect(auth.status, equals(AuthStatus.unauthenticated));
     });
   });
 }

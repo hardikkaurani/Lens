@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// Exception thrown when secure hardware keystore or keychain storage operations fail.
@@ -47,8 +48,9 @@ class SecureAuthTokenStorage implements AuthTokenStorage {
     if (backendAuthority == null || backendAuthority.trim().isEmpty) {
       return _keyToken;
     }
-    final clean = backendAuthority.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_\-\.]'), '_');
-    return '${_keyToken}_$clean';
+    final normalized = backendAuthority.trim().toLowerCase();
+    final encoded = base64Url.encode(utf8.encode(normalized)).replaceAll('=', '');
+    return '${_keyToken}_$encoded';
   }
 
   @override
@@ -75,6 +77,7 @@ class SecureAuthTokenStorage implements AuthTokenStorage {
         if (token != null && token.trim().isNotEmpty) {
           return token.trim();
         }
+        return null;
       }
       final defaultToken = await _storage.read(key: _keyToken);
       if (defaultToken == null || defaultToken.trim().isEmpty) return null;
@@ -90,8 +93,9 @@ class SecureAuthTokenStorage implements AuthTokenStorage {
       if (backendAuthority != null && backendAuthority.trim().isNotEmpty) {
         final key = formatKey(backendAuthority);
         await _storage.delete(key: key);
+      } else {
+        await _storage.delete(key: _keyToken);
       }
-      await _storage.delete(key: _keyToken);
     } catch (e) {
       throw AuthStorageException('Failed to clear authentication token from secure storage', e);
     }
@@ -106,20 +110,27 @@ class SecureAuthTokenStorage implements AuthTokenStorage {
 
 /// Fast in-memory storage implementation for automated widget and unit tests.
 class InMemoryAuthTokenStorage implements AuthTokenStorage {
+  static const String _keyToken = 'lens_access_token';
   final Map<String, String> _tokens = {};
 
-  InMemoryAuthTokenStorage([String? initialToken]) {
+  InMemoryAuthTokenStorage([String? initialToken, String? backendAuthority]) {
     if (initialToken != null && initialToken.trim().isNotEmpty) {
-      _tokens['lens_access_token'] = initialToken.trim();
+      final trimmed = initialToken.trim();
+      if (backendAuthority != null && backendAuthority.trim().isNotEmpty) {
+        _tokens[formatKey(backendAuthority)] = trimmed;
+      } else {
+        _tokens[_keyToken] = trimmed;
+      }
     }
   }
 
   static String formatKey(String? backendAuthority) {
     if (backendAuthority == null || backendAuthority.trim().isEmpty) {
-      return 'lens_access_token';
+      return _keyToken;
     }
-    final clean = backendAuthority.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_\-\.]'), '_');
-    return 'lens_access_token_$clean';
+    final normalized = backendAuthority.trim().toLowerCase();
+    final encoded = base64Url.encode(utf8.encode(normalized)).replaceAll('=', '');
+    return '${_keyToken}_$encoded';
   }
 
   @override
@@ -127,7 +138,11 @@ class InMemoryAuthTokenStorage implements AuthTokenStorage {
     final trimmed = token.trim();
     final key = formatKey(backendAuthority);
     if (trimmed.isEmpty) {
-      _tokens.remove(key);
+      if (backendAuthority != null && backendAuthority.trim().isNotEmpty) {
+        _tokens.remove(key);
+      } else {
+        _tokens.remove(_keyToken);
+      }
     } else {
       _tokens[key] = trimmed;
     }
@@ -137,11 +152,9 @@ class InMemoryAuthTokenStorage implements AuthTokenStorage {
   Future<String?> getToken({String? backendAuthority}) async {
     if (backendAuthority != null && backendAuthority.trim().isNotEmpty) {
       final key = formatKey(backendAuthority);
-      if (_tokens.containsKey(key)) {
-        return _tokens[key];
-      }
+      return _tokens[key];
     }
-    return _tokens['lens_access_token'];
+    return _tokens[_keyToken];
   }
 
   @override
@@ -149,8 +162,9 @@ class InMemoryAuthTokenStorage implements AuthTokenStorage {
     if (backendAuthority != null && backendAuthority.trim().isNotEmpty) {
       final key = formatKey(backendAuthority);
       _tokens.remove(key);
+    } else {
+      _tokens.remove(_keyToken);
     }
-    _tokens.remove('lens_access_token');
   }
 
   @override

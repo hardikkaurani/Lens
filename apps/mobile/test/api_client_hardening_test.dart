@@ -20,7 +20,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       // Execute health check with 1ms timeout to induce TimeoutException deterministically
       expect(
@@ -40,7 +40,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       expect(
         () => client.checkHealth(),
@@ -56,7 +56,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       expect(
         () => client.checkHealth(),
@@ -76,7 +76,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       expect(
         () => client.checkHealth(),
@@ -109,7 +109,7 @@ void main() {
         });
         final client = ApiClient(
           httpClient: mockHttp,
-          tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+          tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
         );
 
         try {
@@ -136,7 +136,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       try {
         await client.checkHealth();
@@ -162,7 +162,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       final res = await client.checkHealthForUrl('http://192.168.1.50:8000');
       expect(res['status'], 'ok');
@@ -195,7 +195,7 @@ void main() {
 
       final client = ApiClient(
         httpClient: mockHttp,
-        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token', '10.0.2.2:8000'),
       );
       final payload = CaptureCreate(
         sourceType: SourceType.url,
