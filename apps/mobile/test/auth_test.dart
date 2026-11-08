@@ -1396,6 +1396,90 @@ void main() {
       expect(auth.isRestoring, isFalse);
     });
 
+    test('delayed 401 token clearance failure during restoreSession sets restorationFailed and records storageCleanupError', () async {
+      final storage = ControlledAuthTokenStorage();
+      await storage.saveToken('expired_stored_token', backendAuthority: 'auth-a.lens.internal');
+      storage.failOnClear = true;
+      final auth = AuthService(storage: storage);
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      final restoreFuture = auth.restoreSession(
+        () async => throw const ApiException(statusCode: 401, message: 'Token expired or revoked'),
+        backendAuthority: 'auth-a.lens.internal',
+      );
+
+      await clearStarted.future;
+      expect(auth.isRestoring, isTrue);
+
+      // Complete the gate to let clearToken throw AuthStorageException
+      clearGate.complete();
+      await restoreFuture;
+
+      expect(auth.isRestoring, isFalse);
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+      expect(auth.isRestorationFailed, isTrue);
+      expect(auth.hasStorageCleanupError, isTrue);
+      expect(auth.storageCleanupError, isNotNull);
+      expect(auth.storageCleanupError?.message, contains('Simulated keystore clear failure'));
+      expect(auth.failedCleanupAuthority, equals('auth-a.lens.internal'));
+
+      // Storage recovers; user retries cleanup
+      storage.failOnClear = false;
+      await auth.retryStorageCleanup();
+      expect(auth.hasStorageCleanupError, isFalse);
+      expect(auth.storageCleanupError, isNull);
+      expect(auth.failedCleanupAuthority, isNull);
+      expect(await storage.getToken(backendAuthority: 'auth-a.lens.internal'), isNull);
+    });
+
+    test('replacement login survives delayed 401 token clearance failure during restoreSession without corrupting new session', () async {
+      final storage = ControlledAuthTokenStorage();
+      await storage.saveToken('expired_stored_token', backendAuthority: 'auth-a.lens.internal');
+      storage.failOnClear = true;
+      final auth = AuthService(storage: storage);
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      final restoreFuture = auth.restoreSession(
+        () async => throw const ApiException(statusCode: 401, message: 'Token expired or revoked'),
+        backendAuthority: 'auth-a.lens.internal',
+      );
+
+      await clearStarted.future;
+
+      // Replacement login arrives while delayed clearToken is in-flight
+      const replacementUser = User(id: 'u-replacement-2', email: 'replacement2@lens.app', isActive: true);
+      await auth.setSession(
+        user: replacementUser,
+        token: 'jwt_replacement_token_2',
+        backendAuthority: 'auth-b.lens.internal',
+      );
+
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('replacement2@lens.app'));
+
+      // Now complete the delayed clear, which throws AuthStorageException
+      clearGate.complete();
+      await restoreFuture;
+
+      // Assert: Replacement session is NOT corrupted by the old session's cleanup failure
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('replacement2@lens.app'));
+      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
+      expect(auth.hasStorageCleanupError, isFalse);
+      expect(auth.storageCleanupError, isNull);
+      expect(auth.failedCleanupAuthority, isNull);
+      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('jwt_replacement_token_2'));
+    });
+
     test('Test C: genuine current-session expiry clears the correct authority token and transitions to unauthenticated', () async {
       final storage = InMemoryAuthTokenStorage();
       await storage.saveToken('global_safe_token');

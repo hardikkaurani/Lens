@@ -281,7 +281,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
 
     it("clears session cookie on backend 401 response", async () => {
       vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("expired_token");
-      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie").mockResolvedValueOnce();
+      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie").mockResolvedValueOnce(true);
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ detail: "Token expired" }), {
@@ -305,10 +305,8 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
     });
 
     it("preserves replacement session cookie when 401 returns for stale token", async () => {
-      vi.spyOn(serverAuth, "getStoredToken")
-        .mockResolvedValueOnce("stale_token")
-        .mockResolvedValueOnce("newer_token_from_login");
-      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie");
+      serverAuth.recordTokenIssued("newer_token_from_login");
+      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("stale_token");
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ detail: "Token expired" }), {
@@ -325,21 +323,26 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
         params: Promise.resolve({ path: ["captures"] }),
       });
       expect(res.status).toBe(401);
-      expect(clearAuthCookieSpy).not.toHaveBeenCalled();
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
       expect(res.headers.get("Set-Cookie")).toBeNull();
     });
 
-    it("13. Delayed 401 response cannot remove a replacement login cookie using request-scoped cookie snapshots and a shared browser cookie jar", async () => {
-      // Shared browser cookie jar
-      const browserCookieJar = new Map<string, string>();
-      browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_a");
-      serverAuth.recordTokenIssued("token_a");
+    it("13. Delayed 401 response cannot remove a replacement login cookie (real proxy response and cookie mutation)", async () => {
+      // Helper creating structurally valid test JWTs with placeholder signatures
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.test_sig_${sub}_${seq}`;
+      }
 
-      // Request 1 takes a snapshot of cookies carrying token_a
-      const req1Token = browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)!;
-      vi.spyOn(serverAuth, "getStoredToken").mockImplementation(async () => req1Token);
+      const tokenA = makeTestJwt("user_alice", 1);
+      const tokenB = makeTestJwt("user_alice", 2);
 
-      // Backend 401 is delayed
+      // Alice initially logs in with tokenA
+      serverAuth.recordTokenIssued(tokenA);
+      mockCookieStore.get.mockReturnValue({ value: tokenA });
+
+      // Request 1 arrives at the proxy carrying tokenA
       let finishBackendRes!: (res: Response) => void;
       const delayedBackendFetch = new Promise<Response>((resolve) => {
         finishBackendRes = resolve;
@@ -353,11 +356,12 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
         params: Promise.resolve({ path: ["captures"] }),
       });
 
-      // While Request 1 is delayed, a replacement login occurs for Session B
-      browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_b");
-      serverAuth.recordTokenIssued("token_b");
+      // While Request 1's upstream fetch is delayed, Alice completes a replacement login with tokenB
+      // This sets the new cookie in mockCookieStore and updates the registry
+      await serverAuth.setAuthCookie(tokenB, 3600);
+      mockCookieStore.get.mockReturnValue({ value: tokenB });
 
-      // Request 1's backend 401 response finally returns
+      // Request 1's upstream backend fetch returns 401 Unauthorized for tokenA
       finishBackendRes(
         new Response(JSON.stringify({ detail: "Token A expired" }), {
           status: 401,
@@ -368,49 +372,50 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       const res1 = await proxyPromise;
       expect(res1.status).toBe(401);
 
-      // If res1 sent a Set-Cookie header to clear the cookie, it would clear browserCookieJar
-      const setCookie = res1.headers.get("Set-Cookie");
-      if (setCookie && setCookie.includes("Max-Age=0")) {
-        browserCookieJar.delete(serverAuth.LENS_TOKEN_COOKIE);
-      }
-
-      // Assert: Replacement token_b survives in the shared browser cookie jar!
-      expect(browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)).toBe("token_b");
+      // REAL ROUTE ASSERTIONS:
+      // 1. The proxy response must NOT set Set-Cookie: Max-Age=0 because tokenA was superseded!
       expect(res1.headers.get("Set-Cookie")).toBeNull();
+
+      // 2. The cookieStore.delete must NEVER have been called for the superseded token
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+
+      // 3. The replacement tokenB is affirmatively verified as active
+      expect(serverAuth.isLatestToken(tokenB)).toBe(true);
+      expect(serverAuth.isLatestToken(tokenA)).toBe(false);
     });
 
-    it("14. Per-user session isolation: User A replacement login does not supersede User B active session", async () => {
-      function makeJwt(sub: string, seq: number): string {
+    it("14. Per-user session isolation: Alice replacement login does not supersede Bob active session", async () => {
+      // Helper creating structurally valid test JWTs with placeholder signatures
+      // (BFF tracks identity by sub; backend cryptographically verifies HMAC signatures)
+      function makeTestJwt(sub: string, seq: number): string {
         const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
         const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
-        return `${header}.${payload}.sig_${sub}_${seq}`;
+        return `${header}.${payload}.test_sig_${sub}_${seq}`;
       }
 
-      const tokenAlice1 = makeJwt("user_alice", 1);
-      const tokenBob1 = makeJwt("user_bob", 1);
+      const tokenAlice1 = makeTestJwt("user_alice", 1);
+      const tokenBob1 = makeTestJwt("user_bob", 1);
 
-      // Both users establish sessions
+      // Both users establish independent sessions
       serverAuth.recordTokenIssued(tokenAlice1);
       serverAuth.recordTokenIssued(tokenBob1);
 
       expect(serverAuth.isLatestToken(tokenAlice1)).toBe(true);
       expect(serverAuth.isLatestToken(tokenBob1)).toBe(true);
 
-      // User A receives a replacement login session (e.g. from password refresh or relogin)
-      const tokenAlice2 = makeJwt("user_alice", 2);
+      // Alice receives a replacement session (e.g. from relogin or token refresh)
+      const tokenAlice2 = makeTestJwt("user_alice", 2);
       serverAuth.recordTokenIssued(tokenAlice2);
 
-      // User A's old token is superseded, while new token is active
+      // Alice's old token is superseded, while her new token is active
       expect(serverAuth.isLatestToken(tokenAlice1)).toBe(false);
       expect(serverAuth.isLatestToken(tokenAlice2)).toBe(true);
 
-      // User B's session remains completely valid and un-superseded
+      // Bob's session remains completely valid and un-superseded
       expect(serverAuth.isLatestToken(tokenBob1)).toBe(true);
 
-      // Verify proxy behavior for Alice's superseded token
-      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue(tokenAlice1);
-      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie");
-
+      // Verify proxy behavior for Alice's superseded token: does not clear cookies
+      mockCookieStore.get.mockReturnValue({ value: tokenAlice1 });
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ detail: "Token Alice 1 expired" }), {
           status: 401,
@@ -427,9 +432,189 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       });
 
       expect(res.status).toBe(401);
-      // Superseded token must NOT clear cookies
-      expect(clearAuthCookieSpy).not.toHaveBeenCalled();
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
       expect(res.headers.get("Set-Cookie")).toBeNull();
+      // Bob's token is STILL valid
+      expect(serverAuth.isLatestToken(tokenBob1)).toBe(true);
+    });
+
+    it("15. Check-then-delete async boundary race: clearAuthCookie aborts if replacement login completes while awaiting cookieStore", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.test_sig_${sub}_${seq}`;
+      }
+
+      const tokenOld = makeTestJwt("user_race", 1);
+      const tokenNew = makeTestJwt("user_race", 2);
+
+      serverAuth.recordTokenIssued(tokenOld);
+      expect(serverAuth.isLatestToken(tokenOld)).toBe(true);
+
+      // Simulate async boundary inside clearAuthCookie: cookies() takes a microtask turn
+      let resolveCookies!: () => void;
+      const delayedCookiesPromise = new Promise<typeof mockCookieStore>((resolve) => {
+        resolveCookies = () => resolve(mockCookieStore);
+      });
+
+      const { cookies } = await import("next/headers");
+      vi.mocked(cookies).mockImplementationOnce(() => delayedCookiesPromise as any);
+
+      // Start clearAuthCookie for tokenOld
+      const clearPromise = serverAuth.clearAuthCookie(tokenOld);
+
+      // While clearAuthCookie is awaiting cookies(), a replacement login arrives and establishes tokenNew!
+      serverAuth.recordTokenIssued(tokenNew);
+      expect(serverAuth.isLatestToken(tokenNew)).toBe(true);
+      expect(serverAuth.isLatestToken(tokenOld)).toBe(false);
+
+      // Now cookies() resolves
+      resolveCookies();
+      const cleared = await clearPromise;
+
+      // Assert: clearAuthCookie detected the concurrent replacement and aborted deletion!
+      expect(cleared).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      // New token remains registered and protected
+      expect(serverAuth.isLatestToken(tokenNew)).toBe(true);
+    });
+
+    it("16. Cold start / process restart fails closed: unknown token cannot clear cookies", async () => {
+      serverAuth.resetLatestToken(); // Simulates fresh instance or restarted process
+
+      const unknownToken = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url") +
+        "." +
+        Buffer.from(JSON.stringify({ sub: "user_restart", exp: 9999999999 })).toString("base64url") +
+        ".sig";
+
+      // Registry has no record for this user
+      expect(serverAuth.isLatestToken(unknownToken)).toBe(false);
+
+      // clearAuthCookie with unknown token must fail closed and return false
+      const cleared = await serverAuth.clearAuthCookie(unknownToken);
+      expect(cleared).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+
+      // Proxy handling 401 with unknown token returns 401 without Set-Cookie
+      mockCookieStore.get.mockReturnValue({ value: unknownToken });
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Token invalid" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        headers: { host: "localhost:3000" },
+      });
+      const res = await proxyGet(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get("Set-Cookie")).toBeNull();
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+    });
+
+    it("17. Multi-instance isolation: separate worker instances without shared state fail closed safely", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const tokenAlice1 = makeTestJwt("user_alice", 1);
+      const tokenAlice2 = makeTestJwt("user_alice", 2);
+
+      // Worker A (instanceA) and Worker B (instanceB) have independent registries
+      const registryInstanceA = new serverAuth.SessionTokenRegistry();
+      const registryInstanceB = new serverAuth.SessionTokenRegistry();
+
+      // Worker A handled Alice's replacement login
+      registryInstanceA.recordIssued(tokenAlice2);
+      expect(registryInstanceA.isTokenCurrent(tokenAlice1)).toBe(false);
+      expect(registryInstanceA.isTokenCurrent(tokenAlice2)).toBe(true);
+
+      // Worker B receives a delayed request with tokenAlice1.
+      // Worker B has no record of tokenAlice2, but MUST fail closed:
+      // It does NOT assume tokenAlice1 is current just because its registry is empty!
+      expect(registryInstanceB.isTokenCurrent(tokenAlice1)).toBe(false);
+      expect(registryInstanceB.isTokenCurrent(tokenAlice2)).toBe(false);
+    });
+
+    it("18. Invalidation semantics and compare-and-clear (CAS) registry deletion", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const token1 = makeTestJwt("user_cas", 1);
+      const token2 = makeTestJwt("user_cas", 2);
+
+      serverAuth.recordTokenIssued(token1);
+      serverAuth.recordTokenIssued(token2); // Superseded token1
+
+      // Stale clearing attempt for token1: must NOT delete token2 from registry!
+      serverAuth.recordTokenCleared(token1);
+      expect(serverAuth.isLatestToken(token2)).toBe(true);
+      expect(serverAuth.isLatestToken(token1)).toBe(false);
+
+      // Clearing active token2: successfully clears user entry
+      serverAuth.recordTokenCleared(token2);
+      expect(serverAuth.isLatestToken(token2)).toBe(false);
+
+      // Explicit logout route: unconditionally clears cookie and cleans registry
+      mockCookieStore.get.mockReturnValue({ value: token2 });
+      const logoutReq = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: { host: "localhost:3000", origin: "http://localhost:3000" },
+      });
+      const logoutRes = await logoutHandler(logoutReq);
+      expect(logoutRes.status).toBe(200);
+      expect(mockCookieStore.delete).toHaveBeenCalledWith(serverAuth.LENS_TOKEN_COOKIE);
+    });
+
+    it("19. parseJwtClaims strictly decodes claims and safely rejects malformed or untrusted inputs", () => {
+      // Valid JWT format
+      const validPayload = { sub: "usr_42", email: "alice@lens.app", iat: 1000, exp: 2000 };
+      const validJwt = "eyJhbGciOiJIUzI1NiJ9." +
+        Buffer.from(JSON.stringify(validPayload)).toString("base64url") +
+        ".signature_placeholder";
+
+      const claims = serverAuth.parseJwtClaims(validJwt);
+      expect(claims).not.toBeNull();
+      expect(claims?.sub).toBe("usr_42");
+      expect(claims?.email).toBe("alice@lens.app");
+
+      // Malformed: Not 3 dot-separated parts
+      expect(serverAuth.parseJwtClaims("only-one-part")).toBeNull();
+      expect(serverAuth.parseJwtClaims("two.parts")).toBeNull();
+      expect(serverAuth.parseJwtClaims("four.parts.here.extra")).toBeNull();
+
+      // Malformed: Invalid base64url characters
+      expect(serverAuth.parseJwtClaims("header.invalid!@#$base64.sig")).toBeNull();
+
+      // Malformed: Non-JSON payload
+      const nonJsonJwt = "header." + Buffer.from("this is not json").toString("base64url") + ".sig";
+      expect(serverAuth.parseJwtClaims(nonJsonJwt)).toBeNull();
+
+      // Malformed: Missing sub claim
+      const noSubJwt = "header." + Buffer.from(JSON.stringify({ email: "no-sub@lens.app" })).toString("base64url") + ".sig";
+      expect(serverAuth.parseJwtClaims(noSubJwt)).toBeNull();
+
+      // Malformed: Non-string sub claim
+      const numericSubJwt = "header." + Buffer.from(JSON.stringify({ sub: 12345 })).toString("base64url") + ".sig";
+      expect(serverAuth.parseJwtClaims(numericSubJwt)).toBeNull();
+
+      // Malformed: Empty or whitespace sub claim
+      const emptySubJwt = "header." + Buffer.from(JSON.stringify({ sub: "   " })).toString("base64url") + ".sig";
+      expect(serverAuth.parseJwtClaims(emptySubJwt)).toBeNull();
+
+      // Null, empty string, non-string token
+      expect(serverAuth.parseJwtClaims("")).toBeNull();
+      expect(serverAuth.parseJwtClaims(null as any)).toBeNull();
+      expect(serverAuth.parseJwtClaims(undefined as any)).toBeNull();
     });
 
     it("allows /captures when backend base URL contains /v1 prefix", async () => {

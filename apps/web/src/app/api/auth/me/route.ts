@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clearAuthCookie, getBackendApiUrl, getStoredToken, isLatestToken } from "@/lib/server-auth";
+import { clearAuthCookie, getBackendApiUrl, getStoredToken } from "@/lib/server-auth";
 
 export async function GET(_request: NextRequest) {
   const token = await getStoredToken();
@@ -22,10 +22,7 @@ export async function GET(_request: NextRequest) {
 
     if (res.status === 401) {
       // Purge invalid cookie only if it has not already been replaced by a newer session
-      const currentToken = await getStoredToken();
-      if (currentToken === token && isLatestToken(token)) {
-        await clearAuthCookie(token);
-      }
+      await clearAuthCookie(token);
       return NextResponse.json(
         { detail: "Session expired or invalid credentials." },
         { status: 401 }

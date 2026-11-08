@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clearAuthCookie, verifyCsrfOrigin } from "@/lib/server-auth";
+import { clearAuthCookie, getStoredToken, recordTokenCleared, verifyCsrfOrigin } from "@/lib/server-auth";
 
 export async function POST(request: NextRequest) {
   if (!verifyCsrfOrigin(request)) {
@@ -10,7 +10,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const token = await getStoredToken();
     await clearAuthCookie();
+    if (token) {
+      recordTokenCleared(token);
+    }
   } catch {
     return NextResponse.json(
       { detail: "Failed to clear session authentication cookie." },

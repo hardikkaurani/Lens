@@ -247,3 +247,19 @@ The following table documents the verification, status, and resolution evidence 
 4. **Web Auth `getMe()` Timeout & Abort Propagation**:
    - `apiClient.getMe()` implements a 15-second default timeout via an internal `AbortController`.
    - Propagates caller `AbortSignal` cancellation accurately without converting user cancellations into timeout errors (`isTimeout: false`).
+
+### 5.5 Web Session Invalidation Correctness & Mobile FIFO Hardening
+
+1. **Per-User Session Tracking & CAS Invalidation (`SessionTokenRegistry`)**:
+   - `SessionTokenRegistry` tracks active tokens isolated by user identity hint (`sub`), preventing cross-user session collisions (Alice replacement login does not supersede Bob's active session).
+   - Invalidation uses atomic compare-and-clear (CAS): `recordTokenCleared(token)` only removes a user's entry if the cleared token matches the active token in the registry, preventing stale 401s from purging newer replacement sessions.
+2. **Double-Checked Async Boundary Protection (`clearAuthCookie`)**:
+   - In `clearAuthCookie(expectedToken)`, token currency (`isLatestToken`) is checked both before and after `await cookies()`. If a replacement login completes on the event loop during the asynchronous cookie store access, cookie deletion is aborted and returns `false`.
+   - Reverse proxy `/api/proxy/[...path]` only emits `Set-Cookie: Max-Age=0` if `clearAuthCookie` affirmatively succeeds, preventing browser cookie jar wipes on stale requests.
+3. **Fail-Closed Multi-Instance & Cold Start Resilience**:
+   - In uncoordinated multi-instance or serverless environments (or after process restart), `isTokenCurrent()` fails closed (`false`) when a token has no registry entry on that worker, preventing arbitrary instances from wiping active cookies.
+4. **Untrusted Claim Demarcation**:
+   - `parseJwtClaims()` performs structural decoding only; claims including `sub` are untrusted hints used solely for local routing. Cryptographic authenticity and expiration are strictly validated downstream by FastAPI backend HMAC-SHA256 verification.
+5. **Mobile FIFO Keystore Serialization & Delayed Restoration Cleanup Resilience**:
+   - `AuthService._runStorageMutation` reserves queue tail gates synchronously before yielding to `await previous`, guaranteeing strict FIFO execution and preventing concurrent waiters from racing.
+   - Delayed 401 token cleanup failure during `restoreSession` records `storageCleanupError` and transitions to `restorationFailed` with UI retry; if a replacement login arrives while cleanup is pending, the replacement session is preserved without corruption.

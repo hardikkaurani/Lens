@@ -116,17 +116,26 @@ export interface JwtSessionClaims {
 
 /**
  * Extract claims from a JWT access token without cryptographic signature verification
- * (backend FastAPI handles signature validation). Used for session identity
- * and multi-tenant user isolation.
+ * (backend FastAPI handles cryptographic HMAC verification using its secret key).
+ * Used strictly for client-side session identity routing and local race prevention.
+ * Returns null if token is malformed, not 3 segments, non-JSON, or missing a non-empty sub.
  */
 export function parseJwtClaims(token: string): JwtSessionClaims | null {
   try {
-    const parts = token.split(".");
+    if (!token || typeof token !== "string") return null;
+    const parts = token.trim().split(".");
     if (parts.length !== 3) return null;
     const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const json = Buffer.from(payloadBase64, "base64").toString("utf-8");
+    const padLength = (4 - (payloadBase64.length % 4)) % 4;
+    const padded = payloadBase64 + "=".repeat(padLength);
+    const json = Buffer.from(padded, "base64").toString("utf-8");
     const parsed = JSON.parse(json);
-    if (parsed && typeof parsed === "object" && typeof parsed.sub === "string") {
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.sub === "string" &&
+      parsed.sub.trim().length > 0
+    ) {
       return parsed as JwtSessionClaims;
     }
     return null;
@@ -139,9 +148,14 @@ export function parseJwtClaims(token: string): JwtSessionClaims | null {
  * Per-user session tracking registry to prevent stale, delayed 401 responses
  * from clearing newer replacement sessions issued to the same user.
  *
- * Session identity is established via the JWT 'sub' (User ID) claim.
+ * Session identity is tracked via the JWT 'sub' (User ID) claim hint.
  * Different users operate in strict isolation: User A's login or expiry
  * never interferes with User B's active session.
+ *
+ * Fail-closed semantics: If an instance or worker has no record of a token's issuance
+ * (e.g. after a process restart or on an uncoordinated serverless instance),
+ * isTokenCurrent() fails closed (returns false), preventing unverified tokens from
+ * unilaterally clearing cookies on other workers.
  */
 export class SessionTokenRegistry {
   private activeUserTokens = new Map<string, string>();
@@ -159,12 +173,23 @@ export class SessionTokenRegistry {
 
   recordCleared(token?: string | null): void {
     if (token) {
-      const claims = parseJwtClaims(token.trim());
+      const trimmed = token.trim();
+      const claims = parseJwtClaims(trimmed);
       if (claims?.sub) {
-        this.activeUserTokens.delete(claims.sub);
+        // Compare-and-clear (CAS): Only delete if the active token for this user
+        // matches the token being cleared. If a replacement token was registered,
+        // we MUST NOT delete the newer token's registration!
+        if (this.activeUserTokens.get(claims.sub) === trimmed) {
+          this.activeUserTokens.delete(claims.sub);
+        }
         return;
       }
+      if (this.fallbackLatestToken === trimmed) {
+        this.fallbackLatestToken = null;
+      }
+      return;
     }
+    // When called without a token (explicit global logout), clear fallback
     this.fallbackLatestToken = null;
   }
 
@@ -174,12 +199,11 @@ export class SessionTokenRegistry {
     const claims = parseJwtClaims(trimmed);
     if (claims?.sub) {
       const latestForUser = this.activeUserTokens.get(claims.sub);
-      if (latestForUser === undefined) {
-        return true;
-      }
+      // FAIL-CLOSED: If not affirmatively registered as the active token for this user,
+      // return false. This prevents uncoordinated instances, cold starts, and stale requests
+      // from falsely assuming an unknown token is current and wiping newer browser sessions.
       return latestForUser === trimmed;
     }
-    if (this.fallbackLatestToken === null) return true;
     return this.fallbackLatestToken === trimmed;
   }
 
@@ -247,12 +271,32 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
 
 /**
  * Clear the authentication cookie upon logout or token expiry.
+ * If expectedToken is provided, conditionally clears ONLY if the token is still the active token
+ * for its identity, preventing stale 401s from invalidating newer replacement logins.
+ * Re-checks before and after awaiting cookieStore to prevent async boundary races.
  * Throws when cookie store deletion fails so routes never report false success.
+ *
+ * @returns true if the cookie was cleared; false if skipped because expectedToken was superseded or unverified.
  */
-export async function clearAuthCookie(token?: string | null): Promise<void> {
+export async function clearAuthCookie(expectedToken?: string | null): Promise<boolean> {
+  if (expectedToken !== undefined && expectedToken !== null) {
+    if (!isLatestToken(expectedToken)) {
+      return false;
+    }
+  }
+
   const cookieStore = await cookies();
+
+  // Re-check after awaiting cookieStore in case a concurrent login completed on the event loop
+  if (expectedToken !== undefined && expectedToken !== null) {
+    if (!isLatestToken(expectedToken)) {
+      return false;
+    }
+  }
+
   cookieStore.delete(LENS_TOKEN_COOKIE);
-  recordTokenCleared(token);
+  recordTokenCleared(expectedToken);
+  return true;
 }
 
 /**
