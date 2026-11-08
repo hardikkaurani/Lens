@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:lens_mobile/core/auth/auth_token_storage.dart';
 import 'package:lens_mobile/core/config/api_config.dart';
 import 'package:lens_mobile/core/errors/api_exception.dart';
 import 'package:lens_mobile/core/network/api_client.dart';
@@ -17,7 +18,10 @@ void main() {
         return http.Response('{"status":"ok"}', 200);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       // Execute health check with 1ms timeout to induce TimeoutException deterministically
       expect(
         () => client.checkHealthForUrl(
@@ -34,7 +38,10 @@ void main() {
         throw const SocketException('Connection refused');
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       expect(
         () => client.checkHealth(),
         throwsA(isA<ApiException>().having((e) => e.isNetworkError, 'isNetworkError', isTrue)),
@@ -47,7 +54,10 @@ void main() {
         return http.Response('<!DOCTYPE html><html><body>Error 502</body></html>', 200);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       expect(
         () => client.checkHealth(),
         throwsA(isA<ApiException>().having(
@@ -64,7 +74,10 @@ void main() {
         return http.Response('["not", "a", "map"]', 200);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       expect(
         () => client.checkHealth(),
         throwsA(isA<ApiException>().having(
@@ -94,7 +107,10 @@ void main() {
         final mockHttp = MockClient((request) async {
           return http.Response('', status);
         });
-        final client = ApiClient(httpClient: mockHttp);
+        final client = ApiClient(
+          httpClient: mockHttp,
+          tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+        );
 
         try {
           await client.getCapture('test-id');
@@ -118,7 +134,10 @@ void main() {
         return http.Response(leakedPayload, 500);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       try {
         await client.checkHealth();
         fail('Should have thrown ApiException');
@@ -141,7 +160,10 @@ void main() {
         return http.Response('{"status":"ok","api":"ok","database":"ok","redis":"ok"}', 200);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       final res = await client.checkHealthForUrl('http://192.168.1.50:8000');
       expect(res['status'], 'ok');
       expect(config.baseUrl, originalBaseUrl); // Unchanged
@@ -171,7 +193,10 @@ void main() {
         return http.Response('{"detail":"Database dead"}', 500);
       });
 
-      final client = ApiClient(httpClient: mockHttp);
+      final client = ApiClient(
+        httpClient: mockHttp,
+        tokenStorage: InMemoryAuthTokenStorage('mock-valid-token'),
+      );
       final payload = CaptureCreate(
         sourceType: SourceType.url,
         originalUrl: 'https://example.com/test',

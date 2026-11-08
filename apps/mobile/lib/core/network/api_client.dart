@@ -45,9 +45,13 @@ class ApiClient {
     };
     if (requireAuth) {
       final token = await (_tokenStorage?.getToken() ?? _authService?.storage.getToken());
-      if (token != null && token.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $token';
+      if (token == null || token.trim().isEmpty) {
+        throw const ApiException(
+          statusCode: 401,
+          message: 'Authentication required. No access token available.',
+        );
       }
+      headers['Authorization'] = 'Bearer ${token.trim()}';
     }
     return headers;
   }
