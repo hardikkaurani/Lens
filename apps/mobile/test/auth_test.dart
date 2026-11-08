@@ -692,4 +692,273 @@ void main() {
       fakeShare.dispose();
     });
   });
+
+  group('7. Hardening Regression Tests (Stage 19.3.1)', () {
+    test('AuthStorageException on read sets restorationFailed and preserves session state', () async {
+      final storage = FailingAuthTokenStorage()..failOnGet = true;
+      final auth = AuthService(storage: storage);
+
+      await auth.restoreSession(() async => const User(id: 'u-1', email: 'test@lens.app', isActive: true));
+
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+      expect(auth.isAuthenticated, isFalse);
+    });
+
+    test('AuthStorageException on clear during logout propagates and preserves session', () async {
+      final storage = FailingAuthTokenStorage()..failOnClear = true;
+      final auth = AuthService(storage: storage);
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'test@lens.app', isActive: true),
+        token: 'token123',
+      );
+
+      expect(() => auth.logout(), throwsA(isA<AuthStorageException>()));
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('test@lens.app'));
+    });
+
+    test('slow session restoration does not overwrite newer login', () async {
+      final storage = InMemoryAuthTokenStorage('old_token');
+      final auth = AuthService(storage: storage);
+
+      final completer = Completer<User>();
+      final restoreFuture = auth.restoreSession(() => completer.future);
+
+      // User performs a new login while restoration is still in-flight
+      const newUser = User(id: 'u-new', email: 'new@lens.app', isActive: true);
+      await auth.setSession(user: newUser, token: 'new_token');
+
+      // Now the old restoreSession completes with an older user
+      completer.complete(const User(id: 'u-old', email: 'old@lens.app', isActive: true));
+      await restoreFuture;
+
+      // Newer session MUST be preserved!
+      expect(auth.currentUser?.email, equals('new@lens.app'));
+      expect(auth.isAuthenticated, isTrue);
+    });
+
+    test('stale 401 response from older session does not clear replacement session', () async {
+      final storage = InMemoryAuthTokenStorage('token_a');
+      final auth = AuthService(storage: storage);
+
+      await auth.setSession(
+        user: const User(id: 'u-a', email: 'user-a@lens.app', isActive: true),
+        token: 'token_a',
+      );
+      final sessionAId = auth.sessionId;
+
+      // User logs into Session B
+      await auth.setSession(
+        user: const User(id: 'u-b', email: 'user-b@lens.app', isActive: true),
+        token: 'token_b',
+      );
+
+      // An in-flight request from Session A finally returns 401
+      await auth.handleSessionExpired(sessionAId);
+
+      // Session B must NOT be expired or cleared!
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('user-b@lens.app'));
+      expect(await storage.getToken(), equals('token_b'));
+    });
+
+    test('ApiClient rejects plain HTTP for remote sensitive endpoints and accepts HTTPS or loopback', () async {
+      final storage = InMemoryAuthTokenStorage('token123');
+      final mockHttp = MockHttpClient((req) async => http.Response('{"captures": [], "total": 0, "limit": 15, "offset": 0}', 200));
+
+      // 1. Insecure remote HTTP -> Rejected
+      final insecureClient = ApiClient(
+        baseUrlOverride: 'http://remote.lens.app',
+        httpClient: mockHttp,
+        tokenStorage: storage,
+      );
+
+      expect(
+        () => insecureClient.listCaptures(),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 400)),
+      );
+
+      expect(
+        () => insecureClient.login(email: 'a@b.com', password: '123'),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 400)),
+      );
+
+      // 2. Secure HTTPS -> Allowed
+      final secureClient = ApiClient(
+        baseUrlOverride: 'https://remote.lens.app',
+        httpClient: mockHttp,
+        tokenStorage: storage,
+      );
+
+      final secureRes = await secureClient.listCaptures();
+      expect(secureRes, isNotNull);
+
+      // 3. Local loopback HTTP -> Allowed
+      final loopbackClient = ApiClient(
+        baseUrlOverride: 'http://127.0.0.1:8000',
+        httpClient: mockHttp,
+        tokenStorage: storage,
+      );
+
+      final loopbackRes = await loopbackClient.listCaptures();
+      expect(loopbackRes, isNotNull);
+    });
+
+    test('tokens are isolated by backend authority preventing cross-backend token reuse', () async {
+      final storage = InMemoryAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Login to backend Alpha
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'user@alpha.app', isActive: true),
+        token: 'token_alpha_secret',
+        backendAuthority: 'alpha.lens.app',
+      );
+
+      String? recordedAuthHeader;
+      final mockHttp = MockHttpClient((req) async {
+        recordedAuthHeader = req.headers['authorization'];
+        return http.Response('{"captures": [], "total": 0, "limit": 15, "offset": 0}', 200);
+      });
+
+      // Client connected to backend Alpha gets alpha token
+      final clientAlpha = ApiClient(
+        baseUrlOverride: 'https://alpha.lens.app',
+        httpClient: mockHttp,
+        authService: auth,
+      );
+      await clientAlpha.listCaptures();
+      expect(recordedAuthHeader, equals('Bearer token_alpha_secret'));
+
+      // Client connected to backend Beta MUST NOT get alpha token
+      final clientBeta = ApiClient(
+        baseUrlOverride: 'https://beta.lens.app',
+        httpClient: mockHttp,
+        authService: auth,
+      );
+
+      expect(
+        () => clientBeta.listCaptures(),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 401)),
+      );
+    });
+
+    testWidgets('LoginScreen ignores repeated submit taps while request is in-flight', (tester) async {
+      int loginCallCount = 0;
+      final completer = Completer<String>();
+      final mockHttp = MockHttpClient((req) async {
+        if (req.url.path.endsWith('/auth/login')) {
+          loginCallCount++;
+          final token = await completer.future;
+          return http.Response(jsonEncode({'access_token': token}), 200);
+        }
+        return http.Response(jsonEncode({'id': 'u-1', 'email': 'dup@lens.app', 'is_active': true}), 200);
+      });
+
+      final storage = InMemoryAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+      final client = ApiClient(httpClient: mockHttp, authService: auth);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: LoginScreen(
+              apiClient: client,
+              authService: auth,
+              onNavigateToRegister: () {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'Email Address'), 'dup@lens.app');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Password'), 'Password123!');
+
+      // Tap submit 3 times rapidly
+      await tester.tap(find.byType(FilledButton));
+      await tester.pump();
+      await tester.tap(find.byType(FilledButton));
+      await tester.pump();
+      await tester.tap(find.byType(FilledButton));
+      await tester.pump();
+
+      expect(loginCallCount, equals(1));
+
+      completer.complete('token_dup');
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('RegisterScreen displays clear notice when auto-login fails after account creation', (tester) async {
+      final mockHttp = MockHttpClient((req) async {
+        if (req.url.path.endsWith('/auth/register')) {
+          return http.Response(jsonEncode({'id': 'u-reg', 'email': 'new@lens.app', 'is_active': true}), 201);
+        }
+        if (req.url.path.endsWith('/auth/login')) {
+          return http.Response(jsonEncode({'detail': 'Temporary login service failure'}), 500);
+        }
+        return http.Response('{}', 200);
+      });
+
+      final storage = InMemoryAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+      final client = ApiClient(httpClient: mockHttp, authService: auth);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: RegisterScreen(
+              apiClient: client,
+              authService: auth,
+              onNavigateToLogin: () {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'Email Address'), 'new@lens.app');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Password (min. 8 characters)'), 'Password123!');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Confirm Password'), 'Password123!');
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Create Account'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Account created successfully, but automatic sign-in failed'), findsOneWidget);
+    });
+  });
+}
+
+class FailingAuthTokenStorage implements AuthTokenStorage {
+  bool failOnSave = false;
+  bool failOnGet = false;
+  bool failOnClear = false;
+
+  @override
+  Future<void> saveToken(String token, {String? backendAuthority}) async {
+    if (failOnSave) {
+      throw const AuthStorageException('Simulated keystore save failure');
+    }
+  }
+
+  @override
+  Future<String?> getToken({String? backendAuthority}) async {
+    if (failOnGet) {
+      throw const AuthStorageException('Simulated keystore read failure');
+    }
+    return null;
+  }
+
+  @override
+  Future<void> clearToken({String? backendAuthority}) async {
+    if (failOnClear) {
+      throw const AuthStorageException('Simulated keystore clear failure');
+    }
+  }
+
+  @override
+  Future<bool> hasToken({String? backendAuthority}) async {
+    if (failOnGet) {
+      throw const AuthStorageException('Simulated keystore read failure');
+    }
+    return false;
+  }
 }

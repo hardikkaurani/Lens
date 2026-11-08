@@ -19,6 +19,8 @@ class AuthService extends ChangeNotifier {
   AuthStatus _status = AuthStatus.initial;
   bool _isLoading = false;
   bool _isRestoring = false;
+  int _sessionId = 0;
+  String? _activeBackendAuthority;
 
   AuthService({AuthTokenStorage? storage})
       : _storage = storage ?? SecureAuthTokenStorage();
@@ -29,64 +31,98 @@ class AuthService extends ChangeNotifier {
   bool get isRestoring => _status == AuthStatus.restoring;
   bool get isRestorationFailed => _status == AuthStatus.restorationFailed;
   bool get isAuthenticated => _status == AuthStatus.authenticated && _currentUser != null;
+  int get sessionId => _sessionId;
+  String? get activeBackendAuthority => _activeBackendAuthority;
 
   AuthTokenStorage get storage => _storage;
 
   /// Initialize and attempt to restore previous session from persisted secure storage.
-  Future<void> restoreSession(Future<User> Function() fetchProfile) async {
+  Future<void> restoreSession(
+    Future<User> Function() fetchProfile, {
+    String? backendAuthority,
+  }) async {
     if (_isRestoring) return;
+    final int requestSessionId = _sessionId;
     _isRestoring = true;
     _status = AuthStatus.restoring;
     _isLoading = true;
     notifyListeners();
 
     try {
-      final hasToken = await _storage.hasToken();
+      final hasToken = await _storage.hasToken(backendAuthority: backendAuthority);
+      if (_sessionId != requestSessionId) return;
+
       if (!hasToken) {
         _status = AuthStatus.unauthenticated;
         _currentUser = null;
+        _activeBackendAuthority = null;
         return;
       }
 
       final profile = await fetchProfile();
+      if (_sessionId != requestSessionId) return;
+
       _currentUser = profile;
+      _activeBackendAuthority = backendAuthority;
       _status = AuthStatus.authenticated;
+    } on AuthStorageException catch (_) {
+      // Hardware keystore error or lock: PRESERVE tokens and transition to recoverable state
+      if (_sessionId != requestSessionId) return;
+      _status = AuthStatus.restorationFailed;
     } catch (e) {
+      if (_sessionId != requestSessionId) return;
+
       if (e is ApiException && e.isUnauthorized) {
         // Confirmed 401 Unauthorized: credentials/token invalid or revoked
-        await _storage.clearToken();
+        try {
+          await _storage.clearToken(backendAuthority: backendAuthority);
+        } catch (_) {}
         _currentUser = null;
+        _activeBackendAuthority = null;
         _status = AuthStatus.unauthenticated;
       } else {
-        // Network offline, timeout, 5xx server error, or local storage glitch:
+        // Network offline, timeout, 5xx server error, or connection failure:
         // PRESERVE the token and transition to recoverable restorationFailed state
         _status = AuthStatus.restorationFailed;
       }
     } finally {
-      _isLoading = false;
-      _isRestoring = false;
-      notifyListeners();
+      if (_sessionId == requestSessionId) {
+        _isLoading = false;
+        _isRestoring = false;
+        notifyListeners();
+      }
     }
   }
 
   /// Clean retry path for restoring session after connection returns.
-  Future<void> retryRestoreSession(Future<User> Function() fetchProfile) async {
-    await restoreSession(fetchProfile);
+  Future<void> retryRestoreSession(
+    Future<User> Function() fetchProfile, {
+    String? backendAuthority,
+  }) async {
+    await restoreSession(fetchProfile, backendAuthority: backendAuthority);
   }
 
   /// Discard preserved token and transition explicitly to unauthenticated state.
-  Future<void> clearSessionAndLogin() async {
-    await _storage.clearToken();
+  Future<void> clearSessionAndLogin({String? backendAuthority}) async {
+    await _storage.clearToken(backendAuthority: backendAuthority);
+    _sessionId++;
     _currentUser = null;
+    _activeBackendAuthority = null;
     _status = AuthStatus.unauthenticated;
     _isLoading = false;
     notifyListeners();
   }
 
   /// Store session token and update user profile on successful authentication.
-  Future<void> setSession({required User user, required String token}) async {
-    await _storage.saveToken(token);
+  Future<void> setSession({
+    required User user,
+    required String token,
+    String? backendAuthority,
+  }) async {
+    await _storage.saveToken(token, backendAuthority: backendAuthority);
+    _sessionId++;
     _currentUser = user;
+    _activeBackendAuthority = backendAuthority;
     _status = AuthStatus.authenticated;
     _isLoading = false;
     notifyListeners();
@@ -100,17 +136,36 @@ class AuthService extends ChangeNotifier {
   }
 
   /// Handle 401 Unauthorized from any protected API call.
-  Future<void> handleSessionExpired() async {
+  /// If [originatingSessionId] does not match current [_sessionId], the stale call is discarded.
+  Future<void> handleSessionExpired([
+    int? originatingSessionId,
+    String? backendAuthority,
+  ]) async {
+    if (originatingSessionId != null && originatingSessionId != _sessionId) {
+      // Discard stale 401 response from older session that was already replaced
+      return;
+    }
     if (_status == AuthStatus.unauthenticated && _currentUser == null) return;
-    await _storage.clearToken();
+    _sessionId++;
+    try {
+      await _storage.clearToken(backendAuthority: backendAuthority);
+    } catch (_) {}
     _currentUser = null;
+    _activeBackendAuthority = null;
     _status = AuthStatus.unauthenticated;
     _isLoading = false;
     notifyListeners();
   }
 
   /// Explicitly log out the user and clear secure token storage.
-  Future<void> logout() async {
-    await handleSessionExpired();
+  /// Storage errors propagate to the caller so failures are not silently ignored.
+  Future<void> logout({String? backendAuthority}) async {
+    await _storage.clearToken(backendAuthority: backendAuthority);
+    _sessionId++;
+    _currentUser = null;
+    _activeBackendAuthority = null;
+    _status = AuthStatus.unauthenticated;
+    _isLoading = false;
+    notifyListeners();
   }
 }

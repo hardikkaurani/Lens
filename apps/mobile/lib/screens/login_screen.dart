@@ -41,6 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _submit() async {
+    if (_isLoading) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -62,7 +63,11 @@ class _LoginScreenState extends State<LoginScreen> {
       final user = await widget.apiClient.getMe(token);
 
       // 3. Set session in AuthService and secure storage
-      await widget.authService.setSession(user: user, token: token);
+      await widget.authService.setSession(
+        user: user,
+        token: token,
+        backendAuthority: widget.apiClient.currentAuthority,
+      );
 
       if (mounted) {
         widget.onLoginSuccess?.call();

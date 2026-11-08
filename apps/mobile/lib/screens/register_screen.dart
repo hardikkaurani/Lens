@@ -43,6 +43,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Future<void> _submit() async {
+    if (_isLoading) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -50,6 +51,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _errorMessage = null;
     });
 
+    bool accountCreated = false;
     try {
       final email = _emailController.text.trim();
       final password = _passwordController.text;
@@ -59,6 +61,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         email: email,
         password: password,
       );
+      accountCreated = true;
 
       // 2. Automatically log user in
       final token = await widget.apiClient.login(
@@ -69,7 +72,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
       final user = await widget.apiClient.getMe(token);
 
       // 3. Set authenticated session
-      await widget.authService.setSession(user: user, token: token);
+      await widget.authService.setSession(
+        user: user,
+        token: token,
+        backendAuthority: widget.apiClient.currentAuthority,
+      );
 
       if (mounted) {
         widget.onRegisterSuccess?.call();
@@ -77,7 +84,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
     } on ApiException catch (e) {
       if (mounted) {
         setState(() {
-          if (e.statusCode == 400 || e.statusCode == 409) {
+          if (accountCreated) {
+            _errorMessage = 'Account created successfully, but automatic sign-in failed. Please sign in with your password.';
+          } else if (e.statusCode == 400 || e.statusCode == 409) {
             _errorMessage = 'An account with this email already exists. Please sign in instead.';
           } else {
             _errorMessage = e.message;
@@ -87,7 +96,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _errorMessage = 'Registration failed. Please check network connection and try again.';
+          if (accountCreated) {
+            _errorMessage = 'Account created successfully, but automatic sign-in failed. Please sign in with your password.';
+          } else {
+            _errorMessage = 'Registration failed. Please check network connection and try again.';
+          }
         });
       }
     } finally {

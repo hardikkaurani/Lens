@@ -23,7 +23,10 @@ void main() async {
   final apiClient = ApiClient(config: config, authService: authService);
 
   // Restore previous session from secure storage in background
-  unawaited(authService.restoreSession(() => apiClient.getMe()));
+  unawaited(authService.restoreSession(
+    () => apiClient.getMe(),
+    backendAuthority: apiClient.currentAuthority,
+  ));
 
   runApp(LensApp(
     apiClient: apiClient,
@@ -67,7 +70,10 @@ class _LensAppState extends State<LensApp> {
     if (widget.authService != null) {
       widget.authService!.addListener(_handleAuthStateChanged);
       if (widget.authService!.status == AuthStatus.initial) {
-        unawaited(widget.authService!.restoreSession(() => _apiClient.getMe()));
+        unawaited(widget.authService!.restoreSession(
+          () => _apiClient.getMe(),
+          backendAuthority: _apiClient.currentAuthority,
+        ));
       }
     }
 
@@ -95,6 +101,11 @@ class _LensAppState extends State<LensApp> {
           }
         });
       }
+    } else if (widget.authService != null &&
+        widget.authService!.status == AuthStatus.unauthenticated) {
+      // Pop open dialogs and sub-routes back to root authentication screen
+      _isReviewOpen = false;
+      _navigatorKey.currentState?.popUntil((route) => route.isFirst);
     }
   }
 
