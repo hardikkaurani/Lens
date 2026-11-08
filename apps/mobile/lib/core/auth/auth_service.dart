@@ -59,20 +59,25 @@ class AuthService extends ChangeNotifier {
   /// Retry clearing secure storage if previous clearance failed.
   Future<void> retryStorageCleanup({String? backendAuthority}) async {
     final targetAuthority = backendAuthority ?? _failedCleanupAuthority ?? _activeBackendAuthority;
+    final int opSessionId = _sessionId;
     try {
       await _storage.clearToken(backendAuthority: targetAuthority);
-      _storageCleanupError = null;
-      _failedCleanupAuthority = null;
-      if (_status == AuthStatus.restorationFailed && _currentUser == null) {
-        _status = AuthStatus.unauthenticated;
+      if (_sessionId == opSessionId) {
+        _storageCleanupError = null;
+        _failedCleanupAuthority = null;
+        if (_status == AuthStatus.restorationFailed && _currentUser == null) {
+          _status = AuthStatus.unauthenticated;
+        }
+        notifyListeners();
       }
-      notifyListeners();
     } catch (e) {
-      _storageCleanupError = e is AuthStorageException
-          ? e
-          : AuthStorageException('Failed to clear token from secure storage', e);
-      _failedCleanupAuthority = targetAuthority;
-      notifyListeners();
+      if (_sessionId == opSessionId) {
+        _storageCleanupError = e is AuthStorageException
+            ? e
+            : AuthStorageException('Failed to clear token from secure storage', e);
+        _failedCleanupAuthority = targetAuthority;
+        notifyListeners();
+      }
       rethrow;
     }
   }
@@ -106,11 +111,13 @@ class AuthService extends ChangeNotifier {
       _currentUser = profile;
       _activeBackendAuthority = backendAuthority;
       _storageCleanupError = null;
+      _failedCleanupAuthority = null;
       _status = AuthStatus.authenticated;
     } on AuthStorageException catch (e) {
       // Hardware keystore error or lock: PRESERVE tokens and transition to recoverable state
       if (_sessionId != requestSessionId) return;
       _storageCleanupError = e;
+      _failedCleanupAuthority = backendAuthority;
       _status = AuthStatus.restorationFailed;
     } catch (e) {
       if (_sessionId != requestSessionId) return;
@@ -119,15 +126,16 @@ class AuthService extends ChangeNotifier {
         // Confirmed 401 Unauthorized: credentials/token invalid or revoked
         try {
           await _storage.clearToken(backendAuthority: backendAuthority);
+          // CONCURRENCY INVARIANT: If session generation changed while clearToken was in-flight,
+          // a replacement login or concurrent lifecycle change took ownership. Discard stale update.
+          if (_sessionId != requestSessionId) return;
           _storageCleanupError = null;
           _failedCleanupAuthority = null;
           _currentUser = null;
           _activeBackendAuthority = null;
           _status = AuthStatus.unauthenticated;
         } catch (storageError) {
-          // Token deletion failed: token is still persisted in secure storage.
-          // Explicitly expose cleanup failure and transition to restorationFailed
-          // so credential cleanup is not falsely reported as complete.
+          if (_sessionId != requestSessionId) return;
           _storageCleanupError = storageError is AuthStorageException
               ? storageError
               : AuthStorageException('Failed to clear revoked token from secure storage', storageError);
@@ -146,11 +154,6 @@ class AuthService extends ChangeNotifier {
       if (_sessionId == requestSessionId) {
         _isLoading = false;
         notifyListeners();
-      } else {
-        if (_isLoading) {
-          _isLoading = false;
-          notifyListeners();
-        }
       }
     }
   }
@@ -166,23 +169,30 @@ class AuthService extends ChangeNotifier {
   /// Discard preserved token and transition explicitly to unauthenticated state.
   Future<void> clearSessionAndLogin({String? backendAuthority}) async {
     final targetAuthority = backendAuthority ?? _activeBackendAuthority;
+    final int opSessionId = _sessionId;
     try {
       await _storage.clearToken(backendAuthority: targetAuthority);
-      _storageCleanupError = null;
-      _failedCleanupAuthority = null;
+      if (_sessionId == opSessionId) {
+        _storageCleanupError = null;
+        _failedCleanupAuthority = null;
+      }
     } catch (e) {
-      _storageCleanupError = e is AuthStorageException
-          ? e
-          : AuthStorageException('Failed to clear token from secure storage', e);
-      _failedCleanupAuthority = targetAuthority;
+      if (_sessionId == opSessionId) {
+        _storageCleanupError = e is AuthStorageException
+            ? e
+            : AuthStorageException('Failed to clear token from secure storage', e);
+        _failedCleanupAuthority = targetAuthority;
+      }
       rethrow;
     } finally {
-      _sessionId++;
-      _currentUser = null;
-      _activeBackendAuthority = null;
-      _status = AuthStatus.unauthenticated;
-      _isLoading = false;
-      notifyListeners();
+      if (_sessionId == opSessionId) {
+        _sessionId++;
+        _currentUser = null;
+        _activeBackendAuthority = null;
+        _status = AuthStatus.unauthenticated;
+        _isLoading = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -229,18 +239,32 @@ class AuthService extends ChangeNotifier {
     final targetAuthority = backendAuthority ?? _activeBackendAuthority;
 
     _sessionId++;
+    final int expectedSessionIdAfterExpiry = _sessionId;
 
     AuthStorageException? clearError;
     try {
       await _storage.clearToken(backendAuthority: targetAuthority);
-      _storageCleanupError = null;
-      _failedCleanupAuthority = null;
     } catch (e) {
       clearError = e is AuthStorageException
           ? e
           : AuthStorageException('Failed to clear expired token from secure storage', e);
+    }
+
+    // CONCURRENCY INVARIANT:
+    // If _sessionId changed while awaiting clearToken(), a replacement session or concurrent
+    // lifecycle operation (e.g. setSession, logout, clearSessionAndLogin) took ownership.
+    // In that case, this expiry operation is STALE and MUST NOT overwrite the newer in-memory
+    // authentication state, credentials, or error status.
+    if (_sessionId != expectedSessionIdAfterExpiry) {
+      return;
+    }
+
+    if (clearError != null) {
       _storageCleanupError = clearError;
       _failedCleanupAuthority = targetAuthority;
+    } else {
+      _storageCleanupError = null;
+      _failedCleanupAuthority = null;
     }
 
     _currentUser = null;
@@ -258,14 +282,17 @@ class AuthService extends ChangeNotifier {
   /// Storage errors propagate to the caller so failures are not silently ignored.
   Future<void> logout({String? backendAuthority}) async {
     final targetAuthority = backendAuthority ?? _activeBackendAuthority;
+    final int opSessionId = _sessionId;
     await _storage.clearToken(backendAuthority: targetAuthority);
-    _sessionId++;
-    _currentUser = null;
-    _activeBackendAuthority = null;
-    _storageCleanupError = null;
-    _failedCleanupAuthority = null;
-    _status = AuthStatus.unauthenticated;
-    _isLoading = false;
-    notifyListeners();
+    if (_sessionId == opSessionId) {
+      _sessionId++;
+      _currentUser = null;
+      _activeBackendAuthority = null;
+      _storageCleanupError = null;
+      _failedCleanupAuthority = null;
+      _status = AuthStatus.unauthenticated;
+      _isLoading = false;
+      notifyListeners();
+    }
   }
 }
