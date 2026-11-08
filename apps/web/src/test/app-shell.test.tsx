@@ -3,21 +3,43 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import { AppShell } from "@/components/AppShell";
 import { apiClient } from "@/lib/api-client";
+import { AuthProvider } from "@/lib/auth-context";
+import type { User } from "@/types/api";
 
 // Mock next/navigation
 vi.mock("next/navigation", () => ({
   usePathname: () => "/captures",
+  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
 }));
+
+const mockAuthUser: User = {
+  id: "u-1",
+  email: "user@example.com",
+  is_active: true,
+};
+
+function renderWithAuth(ui: React.ReactElement, initialUser: User | null = mockAuthUser) {
+  return render(
+    <AuthProvider initialUser={initialUser} initialLoading={false}>
+      {ui}
+    </AuthProvider>
+  );
+}
 
 describe("Application Shell & Navigation (Tests 1-3)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.spyOn(apiClient, "getMe").mockResolvedValue({
+      id: "u-1",
+      email: "user@example.com",
+      is_active: true,
+    });
   });
 
   it("1. renders app shell identity and branding", async () => {
     vi.spyOn(apiClient, "getHealth").mockResolvedValue({ status: "ok" });
 
-    render(
+    renderWithAuth(
       <AppShell>
         <div data-testid="test-content">Main Workspace Content</div>
       </AppShell>
@@ -35,7 +57,7 @@ describe("Application Shell & Navigation (Tests 1-3)", () => {
   it("2. navigation renders accessible links for Captures, Search, and New Capture", () => {
     vi.spyOn(apiClient, "getHealth").mockResolvedValue({ status: "ok" });
 
-    render(
+    renderWithAuth(
       <AppShell>
         <div>Content</div>
       </AppShell>
@@ -57,7 +79,7 @@ describe("Application Shell & Navigation (Tests 1-3)", () => {
   it("3. responsive layout provides interactive mobile navigation toggle", () => {
     vi.spyOn(apiClient, "getHealth").mockResolvedValue({ status: "ok" });
 
-    render(
+    renderWithAuth(
       <AppShell>
         <div>Content</div>
       </AppShell>

@@ -171,7 +171,11 @@ describe("Web Authentication & Client Integration", () => {
 
   describe("3. Login Page UX & Flow", () => {
     it("renders official LENS logo and login form elements", () => {
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       expect(screen.getByText("Sign in to LENS")).toBeDefined();
       expect(screen.getByLabelText(/Email Address/i)).toBeDefined();
@@ -181,7 +185,11 @@ describe("Web Authentication & Client Integration", () => {
     });
 
     it("validates empty and invalid email client-side", async () => {
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       const submitButton = screen.getByRole("button", { name: /^Sign in$/i });
       fireEvent.click(submitButton);
@@ -196,7 +204,11 @@ describe("Web Authentication & Client Integration", () => {
     });
 
     it("validates empty password client-side", async () => {
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       const emailInput = screen.getByLabelText(/Email Address/i);
       fireEvent.change(emailInput, { target: { value: "user@example.com" } });
@@ -208,7 +220,11 @@ describe("Web Authentication & Client Integration", () => {
     });
 
     it("toggles password visibility", () => {
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       const passwordInput = screen.getByLabelText(/^Password/i) as HTMLInputElement;
       expect(passwordInput.type).toBe("password");
@@ -227,7 +243,11 @@ describe("Web Authentication & Client Integration", () => {
         user: { id: "u-1", email: "user@example.com", is_active: true },
       });
 
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       fireEvent.change(screen.getByLabelText(/Email Address/i), {
         target: { value: "user@example.com" },
@@ -248,7 +268,11 @@ describe("Web Authentication & Client Integration", () => {
         new ApiClientError(401, "Invalid email or password")
       );
 
-      render(<LoginPage />);
+      render(
+        <AuthProvider>
+          <LoginPage />
+        </AuthProvider>
+      );
 
       fireEvent.change(screen.getByLabelText(/Email Address/i), {
         target: { value: "user@example.com" },
@@ -267,7 +291,11 @@ describe("Web Authentication & Client Integration", () => {
 
   describe("4. Register Page UX & Flow", () => {
     it("renders registration form with required fields", () => {
-      render(<RegisterPage />);
+      render(
+        <AuthProvider>
+          <RegisterPage />
+        </AuthProvider>
+      );
 
       expect(screen.getByText("Create your LENS Account")).toBeDefined();
       expect(screen.getByLabelText(/Email Address/i)).toBeDefined();
@@ -277,7 +305,11 @@ describe("Web Authentication & Client Integration", () => {
     });
 
     it("enforces minimum password length of 8 characters", async () => {
-      render(<RegisterPage />);
+      render(
+        <AuthProvider>
+          <RegisterPage />
+        </AuthProvider>
+      );
 
       fireEvent.change(screen.getByLabelText(/Email Address/i), {
         target: { value: "user@example.com" },
@@ -295,7 +327,11 @@ describe("Web Authentication & Client Integration", () => {
     });
 
     it("enforces password confirmation match", async () => {
-      render(<RegisterPage />);
+      render(
+        <AuthProvider>
+          <RegisterPage />
+        </AuthProvider>
+      );
 
       fireEvent.change(screen.getByLabelText(/Email Address/i), {
         target: { value: "user@example.com" },
@@ -317,7 +353,11 @@ describe("Web Authentication & Client Integration", () => {
         new ApiClientError(409, "User already exists")
       );
 
-      render(<RegisterPage />);
+      render(
+        <AuthProvider>
+          <RegisterPage />
+        </AuthProvider>
+      );
 
       fireEvent.change(screen.getByLabelText(/Email Address/i), {
         target: { value: "existing@example.com" },
@@ -338,28 +378,27 @@ describe("Web Authentication & Client Integration", () => {
   });
 
   describe("5. Protected Route Guard", () => {
-    it("renders children when user is authenticated", () => {
+    it("renders children when user is authenticated", async () => {
+      vi.spyOn(apiClient, "getMe").mockResolvedValueOnce({
+        id: "u-123",
+        email: "authed@example.com",
+        is_active: true,
+      });
+
       render(
-        <ProtectedRoute>
-          <div data-testid="protected-content">Secret Notes</div>
-        </ProtectedRoute>
+        <AuthProvider>
+          <ProtectedRoute>
+            <div data-testid="protected-content">Secret Notes</div>
+          </ProtectedRoute>
+        </AuthProvider>
       );
 
-      expect(screen.getByTestId("protected-content")).toBeDefined();
+      expect(await screen.findByTestId("protected-content")).toBeDefined();
       expect(screen.getByText("Secret Notes")).toBeDefined();
     });
 
     it("redirects unauthenticated users to /login with encoded redirect query", async () => {
       mockPathname = "/captures/new";
-
-      // Test component providing unauthenticated state
-      function UnauthWrapper({ children }: { children: React.ReactNode }) {
-        return (
-          <AuthProvider>
-            {children}
-          </AuthProvider>
-        );
-      }
 
       // Mock getMe returning 401
       vi.spyOn(apiClient, "getMe").mockRejectedValueOnce(
@@ -367,16 +406,87 @@ describe("Web Authentication & Client Integration", () => {
       );
 
       render(
-        <UnauthWrapper>
+        <AuthProvider>
           <ProtectedRoute>
             <div>Protected Content</div>
           </ProtectedRoute>
-        </UnauthWrapper>
+        </AuthProvider>
       );
 
       await waitFor(() => {
         expect(mockPush).toHaveBeenCalledWith("/login?redirect=%2Fcaptures%2Fnew");
       });
+    });
+  });
+
+  describe("6. Fail-Closed AuthContext Guarantees", () => {
+    it("throws explicit error when useAuth is called outside AuthProvider", () => {
+      function NakedConsumer() {
+        useAuth();
+        return <div>Naked</div>;
+      }
+
+      // Suppress React boundary console.error during expected throw
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      expect(() => render(<NakedConsumer />)).toThrow(
+        "useAuth must be used within an AuthProvider"
+      );
+
+      errorSpy.mockRestore();
+    });
+
+    it("fails closed with user=null and isAuthenticated=false when getMe returns 401", async () => {
+      vi.spyOn(apiClient, "getMe").mockRejectedValueOnce(
+        new ApiClientError(401, "Unauthorized")
+      );
+
+      let observedContext: ReturnType<typeof useAuth> | null = null;
+      function ContextProbe() {
+        observedContext = useAuth();
+        return <div>Probe</div>;
+      }
+
+      render(
+        <AuthProvider>
+          <ContextProbe />
+        </AuthProvider>
+      );
+
+      await waitFor(() => {
+        expect(observedContext).not.toBeNull();
+        expect(observedContext!.isLoading).toBe(false);
+      });
+
+      expect(observedContext!.user).toBeNull();
+      expect(observedContext!.isAuthenticated).toBe(false);
+    });
+
+    it("never returns a fake or hardcoded default user", async () => {
+      vi.spyOn(apiClient, "getMe").mockRejectedValueOnce(
+        new ApiClientError(401, "Unauthorized")
+      );
+
+      let probedUser: unknown = "initial-sentinel";
+      function SentinelProbe() {
+        const { user } = useAuth();
+        probedUser = user;
+        return <div>Sentinel</div>;
+      }
+
+      render(
+        <AuthProvider>
+          <SentinelProbe />
+        </AuthProvider>
+      );
+
+      await waitFor(() => {
+        expect(probedUser).toBeNull();
+      });
+
+      expect(probedUser).not.toEqual(
+        expect.objectContaining({ email: "user@example.com", id: "default-user" })
+      );
     });
   });
 });

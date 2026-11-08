@@ -8,7 +8,8 @@ import { CaptureDetailContent } from "@/app/captures/[id]/page";
 import { SourceTypeBadge } from "@/components/SourceTypeBadge";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import { validatePdfFile, MAX_FILE_SIZE_BYTES } from "@/lib/validation";
-import type { CaptureDetail } from "@/types/api";
+import type { CaptureDetail, User } from "@/types/api";
+import { AuthProvider } from "@/lib/auth-context";
 
 const mockRouterPush = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -17,10 +18,29 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/captures/new",
 }));
 
+const mockAuthUser: User = {
+  id: "u-1",
+  email: "user@example.com",
+  is_active: true,
+};
+
+function renderWithAuth(ui: React.ReactElement, initialUser: User | null = mockAuthUser) {
+  return render(
+    <AuthProvider initialUser={initialUser} initialLoading={false}>
+      {ui}
+    </AuthProvider>
+  );
+}
+
 describe("Stage 12 Web PDF / File Capture UX (Tests 1-28)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockRouterPush.mockReset();
+    vi.spyOn(apiClient, "getMe").mockResolvedValue({
+      id: "u-1",
+      email: "user@example.com",
+      is_active: true,
+    });
   });
 
   afterEach(() => {
@@ -808,7 +828,7 @@ describe("Stage 12 Web PDF / File Capture UX (Tests 1-28)", () => {
 
   // Additional test: /captures/new tab switching
   it("switches to PDF Document tab in NewCapturePage", () => {
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     expect(screen.getByTestId("tab-file")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("tab-file"));
@@ -818,7 +838,7 @@ describe("Stage 12 Web PDF / File Capture UX (Tests 1-28)", () => {
 
   // Additional test: /captures/new/file dedicated page renders
   it("renders dedicated NewFileCapturePage correctly", () => {
-    render(<NewFileCapturePage />);
+    renderWithAuth(<NewFileCapturePage />);
     expect(screen.getByText("Upload PDF Document")).toBeInTheDocument();
     expect(screen.getByTestId("pdf-dropzone")).toBeInTheDocument();
   });

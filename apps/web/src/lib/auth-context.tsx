@@ -17,9 +17,21 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+interface AuthProviderProps {
+  children: React.ReactNode;
+  initialUser?: User | null;
+  initialLoading?: boolean;
+}
+
+export function AuthProvider({
+  children,
+  initialUser,
+  initialLoading,
+}: AuthProviderProps) {
+  const [user, setUser] = useState<User | null>(initialUser ?? null);
+  const [isLoading, setIsLoading] = useState<boolean>(
+    initialLoading !== undefined ? initialLoading : (initialUser !== undefined ? false : true)
+  );
   const router = useRouter();
 
   const refreshUser = useCallback(async (): Promise<User | null> => {
@@ -38,8 +50,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    refreshUser();
-  }, [refreshUser]);
+    if (initialUser === undefined && initialLoading === undefined) {
+      refreshUser();
+    }
+  }, [refreshUser, initialUser, initialLoading]);
 
   const login = async (email: string, password: string): Promise<User> => {
     const res = await apiClient.login({ email, password });
@@ -78,31 +92,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-const defaultAuthValue: AuthContextValue = {
-  user: {
-    id: "default-user",
-    email: "user@example.com",
-    is_active: true,
-  },
-  isLoading: false,
-  isAuthenticated: true,
-  login: async (email: string, password: string) => {
-    const res = await apiClient.login({ email, password });
-    return res.user;
-  },
-  register: async (email: string, password: string) => {
-    return await apiClient.register({ email, password });
-  },
-  logout: async () => {
-    await apiClient.logout();
-  },
-  refreshUser: async () => null,
-};
-
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
   if (!context) {
-    return defaultAuthValue;
+    throw new Error("useAuth must be used within an AuthProvider");
   }
   return context;
 }
