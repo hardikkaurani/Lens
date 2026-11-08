@@ -228,3 +228,22 @@ The following table documents the verification, status, and resolution evidence 
 | **24** | `4505002559` | Web: `auth-context.tsx` | `useAuth()` returned fake user outside `AuthProvider`. | **Already Resolved** | `defaultAuthValue` removed; `useAuth()` throws error outside `AuthProvider`. | `throws explicit error when useAuth is called outside AuthProvider` |
 | **25** | `4505002560` | Web: `server-auth.ts` | CSRF origin validation failed behind reverse proxies with trusted hosts. | **Valid Defect** | Added `getTrustedHosts()` supporting `TRUSTED_ORIGIN`, `NEXT_PUBLIC_APP_URL`, and `ALLOWED_ORIGIN`. | `accepts mutating request when origin matches configured TRUSTED_ORIGIN` |
 | **26** | `4505002562` | Web: `server-auth.ts` | Missing `Host` header on mutating requests evaluated `!host` to true, bypassing CSRF check. | **Valid Defect** | Enforced that mutating requests without `Host` fail closed and return `false`. | `rejects mutating request when Host header is missing` |
+
+---
+
+### 5.4 Stage 19.3.1 Follow-up Hardening Details
+
+1. **Mobile Authority Isolation & Collision Resistance**:
+   - `SecureAuthTokenStorage` and `InMemoryAuthTokenStorage` strictly isolate tokens by backend authority.
+   - When `backendAuthority` is explicitly supplied, `getToken()` looks up only that authority's key and returns `null` if missing; it never falls back to the global/default token.
+   - `clearToken({backendAuthority})` deletes only the specified authority's key and preserves the global token and other authorities.
+   - `formatKey` uses lowercase normalization and Base64URL encoding (`utf8.encode`) to provide mathematical collision resistance against ambiguous delimiters (`:`, `_`, `/`).
+2. **Mobile Session Restoration Lifecycle**:
+   - In `AuthService.restoreSession`, `_isRestoring` is guaranteed to be set to `false` in the `finally` block even when a concurrent login or logout increments `_sessionId`.
+   - `_isLoading` is unconditionally finalized, preventing stuck loading states or blocked future restoration invocations.
+3. **Web Cookie Mutation Integrity**:
+   - `setAuthCookie()` and `clearAuthCookie()` in `server-auth.ts` do not swallow cookie mutation failures.
+   - Route handlers `/api/auth/login` and `/api/auth/logout` catch cookie mutation errors and return HTTP 500 fail-closed error responses rather than returning false `{ success: true }`.
+4. **Web Auth `getMe()` Timeout & Abort Propagation**:
+   - `apiClient.getMe()` implements a 15-second default timeout via an internal `AbortController`.
+   - Propagates caller `AbortSignal` cancellation accurately without converting user cancellations into timeout errors (`isTimeout: false`).
