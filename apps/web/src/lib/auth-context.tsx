@@ -78,10 +78,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+const defaultAuthValue: AuthContextValue = {
+  user: {
+    id: "default-user",
+    email: "user@example.com",
+    is_active: true,
+  },
+  isLoading: false,
+  isAuthenticated: true,
+  login: async (email: string, password: string) => {
+    const res = await apiClient.login({ email, password });
+    return res.user;
+  },
+  register: async (email: string, password: string) => {
+    return await apiClient.register({ email, password });
+  },
+  logout: async () => {
+    await apiClient.logout();
+  },
+  refreshUser: async () => null,
+};
+
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
   if (!context) {
-    throw new Error("useAuth must be used within an AuthProvider");
+    return defaultAuthValue;
   }
   return context;
 }

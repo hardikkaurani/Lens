@@ -38,8 +38,6 @@ export function verifyCsrfOrigin(request: Request): boolean {
     // Fall back to Referer check if Origin is absent
     const referer = request.headers.get("referer");
     if (!referer) {
-      // In non-browser automated test environments without headers, permit if specified
-      if (process.env.NODE_ENV === "test") return true;
       return false;
     }
     try {

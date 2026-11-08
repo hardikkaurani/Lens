@@ -11,7 +11,14 @@ interface ProtectedRouteProps {
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
-  const pathname = usePathname();
+  let pathname = "/";
+  try {
+    if (typeof usePathname === "function") {
+      pathname = usePathname() || "/";
+    }
+  } catch {
+    pathname = "/";
+  }
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {

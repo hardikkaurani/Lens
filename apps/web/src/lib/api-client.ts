@@ -504,6 +504,7 @@ export const apiClient = {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ email: payload.email, password: payload.password }),
+      credentials: "same-origin",
       signal: payload.signal,
     });
     if (!res.ok) {
@@ -521,6 +522,7 @@ export const apiClient = {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ email: payload.email, password: payload.password }),
+      credentials: "same-origin",
       signal: payload.signal,
     });
     if (!res.ok) {
@@ -537,6 +539,7 @@ export const apiClient = {
     const res = await fetch("/api/auth/me", {
       method: "GET",
       headers: { Accept: "application/json" },
+      credentials: "same-origin",
       signal: params.signal,
     });
     if (!res.ok) {
@@ -553,6 +556,7 @@ export const apiClient = {
     const res = await fetch("/api/auth/logout", {
       method: "POST",
       headers: { Accept: "application/json" },
+      credentials: "same-origin",
       signal: params.signal,
     });
     if (!res.ok) {
