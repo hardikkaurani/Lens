@@ -17,7 +17,7 @@ vi.mock("next/headers", () => ({
 
 describe("BFF Auth & Proxy Hardening Security Tests", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   describe("1. Login Route Validation & Fail-Closed Behavior", () => {
@@ -121,6 +121,41 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       const res = await loginHandler(req);
       expect(res.status).toBe(502);
       expect(setAuthCookieSpy).not.toHaveBeenCalled();
+    });
+
+    it("accepts backend token whose lifetime exceeds 30-day cookie cap and caps cookie independently", async () => {
+      const setAuthCookieSpy = vi.spyOn(serverAuth, "setAuthCookie");
+      const seventyDays = 70 * 24 * 60 * 60; // 70 days > 30 days
+      const thirtyDays = 30 * 24 * 60 * 60;
+
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ access_token: "long_lived_jwt", token_type: "bearer", expires_in: seventyDays }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ id: "u-123", email: "user@example.com" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        );
+
+      const req = new NextRequest("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({ email: "user@example.com", password: "Password123!" }),
+      });
+
+      const res = await loginHandler(req);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(setAuthCookieSpy).toHaveBeenCalledWith("long_lived_jwt", thirtyDays);
     });
 
     it("fails closed (502) and sets no cookie when /auth/me fails after login", async () => {
@@ -244,7 +279,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
     });
 
     it("clears session cookie on backend 401 response", async () => {
-      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValueOnce("expired_token");
+      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("expired_token");
       const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie").mockResolvedValueOnce();
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
@@ -266,6 +301,57 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       const setCookie = res.headers.get("Set-Cookie");
       expect(setCookie).toContain("lens_access_token=");
       expect(setCookie).toContain("Max-Age=0");
+    });
+
+    it("preserves replacement session cookie when 401 returns for stale token", async () => {
+      vi.spyOn(serverAuth, "getStoredToken")
+        .mockResolvedValueOnce("stale_token")
+        .mockResolvedValueOnce("newer_token_from_login");
+      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie");
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Token expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        headers: { host: "localhost:3000" },
+      });
+
+      const res = await proxyGet(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+      expect(res.status).toBe(401);
+      expect(clearAuthCookieSpy).not.toHaveBeenCalled();
+      expect(res.headers.get("Set-Cookie")).toBeNull();
+    });
+
+    it("allows /captures when backend base URL contains /v1 prefix", async () => {
+      vi.spyOn(serverAuth, "getBackendApiUrl").mockReturnValueOnce("http://127.0.0.1:8000/v1");
+      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("mock_token");
+
+      let calledUrl = "";
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce((url) => {
+        calledUrl = url.toString();
+        return Promise.resolve(
+          new Response(JSON.stringify({ items: [], total: 0 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      });
+
+      const req = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        headers: { host: "localhost:3000" },
+      });
+
+      const res = await proxyGet(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+      expect(res.status).toBe(200);
+      expect(calledUrl).toContain("http://127.0.0.1:8000/v1/captures");
     });
 
     it("rejects mutating request when Host header is missing", async () => {

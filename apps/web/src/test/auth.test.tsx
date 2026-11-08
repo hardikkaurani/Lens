@@ -109,6 +109,62 @@ describe("Web Authentication & Client Integration", () => {
       });
     });
 
+    it("getMe enforces 15-second default timeout without options using controlled timers", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(globalThis, "fetch").mockImplementationOnce((_url, options) => {
+          return new Promise((_resolve, reject) => {
+            const signal = options?.signal as AbortSignal | undefined;
+            signal?.addEventListener("abort", () => {
+              const err = new Error("The user aborted a request.");
+              err.name = "AbortError";
+              reject(err);
+            });
+          });
+        });
+
+        const getMePromise = apiClient.getMe();
+
+        // Must remain pending prior to 15 seconds
+        await vi.advanceTimersByTimeAsync(14999);
+        let settled = false;
+        getMePromise.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          }
+        );
+        expect(settled).toBe(false);
+
+        // Advance the final 1ms to hit the 15,000ms deadline
+        const timeoutExpectation = expect(getMePromise).rejects.toMatchObject({
+          isTimeout: true,
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        await timeoutExpectation;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("getMe rethrows abort errors encountered while reading error response body", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => {
+          const err = new Error("The request was aborted while reading response body.");
+          err.name = "AbortError";
+          return Promise.reject(err);
+        },
+      } as unknown as Response);
+
+      await expect(apiClient.getMe({ timeoutMs: 50 })).rejects.toMatchObject({
+        isTimeout: false,
+      });
+    });
+
     it("getMe correctly preserves caller AbortSignal cancellation with isTimeout=false", async () => {
       const callerController = new AbortController();
 

@@ -98,10 +98,16 @@ async function handleProxy(
     );
   }
 
-  // Ensure normalized target pathname begins with an allowed prefix
+  // Ensure normalized target pathname begins with an allowed prefix relative to configured backend base path
+  const backendBasePath = backendBaseObj.pathname.replace(/^\/+|\/+$/g, "");
   const normalizedPath = targetUrlObj.pathname.replace(/^\/+/, "");
+  const relativePath =
+    backendBasePath.length > 0 && normalizedPath.startsWith(backendBasePath)
+      ? normalizedPath.slice(backendBasePath.length).replace(/^\/+/, "")
+      : normalizedPath;
+
   const hasAllowedPrefix = ALLOWED_PATH_PREFIXES.some(
-    (prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)
+    (prefix) => relativePath === prefix || relativePath.startsWith(`${prefix}/`)
   );
   if (!hasAllowedPrefix) {
     return NextResponse.json(
@@ -172,13 +178,17 @@ async function handleProxy(
     }
 
     // If backend reports 401 Unauthorized, automatically purge the invalid session cookie
+    // ONLY IF the rejected token has not already been superseded by a newer session
     if (backendRes.status === 401) {
-      await clearAuthCookie();
-      const isProd = process.env.NODE_ENV === "production";
-      responseHeaders.set(
-        "Set-Cookie",
-        `${LENS_TOKEN_COOKIE}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax${isProd ? "; Secure" : ""}`
-      );
+      const currentToken = await getStoredToken();
+      if (currentToken === token) {
+        await clearAuthCookie();
+        const isProd = process.env.NODE_ENV === "production";
+        responseHeaders.set(
+          "Set-Cookie",
+          `${LENS_TOKEN_COOKIE}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax${isProd ? "; Secure" : ""}`
+        );
+      }
     }
 
     return new NextResponse(backendRes.body, {

@@ -59,6 +59,7 @@ class _LensAppState extends State<LensApp> {
   bool _isReviewOpen = false;
   int _currentReviewId = 0;
   SharedContent? _pendingShare;
+  SharedContent? _activeReviewShare;
   bool _showRegister = false;
 
   @override
@@ -104,7 +105,11 @@ class _LensAppState extends State<LensApp> {
     } else if (widget.authService != null &&
         widget.authService!.status == AuthStatus.unauthenticated) {
       // Pop open dialogs and sub-routes back to root authentication screen
+      if (_isReviewOpen && _activeReviewShare != null) {
+        _pendingShare = _activeReviewShare;
+      }
       _isReviewOpen = false;
+      _activeReviewShare = null;
       _navigatorKey.currentState?.popUntil((route) => route.isFirst);
     }
   }
@@ -129,6 +134,7 @@ class _LensAppState extends State<LensApp> {
     }
 
     _isReviewOpen = true;
+    _activeReviewShare = content;
     final int reviewId = ++_currentReviewId;
     _navigatorKey.currentState
         ?.push(
@@ -139,11 +145,13 @@ class _LensAppState extends State<LensApp> {
           onCancel: () {
             if (_currentReviewId == reviewId) {
               _isReviewOpen = false;
+              _activeReviewShare = null;
             }
           },
           onSaved: (created) {
             if (_currentReviewId == reviewId) {
               _isReviewOpen = false;
+              _activeReviewShare = null;
             }
           },
         ),
@@ -240,32 +248,52 @@ class _LensAppState extends State<LensApp> {
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 8),
-                        const Text(
-                          'Network or server connectivity is currently unavailable. You can retry connection or sign in again.',
-                          style: TextStyle(
+                        Text(
+                          auth.hasStorageCleanupError
+                              ? 'Local credential cleanup failed. You can retry clearing stored credentials or sign in again.'
+                              : 'Network or server connectivity is currently unavailable. You can retry connection or sign in again.',
+                          style: const TextStyle(
                             fontSize: 14,
                             color: Colors.white60,
                           ),
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 28),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 46,
-                          child: FilledButton.icon(
-                            key: const Key('retry_restore_button'),
-                            icon: const Icon(Icons.refresh, size: 20),
-                            label: const Text('Retry Connection'),
-                            onPressed: () {
-                              widget.authService!.retryRestoreSession(() => _apiClient.getMe());
-                            },
+                        if (auth.hasStorageCleanupError)
+                          SizedBox(
+                            width: double.infinity,
+                            height: 46,
+                            child: FilledButton.icon(
+                              key: const Key('retry_cleanup_button'),
+                              icon: const Icon(Icons.cleaning_services_rounded, size: 20),
+                              label: const Text('Retry Credential Cleanup'),
+                              onPressed: () async {
+                                try {
+                                  await widget.authService!.retryStorageCleanup();
+                                } catch (_) {}
+                              },
+                            ),
+                          )
+                        else
+                          SizedBox(
+                            width: double.infinity,
+                            height: 46,
+                            child: FilledButton.icon(
+                              key: const Key('retry_restore_button'),
+                              icon: const Icon(Icons.refresh, size: 20),
+                              label: const Text('Retry Connection'),
+                              onPressed: () {
+                                widget.authService!.retryRestoreSession(() => _apiClient.getMe());
+                              },
+                            ),
                           ),
-                        ),
                         const SizedBox(height: 12),
                         TextButton(
                           key: const Key('switch_to_login_button'),
-                          onPressed: () {
-                            widget.authService!.clearSessionAndLogin();
+                          onPressed: () async {
+                            try {
+                              await widget.authService!.clearSessionAndLogin();
+                            } catch (_) {}
                           },
                           child: const Text('Sign In with Another Account'),
                         ),

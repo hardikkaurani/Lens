@@ -578,7 +578,15 @@ export const apiClient = {
       });
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
+        let err: unknown;
+        try {
+          err = await res.json();
+        } catch (jsonErr: unknown) {
+          if (jsonErr instanceof Error && jsonErr.name === "AbortError") {
+            throw jsonErr;
+          }
+          err = {};
+        }
         throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
       }
       return (await res.json()) as User;

@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
-import { CaptureDetailContent } from "@/app/captures/[id]/page";
+import { CaptureDetailContent } from "@/components/CaptureDetailContent";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import type { CaptureDetail } from "@/types/api";
 

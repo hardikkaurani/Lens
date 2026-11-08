@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:lens_mobile/core/auth/auth_service.dart';
@@ -965,6 +966,34 @@ void main() {
       expect(await storage.getToken(backendAuthority: 'beta.lens.app'), equals('token_beta'));
     });
 
+    test('SecureAuthTokenStorage authority-scoped token reads and clear isolate authority from global token', () async {
+      final fakeBackend = FakeFlutterSecureStorage();
+      final storage = SecureAuthTokenStorage(storage: fakeBackend);
+
+      // Save a global token without authority
+      await storage.saveToken('secure_global_token');
+      expect(await storage.getToken(), equals('secure_global_token'));
+
+      // Explicit authority read MUST NOT fall back to global token
+      expect(await storage.getToken(backendAuthority: 'api.lens.app'), isNull);
+      expect(await storage.hasToken(backendAuthority: 'api.lens.app'), isFalse);
+
+      // Save authority-specific tokens
+      await storage.saveToken('secure_alpha_token', backendAuthority: 'alpha.lens.app');
+      await storage.saveToken('secure_beta_token', backendAuthority: 'beta.lens.app');
+
+      // Clear only alpha authority
+      await storage.clearToken(backendAuthority: 'alpha.lens.app');
+      expect(await storage.getToken(backendAuthority: 'alpha.lens.app'), isNull);
+      expect(await storage.getToken(backendAuthority: 'beta.lens.app'), equals('secure_beta_token'));
+      expect(await storage.getToken(), equals('secure_global_token'));
+
+      // Clear global token
+      await storage.clearToken();
+      expect(await storage.getToken(), isNull);
+      expect(await storage.getToken(backendAuthority: 'beta.lens.app'), equals('secure_beta_token'));
+    });
+
     test('authority key formatting is collision-resistant and handles distinct delimiters and ports', () async {
       final storage = InMemoryAuthTokenStorage();
 
@@ -1156,7 +1185,181 @@ void main() {
       expect(auth.currentUser?.email, equals('session2@lens.app'));
       expect(auth.hasStorageCleanupError, isFalse);
     });
+
+    test('handleSessionExpired with no explicit authority uses active authority and never wipes global token', () async {
+      final storage = InMemoryAuthTokenStorage();
+      await storage.saveToken('global_safe_token');
+
+      final auth = AuthService(storage: storage);
+      await auth.setSession(
+        user: const User(id: 'u-auth-a', email: 'user@authority-a.lens', isActive: true),
+        token: 'token_authority_a',
+        backendAuthority: 'authority-a.lens.internal',
+      );
+
+      // Trigger session expiry without specifying an authority argument
+      await auth.handleSessionExpired();
+
+      expect(auth.status, equals(AuthStatus.unauthenticated));
+      expect(auth.isAuthenticated, isFalse);
+
+      // Scoped token for Authority A MUST be cleared
+      expect(await storage.getToken(backendAuthority: 'authority-a.lens.internal'), isNull);
+
+      // Global token MUST remain intact and untouched
+      expect(await storage.getToken(), equals('global_safe_token'));
+    });
+
+    test('stale 401 from Authority A after logging into Authority B does not expire Authority B session or clear tokens', () async {
+      final storage = InMemoryAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Log into Authority A
+      await auth.setSession(
+        user: const User(id: 'u-a', email: 'user@auth-a.lens', isActive: true),
+        token: 'token_a',
+        backendAuthority: 'auth-a.lens.internal',
+      );
+      final int sessionAId = auth.sessionId;
+
+      // In-flight request to Authority A starts...
+      // User then logs into Authority B
+      await auth.setSession(
+        user: const User(id: 'u-b', email: 'user@auth-b.lens', isActive: true),
+        token: 'token_b',
+        backendAuthority: 'auth-b.lens.internal',
+      );
+      expect(auth.sessionId, isNot(equals(sessionAId)));
+
+      // Stale 401 arrives from Authority A with sessionAId
+      await auth.handleSessionExpired(sessionAId, 'auth-a.lens.internal');
+
+      // Session B MUST remain authenticated and untouched
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('user@auth-b.lens'));
+      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
+      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('token_b'));
+    });
+
+    test('clearSessionAndLogin cleanup failure preserves error, blocks authenticated API, supports retry, and subsequent login cannot inherit old token', () async {
+      final storage = FailingAuthTokenStorage()
+        ..failOnClear = true;
+      final auth = AuthService(storage: storage);
+
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'user1@lens.app', isActive: true),
+        token: 'persisted_token_1',
+        backendAuthority: 'api.lens.app',
+      );
+
+      // Attempt clearSessionAndLogin while secure storage clear fails
+      await expectLater(
+        auth.clearSessionAndLogin(),
+        throwsA(isA<AuthStorageException>()),
+      );
+
+      // UI state transitions safely to unauthenticated
+      expect(auth.status, equals(AuthStatus.unauthenticated));
+      expect(auth.isAuthenticated, isFalse);
+      expect(auth.currentUser, isNull);
+
+      // Cleanup failure is preserved and exposed
+      expect(auth.hasStorageCleanupError, isTrue);
+      expect(auth.storageCleanupError, isNotNull);
+      expect(auth.failedCleanupAuthority, equals('api.lens.app'));
+
+      // Application is kept safe from authenticated API use
+      final apiClient = ApiClient(
+        baseUrlOverride: 'https://api.lens.app',
+        authService: auth,
+      );
+      await expectLater(
+        apiClient.listCaptures(),
+        throwsA(predicate((e) => e is ApiException && e.isUnauthorized)),
+      );
+
+      // Deterministic retry path
+      storage.failOnClear = false;
+      await auth.retryStorageCleanup();
+      expect(auth.hasStorageCleanupError, isFalse);
+      expect(auth.storageCleanupError, isNull);
+      expect(auth.failedCleanupAuthority, isNull);
+      expect(await storage.getToken(backendAuthority: 'api.lens.app'), isNull);
+
+      // Subsequent login establishes clean session and cannot inherit old credentials
+      await auth.setSession(
+        user: const User(id: 'u-2', email: 'user2@lens.app', isActive: true),
+        token: 'fresh_token_2',
+        backendAuthority: 'api.lens.app',
+      );
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('user2@lens.app'));
+      expect(await storage.getToken(backendAuthority: 'api.lens.app'), equals('fresh_token_2'));
+    });
   });
+}
+
+class FakeFlutterSecureStorage extends Fake implements FlutterSecureStorage {
+  final Map<String, String> _map = {};
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (value == null) {
+      _map.remove(key);
+    } else {
+      _map[key] = value;
+    }
+  }
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    return _map[key];
+  }
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    _map.remove(key);
+  }
+
+  @override
+  Future<bool> containsKey({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    return _map.containsKey(key);
+  }
 }
 
 class FailingAuthTokenStorage implements AuthTokenStorage {
@@ -1164,6 +1367,7 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
   bool failOnGet = false;
   bool failOnClear = false;
   String? token;
+  final Map<String, String> tokens = {};
 
   @override
   Future<void> saveToken(String token, {String? backendAuthority}) async {
@@ -1171,6 +1375,8 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
       throw const AuthStorageException('Simulated keystore save failure');
     }
     this.token = token;
+    final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
+    tokens[key] = token;
   }
 
   @override
@@ -1178,7 +1384,11 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnGet) {
       throw const AuthStorageException('Simulated keystore read failure');
     }
-    return token;
+    if (backendAuthority != null && backendAuthority.isNotEmpty) {
+      final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
+      return tokens[key];
+    }
+    return token ?? tokens[InMemoryAuthTokenStorage.formatKey(null)];
   }
 
   @override
@@ -1187,13 +1397,17 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
       throw const AuthStorageException('Simulated keystore clear failure');
     }
     token = null;
+    if (backendAuthority != null && backendAuthority.isNotEmpty) {
+      final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
+      tokens.remove(key);
+    } else {
+      tokens.clear();
+    }
   }
 
   @override
   Future<bool> hasToken({String? backendAuthority}) async {
-    if (failOnGet) {
-      throw const AuthStorageException('Simulated keystore read failure');
-    }
-    return token != null && token!.isNotEmpty;
+    final t = await getToken(backendAuthority: backendAuthority);
+    return t != null && t.isNotEmpty;
   }
 }

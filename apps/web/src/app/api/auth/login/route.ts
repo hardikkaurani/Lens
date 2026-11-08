@@ -83,12 +83,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate expiry is a positive finite number bounded by backend contract
+    // Validate expiry is a positive finite number
     if (
       typeof tokenData.expires_in !== "number" ||
       !Number.isFinite(tokenData.expires_in) ||
-      tokenData.expires_in <= 0 ||
-      tokenData.expires_in > MAX_EXPIRY_SECONDS
+      tokenData.expires_in <= 0
     ) {
       return NextResponse.json(
         { detail: "Invalid token expiry received from authentication service." },
@@ -97,7 +96,8 @@ export async function POST(request: NextRequest) {
     }
 
     const accessToken = tokenData.access_token.trim();
-    const expiresIn = Math.floor(tokenData.expires_in);
+    // Cap cookie lifetime independently (e.g. 30 days) without rejecting backend tokens whose lifetime exceeds the cap
+    const cookieMaxAge = Math.min(Math.floor(tokenData.expires_in), MAX_EXPIRY_SECONDS);
 
     // 2. Fetch authenticated user profile using token before setting any cookie
     const meRes = await fetch(`${backendUrl}/auth/me`, {
@@ -125,7 +125,7 @@ export async function POST(request: NextRequest) {
 
     // 3. Persist JWT in HttpOnly cookie ONLY AFTER all checks and profile verification succeed
     try {
-      await setAuthCookie(accessToken, expiresIn);
+      await setAuthCookie(accessToken, cookieMaxAge);
     } catch {
       return NextResponse.json(
         { detail: "Failed to establish secure session cookie." },

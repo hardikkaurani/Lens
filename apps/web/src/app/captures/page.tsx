@@ -17,7 +17,7 @@ const PAGE_LIMIT = 15;
 const MAX_POLL_ATTEMPTS = 10;
 const POLL_INTERVAL_MS = 3000;
 
-export function CapturesContent() {
+function CapturesContent() {
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [total, setTotal] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);

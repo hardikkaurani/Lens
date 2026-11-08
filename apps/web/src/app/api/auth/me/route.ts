@@ -21,8 +21,11 @@ export async function GET(_request: NextRequest) {
     });
 
     if (res.status === 401) {
-      // Token is invalid or expired: purge invalid cookie
-      await clearAuthCookie();
+      // Purge invalid cookie only if it has not already been replaced by a newer session
+      const currentToken = await getStoredToken();
+      if (currentToken === token) {
+        await clearAuthCookie();
+      }
       return NextResponse.json(
         { detail: "Session expired or invalid credentials." },
         { status: 401 }

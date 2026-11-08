@@ -4,7 +4,7 @@ import React from "react";
 import { FileCaptureForm } from "@/components/FileCaptureForm";
 import NewCapturePage from "@/app/captures/new/page";
 import NewFileCapturePage from "@/app/captures/new/file/page";
-import { CaptureDetailContent } from "@/app/captures/[id]/page";
+import { CaptureDetailContent } from "@/components/CaptureDetailContent";
 import { SourceTypeBadge } from "@/components/SourceTypeBadge";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import { validatePdfFile, MAX_FILE_SIZE_BYTES } from "@/lib/validation";

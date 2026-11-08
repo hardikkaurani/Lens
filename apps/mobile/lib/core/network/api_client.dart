@@ -81,6 +81,12 @@ class ApiClient {
       'Content-Type': 'application/json',
     };
     if (requireAuth) {
+      if (_authService != null && !_authService.isAuthenticated) {
+        throw const ApiException(
+          statusCode: 401,
+          message: 'Authentication required. Current session is unauthenticated.',
+        );
+      }
       final authority = _currentAuthority;
       final token = await (_tokenStorage?.getToken(backendAuthority: authority) ??
           _authService?.storage.getToken(backendAuthority: authority));
@@ -267,6 +273,7 @@ class ApiClient {
     Duration timeout = _defaultTimeout,
     bool notifyAuthOn401 = true,
   }) async {
+    final requestSessionId = _authService?.sessionId;
     try {
       final res = await requestFn().timeout(timeout);
       if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -275,9 +282,11 @@ class ApiClient {
       }
       if (res.statusCode == 401 && notifyAuthOn401) {
         final currentSessionId = _authService?.sessionId;
-        final authority = _currentAuthority;
-        _onSessionExpired?.call();
-        await _authService?.handleSessionExpired(currentSessionId, authority);
+        if (currentSessionId == null || currentSessionId == requestSessionId) {
+          final authority = _currentAuthority;
+          _onSessionExpired?.call();
+          await _authService?.handleSessionExpired(requestSessionId, authority);
+        }
       }
       throw ApiException.fromResponse(res.statusCode, res.body);
     } on SocketException {
