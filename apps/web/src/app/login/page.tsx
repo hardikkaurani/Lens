@@ -7,15 +7,32 @@ import { useAuth } from "@/lib/auth-context";
 import { LensLogo } from "@/components/LensLogo";
 import { ApiClientError } from "@/lib/api-client";
 
+function getSafeRedirect(rawRedirect: string | null): string {
+  if (!rawRedirect) return "/captures";
+  try {
+    const trimmed = rawRedirect.trim();
+    if (
+      trimmed.startsWith("/") &&
+      !trimmed.startsWith("//") &&
+      !trimmed.includes("\\") &&
+      !trimmed.includes("\0")
+    ) {
+      const parsed = new URL(trimmed, "http://localhost");
+      if (parsed.origin === "http://localhost") {
+        return parsed.pathname + parsed.search + parsed.hash;
+      }
+    }
+  } catch {
+    // Malformed URI
+  }
+  return "/captures";
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const rawRedirect = searchParams.get("redirect");
-  // Sanitize redirect: must start with / and not // to prevent open redirect
-  const redirectTarget =
-    rawRedirect && rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
-      ? rawRedirect
-      : "/captures";
+  const redirectTarget = getSafeRedirect(rawRedirect);
 
   const { login } = useAuth();
   const [email, setEmail] = useState("");
@@ -49,6 +66,7 @@ function LoginForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!validate()) return;
 
     setSubmitting(true);

@@ -1,9 +1,27 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render as rtlRender, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import SearchPage from "@/app/search/page";
 import { apiClient, ApiClientError } from "@/lib/api-client";
-import type { SearchResponse } from "@/types/api";
+import { AuthProvider } from "@/lib/auth-context";
+import type { SearchResponse, User } from "@/types/api";
+
+const mockAuthUser: User = {
+  id: "u-1",
+  email: "user@example.com",
+  is_active: true,
+};
+
+function render(ui: React.ReactElement, options?: any) {
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <AuthProvider initialUser={mockAuthUser} initialLoading={false}>
+        {children}
+      </AuthProvider>
+    ),
+    ...options,
+  });
+}
 
 let mockSearchParams = new URLSearchParams();
 const navListeners = new Set<() => void>();
@@ -21,6 +39,7 @@ const mockRouterPush = vi.fn((url: string) => {
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockRouterPush }),
+  usePathname: () => "/search",
   useSearchParams: () => {
     const [, setTick] = React.useState(0);
     React.useEffect(() => {
@@ -39,6 +58,7 @@ describe("Search Experience & UX (Tests 20-26, 31)", () => {
     vi.restoreAllMocks();
     mockRouterPush.mockClear();
     setMockSearchParams(new URLSearchParams());
+    vi.spyOn(apiClient, "getMe").mockResolvedValue(mockAuthUser);
   });
 
   // 20. Search success
@@ -612,6 +632,7 @@ describe("Duplicate Request Elimination & Single Effective Request (Stage 16.1 F
     vi.restoreAllMocks();
     mockRouterPush.mockClear();
     setMockSearchParams(new URLSearchParams());
+    vi.spyOn(apiClient, "getMe").mockResolvedValue(mockAuthUser);
   });
 
   const mockSearchResult: SearchResponse = {

@@ -12,6 +12,7 @@ const mockRouterPush = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockRouterPush }),
   usePathname: () => "/captures/new",
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 const mockAuthUser: User = {
@@ -42,7 +43,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
   // 4. Capture list loading
   it("4. displays loading skeleton while captures are being fetched", () => {
     vi.spyOn(apiClient, "listCaptures").mockReturnValue(new Promise(() => {})); // pending promise
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     expect(screen.getAllByTestId("loading-skeleton").length).toBeGreaterThan(0);
   });
@@ -73,7 +74,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
     };
     vi.spyOn(apiClient, "listCaptures").mockResolvedValue(mockResponse);
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("FastAPI Documentation")).toBeInTheDocument();
@@ -92,7 +93,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       offset: 0,
     });
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("No captures yet")).toBeInTheDocument();
@@ -106,7 +107,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       new ApiClientError(500, "Unable to load captures from database.")
     );
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Unable to load captures from database.")).toBeInTheDocument();

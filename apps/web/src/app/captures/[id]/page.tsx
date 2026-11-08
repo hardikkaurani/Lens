@@ -10,6 +10,7 @@ import { ErrorMessage } from "@/components/ErrorMessage";
 import { LoadingCardSkeleton } from "@/components/LoadingSkeleton";
 import { formatDate, formatFileSize } from "@/lib/format";
 import { sanitizeUrl } from "@/lib/security";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 const MAX_POLL_ATTEMPTS = 10;
 const POLL_INTERVAL_MS = 3000;
@@ -348,5 +349,9 @@ export function CaptureDetailContent({ id }: { id: string }) {
 
 export default function CaptureDetailPage({ params }: PageProps) {
   const { id } = use(params);
-  return <CaptureDetailContent id={id} />;
+  return (
+    <ProtectedRoute>
+      <CaptureDetailContent id={id} />
+    </ProtectedRoute>
+  );
 }

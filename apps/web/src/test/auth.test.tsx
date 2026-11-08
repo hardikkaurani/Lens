@@ -489,4 +489,218 @@ describe("Web Authentication & Client Integration", () => {
       );
     });
   });
+
+  describe("6. Hardening Regression Tests (Stage 19.3.1)", () => {
+    it("race condition: slow refreshUser does not overwrite newer login", async () => {
+      let resolveGetMe: (val: any) => void = () => {};
+      const slowGetMePromise = new Promise((resolve) => {
+        resolveGetMe = resolve;
+      });
+      vi.spyOn(apiClient, "getMe").mockReturnValueOnce(slowGetMePromise as any);
+
+      let auth: ReturnType<typeof useAuth> | null = null;
+      function TestComponent() {
+        auth = useAuth();
+        return <div>{auth.user?.email || "none"}</div>;
+      }
+
+      render(
+        <AuthProvider>
+          <TestComponent />
+        </AuthProvider>
+      );
+
+      // Now trigger a login while getMe is still in flight
+      const loggedInUser = { id: "u-fast", email: "fast@example.com", is_active: true };
+      vi.spyOn(apiClient, "login").mockResolvedValueOnce({ user: loggedInUser });
+
+      await waitFor(() => {
+        expect(auth).not.toBeNull();
+      });
+
+      await auth!.login("fast@example.com", "pass");
+
+      await waitFor(() => {
+        expect(auth!.user).toEqual(loggedInUser);
+      });
+
+      // Now resolve the older slow getMe with 401 or null
+      resolveGetMe(null);
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Active user MUST NOT be overwritten
+      expect(auth!.user).toEqual(loggedInUser);
+    });
+
+    it("503 / network error sets verificationError and preserves session without redirecting", async () => {
+      vi.spyOn(apiClient, "getMe").mockRejectedValueOnce(
+        new ApiClientError(503, "Backend Database Unavailable")
+      );
+
+      render(
+        <AuthProvider>
+          <ProtectedRoute>
+            <div>Protected Content</div>
+          </ProtectedRoute>
+        </AuthProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("auth-verification-error")).toBeInTheDocument();
+      });
+
+      expect(screen.getByText(/Backend Database Unavailable/i)).toBeInTheDocument();
+      expect(mockPush).not.toHaveBeenCalled();
+      expect(screen.queryByText("Protected Content")).not.toBeInTheDocument();
+    });
+
+    it("retryVerification clears error and renders content when service recovers", async () => {
+      vi.spyOn(apiClient, "getMe").mockRejectedValueOnce(
+        new ApiClientError(503, "Backend Down")
+      );
+
+      const recoveredUser = { id: "u-rec", email: "recovered@example.com", is_active: true };
+
+      render(
+        <AuthProvider>
+          <ProtectedRoute>
+            <div>Protected Content Recovered</div>
+          </ProtectedRoute>
+        </AuthProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId("auth-verification-error")).toBeInTheDocument();
+      });
+
+      // Now backend recovers
+      vi.spyOn(apiClient, "getMe").mockResolvedValueOnce(recoveredUser);
+
+      fireEvent.click(screen.getByTestId("retry-verification-btn"));
+
+      await waitFor(() => {
+        expect(screen.getByText("Protected Content Recovered")).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId("auth-verification-error")).not.toBeInTheDocument();
+    });
+
+    it("logout failure preserves user session and does not redirect to login", async () => {
+      const activeUser = { id: "u-active", email: "stay@example.com", is_active: true };
+      vi.spyOn(apiClient, "logout").mockRejectedValueOnce(new Error("Network disconnect"));
+
+      let auth: ReturnType<typeof useAuth> | null = null;
+      function LogoutProbe() {
+        auth = useAuth();
+        return <div>{auth.user?.email}</div>;
+      }
+
+      render(
+        <AuthProvider initialUser={activeUser} initialLoading={false}>
+          <LogoutProbe />
+        </AuthProvider>
+      );
+
+      await expect(auth!.logout()).rejects.toThrow("Network disconnect");
+
+      // User session must remain active
+      expect(auth!.user).toEqual(activeUser);
+      expect(mockPush).not.toHaveBeenCalled();
+    });
+
+    it("login rejects open redirect attempts to external protocols or domains", async () => {
+      mockSearchParams = new URLSearchParams("redirect=//evil.com/phish");
+      vi.spyOn(apiClient, "login").mockResolvedValueOnce({
+        user: { id: "u-1", email: "user@example.com", is_active: true },
+      });
+
+      render(
+        <AuthProvider initialUser={null} initialLoading={false}>
+          <LoginPage />
+        </AuthProvider>
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email/i), { target: { value: "user@example.com" } });
+      fireEvent.change(screen.getByLabelText(/Password/i), { target: { value: "Secret123!" } });
+      fireEvent.click(screen.getByRole("button", { name: /^Sign In$/i }));
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith("/captures");
+      });
+      expect(mockPush).not.toHaveBeenCalledWith("//evil.com/phish");
+    });
+
+    it("login preserves safe same-origin path with search query", async () => {
+      mockSearchParams = new URLSearchParams("redirect=" + encodeURIComponent("/search?q=test&filter=all"));
+      vi.spyOn(apiClient, "login").mockResolvedValueOnce({
+        user: { id: "u-1", email: "user@example.com", is_active: true },
+      });
+
+      render(
+        <AuthProvider initialUser={null} initialLoading={false}>
+          <LoginPage />
+        </AuthProvider>
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email/i), { target: { value: "user@example.com" } });
+      fireEvent.change(screen.getByLabelText(/Password/i), { target: { value: "Secret123!" } });
+      fireEvent.click(screen.getByRole("button", { name: /^Sign In$/i }));
+
+      await waitFor(() => {
+        expect(mockPush).toHaveBeenCalledWith("/search?q=test&filter=all");
+      });
+    });
+
+    it("register handles auto-login failure separately from account creation", async () => {
+      vi.spyOn(apiClient, "register").mockResolvedValueOnce({
+        id: "u-reg",
+        email: "newuser@example.com",
+        is_active: true,
+      });
+      vi.spyOn(apiClient, "login").mockRejectedValueOnce(
+        new ApiClientError(500, "Auto-login failed after registration")
+      );
+
+      render(
+        <AuthProvider initialUser={null} initialLoading={false}>
+          <RegisterPage />
+        </AuthProvider>
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email/i), { target: { value: "newuser@example.com" } });
+      fireEvent.change(screen.getByLabelText(/^Password/i), { target: { value: "Password123!" } });
+      fireEvent.change(screen.getByLabelText(/Confirm Password/i), { target: { value: "Password123!" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create Account/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/account has been created successfully/i)).toBeInTheDocument();
+        expect(screen.getByTestId("signin-after-register-btn")).toBeInTheDocument();
+      });
+    });
+
+    it("login prevents duplicate concurrent submissions", async () => {
+      let resolveLogin: (val: any) => void = () => {};
+      const loginPromise = new Promise((resolve) => {
+        resolveLogin = resolve;
+      });
+      const loginSpy = vi.spyOn(apiClient, "login").mockReturnValue(loginPromise as any);
+
+      render(
+        <AuthProvider initialUser={null} initialLoading={false}>
+          <LoginPage />
+        </AuthProvider>
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email/i), { target: { value: "user@example.com" } });
+      fireEvent.change(screen.getByLabelText(/Password/i), { target: { value: "Secret123!" } });
+
+      const submitBtn = screen.getByRole("button", { name: /^Sign In$/i });
+      fireEvent.click(submitBtn);
+      fireEvent.click(submitBtn);
+      fireEvent.click(submitBtn);
+
+      expect(loginSpy).toHaveBeenCalledTimes(1);
+
+      resolveLogin({ user: { id: "u-1", email: "user@example.com", is_active: true } });
+    });
+  });
 });

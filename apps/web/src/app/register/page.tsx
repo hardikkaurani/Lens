@@ -7,14 +7,32 @@ import { useAuth } from "@/lib/auth-context";
 import { LensLogo } from "@/components/LensLogo";
 import { ApiClientError } from "@/lib/api-client";
 
+function getSafeRedirect(rawRedirect: string | null): string {
+  if (!rawRedirect) return "/captures";
+  try {
+    const trimmed = rawRedirect.trim();
+    if (
+      trimmed.startsWith("/") &&
+      !trimmed.startsWith("//") &&
+      !trimmed.includes("\\") &&
+      !trimmed.includes("\0")
+    ) {
+      const parsed = new URL(trimmed, "http://localhost");
+      if (parsed.origin === "http://localhost") {
+        return parsed.pathname + parsed.search + parsed.hash;
+      }
+    }
+  } catch {
+    // Malformed URI
+  }
+  return "/captures";
+}
+
 function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const rawRedirect = searchParams.get("redirect");
-  const redirectTarget =
-    rawRedirect && rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
-      ? rawRedirect
-      : "/captures";
+  const redirectTarget = getSafeRedirect(rawRedirect);
 
   const { register, login } = useAuth();
   const [email, setEmail] = useState("");
@@ -24,6 +42,7 @@ function RegisterForm() {
   const [submitting, setSubmitting] = useState(false);
   const [clientError, setClientError] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const [accountCreated, setAccountCreated] = useState(false);
 
   const validate = (): boolean => {
     setClientError(null);
@@ -59,19 +78,27 @@ function RegisterForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!validate()) return;
 
     setSubmitting(true);
     setServerError(null);
 
+    let created = false;
     try {
       await register(email.trim(), password);
+      created = true;
+      setAccountCreated(true);
       // Automatically log user in after successful registration
       await login(email.trim(), password);
       router.push(redirectTarget);
       router.refresh();
     } catch (err) {
-      if (err instanceof ApiClientError) {
+      if (created) {
+        setServerError(
+          "Your account has been created successfully, but automatic sign-in could not be completed. Please sign in below."
+        );
+      } else if (err instanceof ApiClientError) {
         if (err.status === 409) {
           setServerError("An account with this email address already exists. Please sign in instead.");
         } else if (err.status === 422) {
@@ -121,7 +148,20 @@ function RegisterForm() {
                 d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
               />
             </svg>
-            <div className="flex-1 font-medium">{clientError || serverError}</div>
+            <div className="flex-1 font-medium">
+              <p>{clientError || serverError}</p>
+              {accountCreated && (
+                <div className="mt-2.5">
+                  <Link
+                    href={`/login?redirect=${encodeURIComponent(redirectTarget)}`}
+                    className="inline-flex items-center px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-md transition-colors"
+                    data-testid="signin-after-register-btn"
+                  >
+                    Sign In with Credentials
+                  </Link>
+                </div>
+              )}
+            </div>
           </div>
         )}
 

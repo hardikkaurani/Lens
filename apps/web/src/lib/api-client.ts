@@ -43,17 +43,25 @@ export class ApiClientError extends Error {
 
 /**
  * Resolve the API base URL.
- * In browser environments without an explicit public override, defaults to the Next.js BFF proxy.
+ * In browser environments, always routes through the Next.js BFF proxy to attach HttpOnly session cookies.
+ * In server-side environments, uses NEXT_PUBLIC_API_BASE_URL or defaults to localhost:8000.
  */
 export function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return "/api/proxy";
+  }
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (envUrl && envUrl.trim()) {
     return envUrl.trim().replace(/\/+$/, "");
   }
-  if (typeof window !== "undefined") {
-    return "/api/proxy";
-  }
   return "http://localhost:8000";
+}
+
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+  unauthorizedHandler = handler;
 }
 
 /**
@@ -130,6 +138,9 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     clearTimeout(timeoutId);
 
     if (!res.ok) {
+      if (res.status === 401 && !url.includes("/api/auth/login") && !url.includes("/api/auth/register")) {
+        unauthorizedHandler?.();
+      }
       let errorData: unknown = null;
       try {
         errorData = await res.json();
