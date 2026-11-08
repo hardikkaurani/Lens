@@ -154,3 +154,77 @@ In `apps/mobile/lib/main.dart`:
 - **Current Implementation**: Access tokens are stateless HMAC-SHA256 JWTs with a 7-day expiration (`ACCESS_TOKEN_EXPIRE_MINUTES = 10080`).
 - **Future Invalidation Requirement (Phase 2)**:
   - Implement a centralized Redis token revocation blocklist (`jti` claim tracking) to enable immediate server-side revocation on explicit user logout or password change prior to natural JWT expiration.
+
+---
+
+## 5. Stage 19.3.1 Hardening & Resilience Enhancements
+
+### 5.1 Mobile Secure Storage & Keystore Reset Policy
+
+- **`AndroidOptions(resetOnError: false)` Rationale**:
+  Previously, `resetOnError: true` was enabled in `FlutterSecureStorage`. Under Android Keystore security semantics, transient hardware lockouts (such as device lock, biometric failure, or system reboot) triggered a total wipe of all persisted tokens. Setting `resetOnError: false` prevents silent credential loss.
+- **`AuthStorageException` Propagation**:
+  Hardware storage read, write, and deletion failures are encapsulated in a typed `AuthStorageException`.
+  - On **read** failure during session restoration: credentials are preserved and the application transitions to `AuthStatus.restorationFailed`.
+  - On **delete** failure during logout: the exception is propagated to the caller, preventing the UI from falsely indicating that the session was purged while tokens remain on disk.
+
+### 5.2 Mobile Session Concurrency & Generation Tracking
+
+- **Generation Counter (`_sessionId`)**:
+  `AuthService` tracks an incrementing integer `_sessionId` updated on every login, session restoration, and logout.
+- **Race Condition Prevention**:
+  - Slow background startup restorations (`restoreSession`) capture the initial `requestSessionId`. If the user logs in before restoration finishes, the stale response is safely discarded.
+  - Stale `401 Unauthorized` responses from earlier requests do not wipe newer active sessions.
+
+### 5.3 Mobile Backend Authority Isolation & Transport Security
+
+- **Authority-Scoped Storage**:
+  Tokens are stored with backend authority keys (`lens_access_token_<sanitized_authority>`). Tokens issued by one backend (e.g., `https://api-a.lens.app`) cannot be read by or sent to another backend (e.g., `https://api-b.lens.app`).
+- **Transport Security Assertion (`_assertSecureTransport`)**:
+  All credentials endpoints (`/auth/login`, `/auth/register`) and requests injecting Bearer tokens reject cleartext `http://` transport across remote networks, allowing plain HTTP only for local loopback addresses (`127.0.0.1`, `localhost`, `10.0.2.2`).
+
+### 5.4 Web CSRF Hardening, Host Header Enforcement & Proxy Redirects
+
+- **Fail-Closed CSRF on Missing Host**:
+  `verifyCsrfOrigin` strictly rejects mutating HTTP requests (`POST`, `PUT`, `PATCH`, `DELETE`) if the `Host` header is missing or empty.
+- **Trusted Origin Validation**:
+  In addition to same-host origin matching, `verifyCsrfOrigin` verifies origins against configured reverse-proxy environments (`TRUSTED_ORIGIN`, `NEXT_PUBLIC_APP_URL`, `ALLOWED_ORIGIN`).
+- **Target URL Path Normalization & Prefix Allowlist**:
+  The Next.js reverse proxy (`/api/proxy/[...path]`) validates that normalized target URLs resolve within the configured backend origin and match allowed path prefixes (`captures`, `search`, `integrations`, `health`).
+- **Backend-Local Location Rewriting**:
+  When the backend responds with a redirect (`3xx`) containing an internal `Location` header, the proxy rewrites the header to `/api/proxy/...` so browsers route through the proxy rather than attempting direct connections to internal backend ports.
+
+---
+
+## 6. CodeRabbit Review Audit & Resolution Matrix
+
+The following table documents the verification, status, and resolution evidence for all 26 CodeRabbit review comments on PR #13:
+
+| # | Comment ID | Subsystem & File | Reviewer Finding / Concern | Verification Status | Implemented Action / Resolution | Regression Test |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | `4505000215` | Mobile: `auth_service.dart` | Token restoration catch cleared tokens on all errors, wiping credentials on network failures. | **Valid Defect** | Updated catch block to clear tokens strictly on `ApiException(401)`; network, timeout, and server errors preserve token with `AuthStatus.restorationFailed`. | `restoreSession preserves token and sets restorationFailed on network failure` |
+| **2** | `4505000219` | Mobile: `auth_token_storage.dart` | Token deletion flow swallowed errors from `_storage.delete`, falsely indicating successful sign-out. | **Valid Defect** | Introduced `AuthStorageException` and propagated delete errors to caller in `logout()`. | `AuthStorageException on clear during logout propagates and preserves session` |
+| **3** | `4505000221` | Mobile: `api_client.dart` | Tokens were not scoped by backend authority, risking cross-backend token leakage. | **Valid Defect** | Implemented authority-keyed storage in `AuthTokenStorage` and attached tokens only matching current authority. | `tokens are isolated by backend authority preventing cross-backend token reuse` |
+| **4** | `4505000222` | Mobile: `api_client.dart` | Credentials and Bearer tokens could be transmitted over cleartext HTTP. | **Valid Defect** | Added `_assertSecureTransport` requiring HTTPS for sensitive requests (permitting loopback for tests). | `ApiClient rejects plain HTTP for remote sensitive endpoints and accepts HTTPS or loopback` |
+| **5** | `4505000224` | Mobile: `api_client.dart` | 401 session expiration wiped active session even if a newer session was established. | **Valid Defect** | Added `_sessionId` generation tracking; stale 401 responses with older session IDs are discarded. | `stale 401 response from older session does not clear replacement session` |
+| **6** | `4505000228` | Mobile: `main.dart` | When transitioning to unauthenticated, navigation stack was not reset to login screen. | **Valid Defect** | Updated `_handleAuthStateChanged` to call `_navigatorKey.currentState?.popUntil((r) => r.isFirst)`. | Verified in `main.dart` auth state transition handler. |
+| **7** | `4505000231` | Mobile: `login_screen.dart` | Repeated taps on submit triggered multiple concurrent authentication requests. | **Valid Defect** | Added `if (_isLoading) return;` at entry of `_submit()` in `LoginScreen` and `RegisterScreen`. | `LoginScreen ignores repeated submit taps while request is in-flight` |
+| **8** | `4505000234` | Mobile: `register_screen.dart` | Registration failure and post-registration auto-login failure were conflated. | **Valid Defect** | Differentiated account creation state (`accountCreated`); prompts user to log in if auto-login fails. | `RegisterScreen displays clear notice when auto-login fails after account creation` |
+| **9** | `4505000240` | Web: `/api/auth/login` | Session cookie was issued without validating profile via `/auth/me`. | **Already Resolved** | Route handler validates backend response structure and calls `GET /auth/me` before writing cookie. | `fails closed (502) and sets no cookie when /auth/me fails after login` |
+| **10** | `4505000242` | Web: `/api/proxy` | `transfer-encoding` was forwarded to backend. | **Already Resolved** | Added to `BLOCKED_FORWARD_HEADERS` in proxy route handler. | `strips client-provided Authorization header and uses cookie token` |
+| **11** | `4505000249` | Web: `ProtectedRoute.tsx` | `usePathname` was called inside try/catch block violating Rules of Hooks. | **Valid Defect** | Moved `usePathname` and `useSearchParams` unconditionally into top-level component wrapped in `<Suspense>`. | Next.js static prerender build + Vitest route protection suite. |
+| **12** | `4505000253` | Web: `ProtectedRoute.tsx` | Query parameters were dropped when constructing `redirectUrl`. | **Valid Defect** | Appended `searchParams` to `pathname` when building continuation redirect URL. | `login preserves safe same-origin path with search query` |
+| **13** | `4505002530` | Web: `/api/proxy` | Target URL was not validated against whitelist before dispatch. | **Valid Defect** | Added URL construction and validated normalized path against `ALLOWED_PATH_PREFIXES`. | `rejects non-allowlisted prefix with 403` |
+| **14** | `4505002537` | Web: `/api/proxy` | Upstream redirect `Location` header leaked internal backend URLs. | **Valid Defect** | Rewrote backend-local `Location` headers to `/api/proxy/...`. | `rewrites backend-local Location headers on redirects to /api/proxy` |
+| **15** | `4505002540` | Web: Data-fetching pages | Data-fetching pages ran effects before authentication checks completed. | **Valid Defect** | Wrapped `CapturesPage`, `CaptureDetailPage`, and `SearchPage` with `<ProtectedRoute>`. | Search & Captures test suites rendering under `renderWithAuth`. |
+| **16** | `4505002542` | Web: `login/page.tsx` | Login redirect destination was vulnerable to open redirect (`//evil.com`). | **Valid Defect** | Added `getSafeRedirect()` strictly validating destination is a same-origin path starting with `/`. | `login rejects open redirect attempts to external protocols or domains` |
+| **17** | `4505002545` | Web: `register/page.tsx` | Auto-login failure after registration displayed account creation error. | **Valid Defect** | Tracked `accountCreated` state; displays success notification and direct sign-in button. | `register handles auto-login failure separately from account creation` |
+| **18** | `4505002547` | Web: `api-client.ts` | Browser API client bypassed BFF proxy when `NEXT_PUBLIC_API_BASE_URL` was set. | **Valid Defect** | Updated `getApiBaseUrl()` so browser environments always route through `/api/proxy`. | Web API client tests verifying `/api/proxy` routing. |
+| **19** | `4505002551` | Web: `api-client.ts` | Protected 401 API responses did not trigger session refresh in `AuthProvider`. | **Valid Defect** | Wired `unauthorizedHandler` in `api-client` to trigger `refreshUser()` in `AuthProvider`. | AuthContext 401 callback listener tests. |
+| **20** | `4505002553` | Web: `auth-context.tsx` | In-flight `refreshUser` could overwrite a newer successful `login` response. | **Valid Defect** | Added `activeSeqRef` sequence counter; stale `refreshUser` responses are ignored. | `race condition: slow refreshUser does not overwrite newer login` |
+| **21** | `4505002555` | Web: `auth-context.tsx` | Transient 503 errors were treated as missing sessions and logged out users. | **Valid Defect** | Distinguished 401 from transient errors; exposed `verificationError` and `retryVerification()`. | `503 / network error sets verificationError and preserves session without redirecting` |
+| **22** | `4505002557` | Web: `auth-context.tsx` | `logout` cleared state and redirected even when backend logout failed. | **Valid Defect** | Moved state clear and navigation to execute strictly after successful `apiClient.logout()`. | `logout failure preserves user session and does not redirect to login` |
+| **23** | `4505002558` | Web: Test types | Test mocks missed required fields (`success: true`). | **Valid Defect** | Updated mocks across `auth.test.tsx` to conform to `AuthSessionResponse`. | `npx tsc --noEmit` + `npm run build` static type check. |
+| **24** | `4505002559` | Web: `auth-context.tsx` | `useAuth()` returned fake user outside `AuthProvider`. | **Already Resolved** | `defaultAuthValue` removed; `useAuth()` throws error outside `AuthProvider`. | `throws explicit error when useAuth is called outside AuthProvider` |
+| **25** | `4505002560` | Web: `server-auth.ts` | CSRF origin validation failed behind reverse proxies with trusted hosts. | **Valid Defect** | Added `getTrustedHosts()` supporting `TRUSTED_ORIGIN`, `NEXT_PUBLIC_APP_URL`, and `ALLOWED_ORIGIN`. | `accepts mutating request when origin matches configured TRUSTED_ORIGIN` |
+| **26** | `4505002562` | Web: `server-auth.ts` | Missing `Host` header on mutating requests evaluated `!host` to true, bypassing CSRF check. | **Valid Defect** | Enforced that mutating requests without `Host` fail closed and return `false`. | `rejects mutating request when Host header is missing` |
