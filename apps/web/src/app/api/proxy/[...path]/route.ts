@@ -81,7 +81,36 @@ async function handleProxy(
   const backendBase = getBackendApiUrl();
   const subPath = path.map((s) => encodeURIComponent(decodeURIComponent(s))).join("/");
   const urlObj = new URL(request.url);
-  const targetUrl = `${backendBase}/${subPath}${urlObj.search}`;
+
+  let targetUrlObj: URL;
+  try {
+    targetUrlObj = new URL(`${backendBase}/${subPath}${urlObj.search}`);
+  } catch {
+    return NextResponse.json({ detail: "Invalid backend target URL." }, { status: 400 });
+  }
+
+  // Ensure target URL stays within the configured backend origin
+  const backendBaseObj = new URL(backendBase);
+  if (targetUrlObj.origin.toLowerCase() !== backendBaseObj.origin.toLowerCase()) {
+    return NextResponse.json(
+      { detail: "Target URL host mismatch." },
+      { status: 403 }
+    );
+  }
+
+  // Ensure normalized target pathname begins with an allowed prefix
+  const normalizedPath = targetUrlObj.pathname.replace(/^\/+/, "");
+  const hasAllowedPrefix = ALLOWED_PATH_PREFIXES.some(
+    (prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`)
+  );
+  if (!hasAllowedPrefix) {
+    return NextResponse.json(
+      { detail: "Access to the requested resource path is forbidden." },
+      { status: 403 }
+    );
+  }
+
+  const targetUrl = targetUrlObj.toString();
 
   const token = await getStoredToken();
   const headers = new Headers();
@@ -122,6 +151,23 @@ async function handleProxy(
       const lower = key.toLowerCase();
       if (!["content-encoding", "content-length", "transfer-encoding"].includes(lower)) {
         responseHeaders.set(key, value);
+      }
+    }
+
+    // Rewrite backend-local Location headers on redirects to route through the proxy
+    const location = backendRes.headers.get("location");
+    if (location) {
+      try {
+        const backendBaseObj = new URL(backendBase);
+        const locUrl = new URL(location, backendBase);
+        if (locUrl.origin.toLowerCase() === backendBaseObj.origin.toLowerCase()) {
+          const locPath = locUrl.pathname.replace(/^\/+/, "");
+          responseHeaders.set("Location", `/api/proxy/${locPath}${locUrl.search}`);
+        } else if (location.startsWith("/")) {
+          responseHeaders.set("Location", `/api/proxy${location}`);
+        }
+      } catch {
+        // Retain original Location if not parseable
       }
     }
 

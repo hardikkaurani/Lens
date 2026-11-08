@@ -8,7 +8,7 @@ interface ProtectedRouteProps {
   children: React.ReactNode;
 }
 
-export function ProtectedRoute({ children }: ProtectedRouteProps) {
+function RouteRedirectGuard({ children }: ProtectedRouteProps) {
   const { isAuthenticated, isLoading, verificationError, retryVerification } = useAuth();
   const router = useRouter();
   const pathname = usePathname() || "/";
@@ -69,4 +69,18 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
   }
 
   return <>{children}</>;
+}
+
+export function ProtectedRoute({ children }: ProtectedRouteProps) {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="flex items-center justify-center min-h-[50vh]" data-testid="auth-loading">
+          <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500" />
+        </div>
+      }
+    >
+      <RouteRedirectGuard>{children}</RouteRedirectGuard>
+    </React.Suspense>
+  );
 }

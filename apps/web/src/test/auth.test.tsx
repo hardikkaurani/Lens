@@ -512,7 +512,7 @@ describe("Web Authentication & Client Integration", () => {
 
       // Now trigger a login while getMe is still in flight
       const loggedInUser = { id: "u-fast", email: "fast@example.com", is_active: true };
-      vi.spyOn(apiClient, "login").mockResolvedValueOnce({ user: loggedInUser });
+      vi.spyOn(apiClient, "login").mockResolvedValueOnce({ success: true, user: loggedInUser });
 
       await waitFor(() => {
         expect(auth).not.toBeNull();
@@ -610,6 +610,7 @@ describe("Web Authentication & Client Integration", () => {
     it("login rejects open redirect attempts to external protocols or domains", async () => {
       mockSearchParams = new URLSearchParams("redirect=//evil.com/phish");
       vi.spyOn(apiClient, "login").mockResolvedValueOnce({
+        success: true,
         user: { id: "u-1", email: "user@example.com", is_active: true },
       });
 
@@ -632,6 +633,7 @@ describe("Web Authentication & Client Integration", () => {
     it("login preserves safe same-origin path with search query", async () => {
       mockSearchParams = new URLSearchParams("redirect=" + encodeURIComponent("/search?q=test&filter=all"));
       vi.spyOn(apiClient, "login").mockResolvedValueOnce({
+        success: true,
         user: { id: "u-1", email: "user@example.com", is_active: true },
       });
 
@@ -700,7 +702,7 @@ describe("Web Authentication & Client Integration", () => {
 
       expect(loginSpy).toHaveBeenCalledTimes(1);
 
-      resolveLogin({ user: { id: "u-1", email: "user@example.com", is_active: true } });
+      resolveLogin({ success: true, user: { id: "u-1", email: "user@example.com", is_active: true } });
     });
   });
 });

@@ -21,8 +21,29 @@ export function getBackendApiUrl(): string {
   return "http://localhost:8000";
 }
 
+function getTrustedHosts(): Set<string> {
+  const trusted = new Set<string>();
+  const envOrigins = [
+    process.env.TRUSTED_ORIGIN,
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.ALLOWED_ORIGIN,
+  ];
+  for (const envVal of envOrigins) {
+    if (envVal && envVal.trim()) {
+      try {
+        const u = new URL(envVal.trim());
+        trusted.add(u.host.toLowerCase());
+      } catch {
+        trusted.add(envVal.trim().toLowerCase());
+      }
+    }
+  }
+  return trusted;
+}
+
 /**
  * Verify same-origin for state-changing HTTP mutations to defeat CSRF attacks.
+ * Rejects mutating requests that omit Host or specify cross-origin sources.
  */
 export function verifyCsrfOrigin(request: Request): boolean {
   const method = request.method.toUpperCase();
@@ -31,63 +52,86 @@ export function verifyCsrfOrigin(request: Request): boolean {
     return true;
   }
 
-  const origin = request.headers.get("origin");
   const host = request.headers.get("host");
+  if (!host || !host.trim()) {
+    // Mutating requests without a Host header must fail closed
+    return false;
+  }
 
-  if (!origin) {
-    // Fall back to Referer check if Origin is absent
-    const referer = request.headers.get("referer");
-    if (!referer) {
-      return false;
-    }
+  const normalizedHost = host.trim().toLowerCase();
+  const trustedHosts = getTrustedHosts();
+
+  const isHostAllowed = (h: string) => {
+    const cleanH = h.toLowerCase();
+    return cleanH === normalizedHost || trustedHosts.has(cleanH);
+  };
+
+  const origin = request.headers.get("origin");
+  if (origin && origin.trim()) {
     try {
-      const refererUrl = new URL(referer);
-      return !host || refererUrl.host === host;
+      const originUrl = new URL(origin.trim());
+      return isHostAllowed(originUrl.host);
     } catch {
       return false;
     }
   }
 
-  try {
-    const originUrl = new URL(origin);
-    // Origin host must match the requested Host header
-    return !host || originUrl.host === host;
-  } catch {
-    return false;
+  // Fall back to Referer check if Origin is absent
+  const referer = request.headers.get("referer");
+  if (referer && referer.trim()) {
+    try {
+      const refererUrl = new URL(referer.trim());
+      return isHostAllowed(refererUrl.host);
+    } catch {
+      return false;
+    }
   }
+
+  return false;
 }
 
 /**
  * Extract the stored JWT access token from HttpOnly cookies.
  */
 export async function getStoredToken(): Promise<string | null> {
-  const cookieStore = await cookies();
-  const cookie = cookieStore.get(LENS_TOKEN_COOKIE);
-  return cookie?.value ?? null;
+  try {
+    const cookieStore = await cookies();
+    const cookie = cookieStore.get(LENS_TOKEN_COOKIE);
+    return cookie?.value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Set the JWT access token in an HttpOnly, Secure, SameSite=Lax cookie.
  */
 export async function setAuthCookie(token: string, expiresInSeconds: number): Promise<void> {
-  const cookieStore = await cookies();
   const isProduction = process.env.NODE_ENV === "production";
-
-  cookieStore.set(LENS_TOKEN_COOKIE, token, {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: "lax",
-    path: "/",
-    maxAge: expiresInSeconds,
-  });
+  try {
+    const cookieStore = await cookies();
+    cookieStore.set(LENS_TOKEN_COOKIE, token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      path: "/",
+      maxAge: expiresInSeconds,
+    });
+  } catch {
+    // Gracefully handle invocations outside Next request scope
+  }
 }
 
 /**
  * Clear the authentication cookie upon logout or token expiry.
  */
 export async function clearAuthCookie(): Promise<void> {
-  const cookieStore = await cookies();
-  cookieStore.delete(LENS_TOKEN_COOKIE);
+  try {
+    const cookieStore = await cookies();
+    cookieStore.delete(LENS_TOKEN_COOKIE);
+  } catch {
+    // Gracefully handle invocations outside Next request scope
+  }
 }
 
 /**

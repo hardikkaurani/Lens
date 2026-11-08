@@ -256,5 +256,72 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(setCookie).toContain("lens_access_token=");
       expect(setCookie).toContain("Max-Age=0");
     });
+
+    it("rejects mutating request when Host header is missing", async () => {
+      const req = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        method: "POST",
+        headers: {
+          origin: "http://localhost:3000",
+          // Host header intentionally missing
+        },
+        body: JSON.stringify({ url: "https://example.com" }),
+      });
+
+      const res = await proxyPost(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+      expect(res.status).toBe(403);
+      const data = await res.json();
+      expect(data.detail).toContain("CSRF");
+    });
+
+    it("accepts mutating request when origin matches configured TRUSTED_ORIGIN", async () => {
+      const originalEnv = process.env.TRUSTED_ORIGIN;
+      process.env.TRUSTED_ORIGIN = "https://app.lens.domain";
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const req = new NextRequest("https://proxy.internal/api/proxy/captures", {
+        method: "POST",
+        headers: {
+          host: "proxy.internal",
+          origin: "https://app.lens.domain",
+        },
+        body: JSON.stringify({ url: "https://example.com" }),
+      });
+
+      const res = await proxyPost(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+      expect(res.status).toBe(200);
+
+      process.env.TRUSTED_ORIGIN = originalEnv;
+    });
+
+    it("rewrites backend-local Location headers on redirects to /api/proxy", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: {
+            Location: "http://localhost:8000/captures/cap-123?view=detail",
+          },
+        })
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        headers: { host: "localhost:3000" },
+      });
+
+      const res = await proxyGet(req, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/api/proxy/captures/cap-123?view=detail");
+    });
   });
 });
