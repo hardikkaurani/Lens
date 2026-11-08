@@ -1301,21 +1301,22 @@ void main() {
   });
 
   group('8. Async Session Expiry Concurrency & Race Tests (Stage 19.3.2)', () {
-    test('Test A: concurrent replacement login survives asynchronous 401 token deletion race', () async {
+    test('Test A: concurrent replacement login survives asynchronous 401 token deletion race on the same authority', () async {
       final storage = ControlledAuthTokenStorage();
       final auth = AuthService(storage: storage);
+      const targetAuthority = 'auth.lens.internal';
 
-      // Establish Session A
+      // Establish Session A on targetAuthority
       const userA = User(id: 'u-a', email: 'session-a@lens.app', isActive: true);
       await auth.setSession(
         user: userA,
         token: 'jwt_token_a',
-        backendAuthority: 'auth-a.lens.internal',
+        backendAuthority: targetAuthority,
       );
       final int sessionAId = auth.sessionId;
       expect(auth.isAuthenticated, isTrue);
-      expect(auth.activeBackendAuthority, equals('auth-a.lens.internal'));
-      expect(await storage.getToken(backendAuthority: 'auth-a.lens.internal'), equals('jwt_token_a'));
+      expect(auth.activeBackendAuthority, equals(targetAuthority));
+      expect(await storage.getToken(backendAuthority: targetAuthority), equals('jwt_token_a'));
 
       // Configure storage to pause during clearToken
       final clearGate = Completer<void>();
@@ -1323,40 +1324,37 @@ void main() {
       storage.clearTokenGate = clearGate;
       storage.clearTokenStarted = clearStarted;
 
-      // Start a valid 401 expiry for Session A
-      final expiryFuture = auth.handleSessionExpired(sessionAId, 'auth-a.lens.internal');
+      // Start a valid 401 expiry for Session A on the same authority
+      final expiryFuture = auth.handleSessionExpired(sessionAId, targetAuthority);
 
       // Pause token deletion: ensure clearToken has started and entered asynchronous wait
       await clearStarted.future;
 
-      // Establish Session B (replacement login)
+      // Establish Session B (replacement login) on the EXACT SAME authority
       const userB = User(id: 'u-b', email: 'session-b@lens.app', isActive: true);
-      await auth.setSession(
+      final setSessionFuture = auth.setSession(
         user: userB,
         token: 'jwt_token_b',
-        backendAuthority: 'auth-b.lens.internal',
+        backendAuthority: targetAuthority,
       );
-      expect(auth.isAuthenticated, isTrue);
-      expect(auth.currentUser?.email, equals('session-b@lens.app'));
-      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
-      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('jwt_token_b'));
 
       // Complete the old deletion
       clearGate.complete();
       await expiryFuture;
+      await setSessionFuture;
 
-      // Assert Session B remains authenticated and its token remains intact
+      // Assert Session B remains authenticated and its token remains intact on targetAuthority
       expect(auth.isAuthenticated, isTrue);
       expect(auth.status, equals(AuthStatus.authenticated));
       expect(auth.currentUser?.email, equals('session-b@lens.app'));
-      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
-      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('jwt_token_b'));
-      expect(await storage.getToken(backendAuthority: 'auth-a.lens.internal'), isNull);
+      expect(auth.activeBackendAuthority, equals(targetAuthority));
+      expect(await storage.getToken(backendAuthority: targetAuthority), equals('jwt_token_b'));
     });
 
-    test('Test B: replacement login survives asynchronous 401 token deletion race during restoreSession', () async {
+    test('Test B: replacement login survives asynchronous 401 token deletion race during restoreSession on the same authority', () async {
       final storage = ControlledAuthTokenStorage();
-      await storage.saveToken('expired_stored_token', backendAuthority: 'auth-a.lens.internal');
+      const targetAuthority = 'auth.lens.internal';
+      await storage.saveToken('expired_stored_token', backendAuthority: targetAuthority);
       final auth = AuthService(storage: storage);
 
       final clearGate = Completer<void>();
@@ -1364,36 +1362,112 @@ void main() {
       storage.clearTokenGate = clearGate;
       storage.clearTokenStarted = clearStarted;
 
-      // Start session restoration with a profile fetch that triggers 401
+      // Start session restoration with a profile fetch that triggers 401 on targetAuthority
       final restoreFuture = auth.restoreSession(
         () async => throw const ApiException(statusCode: 401, message: 'Token expired or revoked'),
-        backendAuthority: 'auth-a.lens.internal',
+        backendAuthority: targetAuthority,
       );
 
       // Wait for 401 to trigger and token deletion to pause
       await clearStarted.future;
 
-      // Establish a replacement login while restoration token clearance is pending
+      // Establish a replacement login on the EXACT SAME authority while restoration token clearance is pending
       const replacementUser = User(id: 'u-replacement', email: 'replacement@lens.app', isActive: true);
-      await auth.setSession(
+      final setSessionFuture = auth.setSession(
         user: replacementUser,
         token: 'jwt_replacement_token',
-        backendAuthority: 'auth-b.lens.internal',
+        backendAuthority: targetAuthority,
       );
-      expect(auth.isAuthenticated, isTrue);
-      expect(auth.currentUser?.email, equals('replacement@lens.app'));
 
       // Complete the old deletion
       clearGate.complete();
       await restoreFuture;
+      await setSessionFuture;
 
-      // Assert the replacement session survives
+      // Assert the replacement session survives on targetAuthority
       expect(auth.isAuthenticated, isTrue);
       expect(auth.status, equals(AuthStatus.authenticated));
       expect(auth.currentUser?.email, equals('replacement@lens.app'));
-      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
-      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('jwt_replacement_token'));
+      expect(auth.activeBackendAuthority, equals(targetAuthority));
+      expect(await storage.getToken(backendAuthority: targetAuthority), equals('jwt_replacement_token'));
       expect(auth.isRestoring, isFalse);
+    });
+
+    test('delayed restoration token clearance failure with replacement login preserves replacement session', () async {
+      final storage = ControlledAuthTokenStorage();
+      const targetAuthority = 'auth.lens.internal';
+      await storage.saveToken('expired_stored_token', backendAuthority: targetAuthority);
+      final auth = AuthService(storage: storage);
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      final restoreFuture = auth.restoreSession(
+        () async => throw const ApiException(statusCode: 401, message: 'Token expired or revoked'),
+        backendAuthority: targetAuthority,
+      );
+
+      await clearStarted.future;
+
+      // Replacement login arrives while restoration clearance is in flight on the same authority
+      const replacementUser = User(id: 'u-replacement', email: 'replacement@lens.app', isActive: true);
+      final setSessionFuture = auth.setSession(
+        user: replacementUser,
+        token: 'jwt_replacement_token',
+        backendAuthority: targetAuthority,
+      );
+
+      // Fail on clear before completing gate
+      storage.failOnClear = true;
+      clearGate.complete();
+
+      await restoreFuture;
+      await setSessionFuture;
+
+      // Stale restoration failure must NOT overwrite replacement session
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('replacement@lens.app'));
+      expect(auth.activeBackendAuthority, equals(targetAuthority));
+      expect(auth.isRestoring, isFalse);
+      expect(await storage.getToken(backendAuthority: targetAuthority), equals('jwt_replacement_token'));
+    });
+
+    test('handleSessionExpired propagates storage error when requested even if replacement session took ownership', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+      const targetAuthority = 'auth.lens.internal';
+
+      const userA = User(id: 'u-a', email: 'session-a@lens.app', isActive: true);
+      await auth.setSession(user: userA, token: 'token-a', backendAuthority: targetAuthority);
+      final sessionAId = auth.sessionId;
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // Start expiry with propagateStorageError = true
+      final expiryFuture = auth.handleSessionExpired(sessionAId, targetAuthority, true);
+      await clearStarted.future;
+
+      // Replacement login takes ownership on the same authority
+      const userB = User(id: 'u-b', email: 'session-b@lens.app', isActive: true);
+      final setSessionFuture = auth.setSession(user: userB, token: 'token-b', backendAuthority: targetAuthority);
+
+      // Make clearance fail
+      storage.failOnClear = true;
+      clearGate.complete();
+
+      // Assert expiryFuture threw AuthStorageException
+      expect(await expiryFuture.then((_) => false, onError: (e) => e is AuthStorageException), isTrue);
+      await setSessionFuture;
+
+      // But replacement session state remains intact!
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('session-b@lens.app'));
     });
 
     test('delayed 401 token clearance failure during restoreSession sets restorationFailed and records storageCleanupError', () async {

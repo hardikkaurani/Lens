@@ -66,18 +66,34 @@ class AuthService extends ChangeNotifier {
     }
   }
 
+  /// Exposes serializing storage mutation runner for deterministic concurrent testing.
   @visibleForTesting
   Future<T> runStorageMutationForTesting<T>(String? backendAuthority, Future<T> Function() action) {
     return _runStorageMutation(backendAuthority, action);
   }
 
+  /// Current authenticated user profile, or null if unauthenticated.
   User? get currentUser => _currentUser;
+
+  /// Current authentication lifecycle status.
   AuthStatus get status => _status;
+
+  /// Whether an asynchronous authentication or session operation is in flight.
   bool get isLoading => _isLoading;
+
+  /// Whether session restoration from persistent storage is currently in flight.
   bool get isRestoring => _status == AuthStatus.restoring;
+
+  /// Whether the previous session restoration attempt failed and can be retried.
   bool get isRestorationFailed => _status == AuthStatus.restorationFailed;
+
+  /// Whether a valid user session is authenticated.
   bool get isAuthenticated => _status == AuthStatus.authenticated && _currentUser != null;
+
+  /// Monotonically increasing generation identifier for session lifecycle state.
   int get sessionId => _sessionId;
+
+  /// Target backend authority URL for the current session, if authority-scoped.
   String? get activeBackendAuthority => _activeBackendAuthority;
 
   /// Returns the most recent storage exception if secure token clearance failed during session expiry or restoration.
@@ -89,6 +105,7 @@ class AuthService extends ChangeNotifier {
   /// Returns the authority of the token whose clearance failed, if any.
   String? get failedCleanupAuthority => _failedCleanupAuthority;
 
+  /// Underlying token storage engine.
   AuthTokenStorage get storage => _storage;
 
   /// Explicitly clear the recorded storage cleanup error.
@@ -312,8 +329,17 @@ class AuthService extends ChangeNotifier {
     // If _sessionId changed while awaiting clearToken(), a replacement session or concurrent
     // lifecycle operation (e.g. setSession, logout, clearSessionAndLogin) took ownership.
     // In that case, this expiry operation is STALE and MUST NOT overwrite the newer in-memory
-    // authentication state, credentials, or error status.
+    // authentication state, credentials, or active user.
+    // However, if token deletion failed, record the failure and propagate if requested.
     if (_sessionId != expectedSessionIdAfterExpiry) {
+      if (clearError != null) {
+        _storageCleanupError = clearError;
+        _failedCleanupAuthority = targetAuthority;
+        notifyListeners();
+        if (propagateStorageError) {
+          throw clearError;
+        }
+      }
       return;
     }
 
