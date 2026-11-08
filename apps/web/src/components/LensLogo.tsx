@@ -16,21 +16,23 @@ export interface LensLogoProps {
   markOnly?: boolean;
   /** Version tag displayed alongside the wordmark (defaults to v1.0) */
   versionText?: string;
+  /** Visual surface theme: light (institutional white/neutral surfaces) or dark (overlay/cinematic) */
+  theme?: "light" | "dark";
 }
 
 const SIZE_CONFIGS = {
-  xs: { height: 18, width: 43, imgClass: "h-[18px] w-auto", textClass: "text-sm", subClass: "text-[9px]" },
-  sm: { height: 24, width: 57, imgClass: "h-6 w-auto", textClass: "text-base", subClass: "text-[10px]" },
-  md: { height: 32, width: 76, imgClass: "h-8 w-auto", textClass: "text-lg", subClass: "text-[10px]" },
-  lg: { height: 40, width: 95, imgClass: "h-10 w-auto", textClass: "text-xl", subClass: "text-xs" },
-  xl: { height: 56, width: 133, imgClass: "h-14 w-auto", textClass: "text-2xl", subClass: "text-sm" },
+  xs: { height: 18, width: 43, imgClass: "h-[18px] w-auto", textClass: "text-xs tracking-[0.14em]", subClass: "text-[9px]" },
+  sm: { height: 24, width: 57, imgClass: "h-6 w-auto", textClass: "text-sm tracking-[0.14em]", subClass: "text-[10px]" },
+  md: { height: 32, width: 76, imgClass: "h-8 w-auto", textClass: "text-base tracking-[0.14em]", subClass: "text-[11px]" },
+  lg: { height: 40, width: 95, imgClass: "h-10 w-auto", textClass: "text-lg tracking-[0.14em]", subClass: "text-xs" },
+  xl: { height: 56, width: 133, imgClass: "h-14 w-auto", textClass: "text-xl tracking-[0.14em]", subClass: "text-xs" },
 };
 
 /**
  * Official LENS Logo Component
  *
- * Renders the official metallic chrome ribbon & dot symbol based strictly
- * on the non-negotiable brand identity system.
+ * Refined institutional presentation with balanced proportions,
+ * crisp typography, and surface-aware theming.
  */
 export function LensLogo({
   size = "md",
@@ -40,8 +42,10 @@ export function LensLogo({
   priority = false,
   markOnly = false,
   versionText = "v1.0",
+  theme = "light",
 }: LensLogoProps) {
   const config = SIZE_CONFIGS[size] || SIZE_CONFIGS.md;
+  const isDark = theme === "dark";
 
   const symbolElement = (
     <div className="relative inline-flex items-center shrink-0">
@@ -50,7 +54,7 @@ export function LensLogo({
         alt="LENS Official Symbol"
         width={config.width}
         height={config.height}
-        className={`${config.imgClass} object-contain select-none transition-transform duration-200 group-hover:scale-105`}
+        className={`${config.imgClass} object-contain select-none transition-transform duration-150 group-hover:scale-[1.02]`}
         priority={priority}
         unoptimized
         data-testid="lens-symbol-img"
@@ -66,22 +70,30 @@ export function LensLogo({
     );
   }
 
+  const textColor = isDark ? "text-white" : "text-[#0B1A2F]";
+  const badgeClasses = isDark
+    ? "bg-white/10 text-slate-200 border-white/20"
+    : "bg-slate-100 text-[#5B6472] border-slate-200";
+  const subColor = isDark ? "text-slate-300" : "text-[#5B6472]";
+
   return (
-    <div className={`inline-flex items-center gap-3 ${className}`} data-testid="lens-logo">
+    <div className={`inline-flex items-center gap-2.5 ${className}`} data-testid="lens-logo">
       {symbolElement}
-      <div className="flex flex-col leading-none" data-testid="lens-wordmark">
-        <div className="flex items-center gap-2">
-          <span className={`font-black tracking-wider text-slate-100 uppercase ${config.textClass}`}>
+      <div className="flex flex-col justify-center leading-tight" data-testid="lens-wordmark">
+        <div className="flex items-center gap-1.5">
+          <span className={`font-semibold uppercase font-sans ${textColor} ${config.textClass}`}>
             LENS
           </span>
           {versionText && (
-            <span className="text-[9px] px-1.5 py-0.5 rounded font-mono font-medium bg-slate-800 text-slate-300 border border-slate-700/60 uppercase">
+            <span
+              className={`text-[9px] px-1.5 py-0.5 rounded-[3px] font-mono font-medium border uppercase tracking-wider ${badgeClasses}`}
+            >
               {versionText}
             </span>
           )}
         </div>
         {subtitle && (
-          <span className={`mt-1 font-mono uppercase tracking-widest text-slate-400 ${config.subClass}`}>
+          <span className={`mt-0.5 font-sans uppercase tracking-[0.14em] font-medium ${subColor} ${config.subClass}`}>
             {subtitle}
           </span>
         )}
