@@ -59,65 +59,58 @@ export function FileCaptureForm() {
 
     const validation = validatePdfFile(selectedFile);
     if (!validation.valid) {
+      setClientError(validation.error || "Invalid file format.");
       setFile(null);
-      setClientError(validation.error);
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
     setFile(selectedFile);
-    setClientError(null);
   };
 
-  // Drag and drop event handlers
-  const handleDragEnter = (e: React.DragEvent) => {
+  // Drag and drop events
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(true);
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!isDragging) setIsDragging(true);
+    setIsDragging(true);
   };
 
-  const handleDragLeave = (e: React.DragEvent) => {
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
-    // Only deactivate if leaving the drop container itself
-    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
     setIsDragging(false);
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
 
-    if (phase === "uploading" || phase === "processing") return;
-
-    const droppedFiles = e.dataTransfer.files;
-    if (droppedFiles && droppedFiles.length > 0) {
-      handleSelectFile(droppedFiles[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleSelectFile(e.dataTransfer.files[0]);
     }
   };
 
-  // Keyboard accessibility: trigger file picker with Enter or Space
-  const handleKeyDownDropZone = (e: React.KeyboardEvent) => {
-    if (phase === "uploading" || phase === "processing") return;
+  // Keyboard navigation for dropzone
+  const handleKeyDownDropZone = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       fileInputRef.current?.click();
     }
   };
 
-  // Reset form to select another file
+  // Reset form
   const handleReset = () => {
     stopPolling();
-    isUploadingRef.current = false;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
     setFile(null);
     setTitle("");
@@ -168,9 +161,8 @@ export function FileCaptureForm() {
           if (err instanceof ApiClientError && err.status === 404) {
             stopPolling();
             setPhase("failed");
-            setApiError("Capture record not found on server.");
+            setApiError(err.detail || "Capture record not found.");
           }
-          // On network glitch, let next poll interval attempt
         } finally {
           isPollingRef.current = false;
         }
@@ -179,63 +171,53 @@ export function FileCaptureForm() {
     [stopPolling]
   );
 
-  // Form submit: upload file
+  // Form submit (Upload)
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isUploadingRef.current) return;
 
-    if (isUploadingRef.current || phase === "uploading" || phase === "processing") {
+    if (!file) {
+      setClientError("Please select a PDF file to upload.");
+      return;
+    }
+
+    const validation = validatePdfFile(file);
+    if (!validation.valid) {
+      setClientError(validation.error || "Invalid file format.");
       return;
     }
 
     setClientError(null);
     setApiError(null);
-
-    const validation = validatePdfFile(file);
-    if (!validation.valid) {
-      setClientError(validation.error);
-      return;
-    }
-
-    if (!file) return;
-
-    if (title.length > 512) {
-      setClientError("Title must be 512 characters or fewer.");
-      return;
-    }
-
-    isUploadingRef.current = true;
     setPhase("uploading");
     setProgress(0);
+    isUploadingRef.current = true;
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
     try {
-      const response = await apiClient.uploadCapture(file, {
+      const capture = await apiClient.uploadCapture(file, {
         title: title.trim() || undefined,
-        signal: controller.signal,
-        onProgress: (prog: UploadProgress) => {
-          setProgress(prog.percentage);
+        onProgress: (p: UploadProgress) => {
+          setProgress(p.percentage);
         },
+        signal: controller.signal,
       });
 
-      setCreatedCapture(response);
-      setProgress(100);
+      setCreatedCapture(capture);
 
-      if (response.processing_status === "completed") {
+      if (capture.processing_status === "completed") {
         setPhase("completed");
-      } else if (response.processing_status === "failed") {
+      } else if (capture.processing_status === "failed") {
         setPhase("failed");
-        setApiError(response.processing_error || "PDF ingestion failed.");
+        setApiError(capture.processing_error || "PDF ingestion failed.");
       } else {
-        // Pending or processing: transition to polling
         setPhase("processing");
-        startPolling(response.id);
+        startPolling(capture.id);
       }
     } catch (err: unknown) {
       setPhase("idle");
-      setProgress(0);
-
       if (err instanceof ApiClientError) {
         setApiError(err.detail);
       } else {
@@ -254,10 +236,10 @@ export function FileCaptureForm() {
       {clientError && (
         <div
           role="alert"
-          className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2"
+          className="p-3.5 rounded-[4px] bg-[#FFFBEB] border border-[#FDE68A] text-[#B45309] text-xs flex items-center gap-2"
           data-testid="upload-client-error"
         >
-          <svg className="w-4 h-4 shrink-0 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <svg className="w-4 h-4 shrink-0 text-[#B45309]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <span>{clientError}</span>
@@ -272,31 +254,31 @@ export function FileCaptureForm() {
       {/* Success View */}
       {phase === "completed" && createdCapture && (
         <div
-          className="lens-card p-6 space-y-4 border-emerald-500/30 bg-emerald-950/10"
+          className="lens-card p-8 space-y-5 border-[#A7F3D0] bg-[#ECFDF5]/50 rounded-[8px]"
           data-testid="upload-success-card"
         >
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-[4px] bg-[#D1FAE5] text-[#065F46] flex items-center justify-center">
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">PDF Capture Ready</h2>
-              <p className="text-xs text-slate-300 mt-0.5">
+              <h2 className="text-base font-semibold text-[#000000]">PDF Capture Ready</h2>
+              <p className="text-xs text-[#5B6472] mt-0.5">
                 The document has been stored, extracted into text, chunked, and embedded into the search index.
               </p>
             </div>
           </div>
 
-          <div className="p-3.5 rounded-lg bg-black/30 border border-white/5 space-y-1 text-xs">
-            <div className="flex items-center justify-between text-slate-400">
+          <div className="p-4 rounded-[4px] bg-white border border-[#E5E7EB] space-y-1.5 text-xs">
+            <div className="flex items-center justify-between text-[#5B6472]">
               <span>Title / File:</span>
-              <span className="font-semibold text-slate-200 truncate max-w-xs">
+              <span className="font-semibold text-[#000000] truncate max-w-xs">
                 {createdCapture.title || file?.name || "Document"}
               </span>
             </div>
-            <div className="flex items-center justify-between text-slate-400">
+            <div className="flex items-center justify-between text-[#5B6472]">
               <span>Status:</span>
               <StatusBadge status="completed" />
             </div>
@@ -305,7 +287,7 @@ export function FileCaptureForm() {
           <div className="flex flex-wrap items-center gap-3 pt-2">
             <Link
               href={`/captures/${createdCapture.id}`}
-              className="lens-button-primary text-xs"
+              className="lens-button-primary text-xs h-10 px-5"
               data-testid="view-capture-detail-link"
             >
               <span>View Capture Details</span>
@@ -316,7 +298,7 @@ export function FileCaptureForm() {
             <button
               type="button"
               onClick={handleReset}
-              className="lens-button-secondary text-xs"
+              className="lens-button-secondary text-xs h-10 px-5"
               data-testid="upload-another-btn"
             >
               Upload Another PDF
@@ -328,40 +310,40 @@ export function FileCaptureForm() {
       {/* Processing State View (Post-Upload) */}
       {phase === "processing" && createdCapture && (
         <div
-          className="lens-card p-6 space-y-4 border-indigo-500/30 bg-indigo-950/10"
+          className="lens-card p-8 space-y-5 border-[#BFDBFE] bg-[#EFF6FF]/40 rounded-[8px]"
           data-testid="upload-processing-card"
         >
           <div className="flex items-center gap-3">
-            <svg className="w-6 h-6 animate-spin text-indigo-400 shrink-0" fill="none" viewBox="0 0 24 24">
+            <svg className="w-6 h-6 animate-spin text-[#2075CC] shrink-0" fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
             <div>
-              <h2 className="text-base font-bold text-white">Ingesting Document</h2>
-              <p className="text-xs text-indigo-300/90 mt-0.5">
+              <h2 className="text-base font-semibold text-[#000000]">Ingesting Document</h2>
+              <p className="text-xs text-[#5B6472] mt-0.5">
                 PDF successfully uploaded to secure storage. Background worker is extracting text and indexing content...
               </p>
             </div>
           </div>
 
           {/* Stepper Progress */}
-          <div className="grid grid-cols-3 gap-2 pt-2 text-center text-xs">
-            <div className="p-2.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 font-medium">
+          <div className="grid grid-cols-3 gap-2.5 pt-2 text-center text-xs">
+            <div className="p-2.5 rounded-[4px] bg-[#ECFDF5] border border-[#A7F3D0] text-[#065F46] font-medium">
               ✓ Uploaded
             </div>
-            <div className="p-2.5 rounded bg-sky-500/10 border border-sky-500/30 text-sky-200 font-medium animate-pulse">
+            <div className="p-2.5 rounded-[4px] bg-[#EFF6FF] border border-[#BFDBFE] text-[#115AA4] font-medium animate-pulse">
               Extracting Text...
             </div>
-            <div className="p-2.5 rounded bg-slate-800/40 border border-white/5 text-slate-500">
+            <div className="p-2.5 rounded-[4px] bg-slate-50 border border-[#E5E7EB] text-[#5B6472]">
               Indexing & Chunks
             </div>
           </div>
 
-          <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-white/5">
+          <div className="flex items-center justify-between text-xs text-[#5B6472] pt-2 border-t border-[#E5E7EB]">
             <span>Tracking status automatically...</span>
             <Link
               href={`/captures/${createdCapture.id}`}
-              className="text-indigo-400 hover:text-indigo-300 hover:underline"
+              className="text-[#115AA4] hover:text-[#2075CC] hover:underline"
             >
               Open detail page →
             </Link>
@@ -372,25 +354,25 @@ export function FileCaptureForm() {
       {/* Failure State View */}
       {phase === "failed" && (
         <div
-          className="lens-card p-6 space-y-4 border-rose-500/30 bg-rose-950/10"
+          className="lens-card p-8 space-y-5 border-[#FFCDD2] bg-[#FFEBEE]/40 rounded-[8px]"
           data-testid="upload-failure-card"
         >
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-[4px] bg-[#FFCDD2] text-[#C62828] flex items-center justify-center">
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </div>
             <div>
-              <h2 className="text-base font-bold text-white">Ingestion Failed</h2>
-              <p className="text-xs text-rose-300 mt-0.5">
+              <h2 className="text-base font-semibold text-[#000000]">Ingestion Failed</h2>
+              <p className="text-xs text-[#5B6472] mt-0.5">
                 The document could not be indexed into searchable chunks.
               </p>
             </div>
           </div>
 
           {apiError && (
-            <div className="p-3.5 rounded-lg bg-black/40 border border-rose-500/20 text-xs text-rose-200 break-words font-mono">
+            <div className="p-3.5 rounded-[4px] bg-white border border-[#FFCDD2] text-xs text-[#C62828] break-words font-mono">
               {apiError}
             </div>
           )}
@@ -399,7 +381,7 @@ export function FileCaptureForm() {
             <button
               type="button"
               onClick={handleReset}
-              className="lens-button-primary text-xs"
+              className="lens-button-primary text-xs h-10 px-5"
               data-testid="try-another-file-btn"
             >
               Select Another File
@@ -407,7 +389,7 @@ export function FileCaptureForm() {
             {createdCapture && (
               <Link
                 href={`/captures/${createdCapture.id}`}
-                className="lens-button-secondary text-xs"
+                className="lens-button-secondary text-xs h-10 px-5"
               >
                 Inspect Error Details
               </Link>
@@ -418,7 +400,7 @@ export function FileCaptureForm() {
 
       {/* Main Upload Form (Shown in idle or uploading state) */}
       {(phase === "idle" || phase === "uploading") && (
-        <form onSubmit={handleSubmit} className="lens-card p-6 space-y-5" noValidate>
+        <form onSubmit={handleSubmit} className="lens-card p-8 space-y-6 bg-white border border-[#E5E7EB] rounded-[8px]" noValidate>
           {/* Hidden File Input */}
           <input
             ref={fileInputRef}
@@ -448,23 +430,23 @@ export function FileCaptureForm() {
             onClick={() => {
               if (!isWorking) fileInputRef.current?.click();
             }}
-            className={`border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+            className={`border-2 border-dashed rounded-[6px] p-10 text-center transition-all cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2075CC] ${
               isDragging
-                ? "border-indigo-400 bg-indigo-500/10 shadow-[0_0_20px_rgba(99,102,241,0.25)]"
+                ? "border-[#2075CC] border-indigo-400 bg-[#EFF6FF]"
                 : file
-                ? "border-emerald-500/40 bg-emerald-500/5 hover:border-emerald-500/60"
-                : "border-white/15 bg-white/[0.02] hover:border-indigo-500/40 hover:bg-white/[0.04]"
+                ? "border-[#A7F3D0] bg-[#ECFDF5]/40"
+                : "border-[#CBD5E1] bg-[#F8FAFC] hover:border-[#2075CC] hover:bg-[#EFF6FF]/30"
             }`}
             data-testid="pdf-dropzone"
           >
             <div className="flex flex-col items-center justify-center space-y-3">
               <div
-                className={`w-12 h-12 rounded-xl flex items-center justify-center transition-colors ${
+                className={`w-12 h-12 rounded-[4px] flex items-center justify-center transition-colors ${
                   isDragging
-                    ? "bg-indigo-500 text-white shadow-lg"
+                    ? "bg-[#2075CC] text-white"
                     : file
-                    ? "bg-emerald-500/20 text-emerald-400"
-                    : "bg-slate-800/80 text-slate-400"
+                    ? "bg-[#D1FAE5] text-[#065F46]"
+                    : "bg-[#E2E8F0] text-[#5B6472]"
                 }`}
               >
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -478,15 +460,15 @@ export function FileCaptureForm() {
               </div>
 
               <div className="space-y-1">
-                <p className="text-sm font-semibold text-white">
+                <p className="text-sm font-semibold text-[#000000]">
                   {isDragging
                     ? "Drop PDF to upload"
                     : file
                     ? "File ready for upload"
                     : "Click to select or drag and drop a PDF"}
                 </p>
-                <p className="text-xs text-slate-400">
-                  Supported format: <span className="font-mono text-slate-300">.pdf</span> (Max {MAX_FILE_SIZE_MB} MB)
+                <p className="text-xs text-[#5B6472]">
+                  Supported format: <span className="font-mono text-[#000000]">.pdf</span> (Max {MAX_FILE_SIZE_MB} MB)
                 </p>
               </div>
             </div>
@@ -495,11 +477,11 @@ export function FileCaptureForm() {
           {/* Selected File Details Card */}
           {file && (
             <div
-              className="p-4 rounded-xl bg-[#0d121e] border border-white/10 flex items-center justify-between gap-3"
+              className="p-4 rounded-[4px] bg-[#F8FAFC] border border-[#E5E7EB] flex items-center justify-between gap-3"
               data-testid="selected-file-card"
             >
               <div className="flex items-center gap-3 min-w-0">
-                <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                <div className="w-9 h-9 rounded-[4px] bg-[#ECFDF5] border border-[#A7F3D0] text-[#065F46] flex items-center justify-center shrink-0">
                   <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path
                       strokeLinecap="round"
@@ -510,10 +492,10 @@ export function FileCaptureForm() {
                   </svg>
                 </div>
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-white truncate break-all" data-testid="selected-filename">
+                  <p className="text-xs font-semibold text-[#000000] truncate break-all" data-testid="selected-filename">
                     {file.name}
                   </p>
-                  <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                  <p className="text-[11px] text-[#5B6472] font-mono mt-0.5">
                     {formatFileSize(file.size)} • PDF Document
                   </p>
                 </div>
@@ -523,7 +505,7 @@ export function FileCaptureForm() {
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white rounded bg-slate-800 hover:bg-slate-700 transition-colors"
+                  className="px-3 py-1 text-xs font-medium text-[#5B6472] hover:text-[#000000] rounded-[4px] bg-white border border-[#E5E7EB] hover:bg-slate-50 transition-colors"
                   disabled={isWorking}
                   data-testid="change-file-btn"
                 >
@@ -536,7 +518,7 @@ export function FileCaptureForm() {
                     setClientError(null);
                     if (fileInputRef.current) fileInputRef.current.value = "";
                   }}
-                  className="p-1 text-slate-400 hover:text-rose-400 rounded transition-colors"
+                  className="p-1 text-[#5B6472] hover:text-[#C62828] rounded-[4px] transition-colors"
                   aria-label="Remove selected file"
                   disabled={isWorking}
                   data-testid="remove-file-btn"
@@ -550,8 +532,8 @@ export function FileCaptureForm() {
           )}
 
           {/* Optional Title Input */}
-          <div className="space-y-1.5">
-            <label htmlFor="file-title-input" className="block text-xs font-semibold text-slate-300">
+          <div className="space-y-2">
+            <label htmlFor="file-title-input" className="block text-xs font-medium uppercase tracking-wider text-[#5B6472]">
               Optional Title
             </label>
             <input
@@ -564,7 +546,7 @@ export function FileCaptureForm() {
               className="lens-input text-xs"
               disabled={isWorking}
             />
-            <p className="text-[11px] text-slate-500">
+            <p className="text-[11px] text-[#5B6472]">
               Leave blank to use the document filename as the capture title.
             </p>
           </div>
@@ -572,13 +554,13 @@ export function FileCaptureForm() {
           {/* Upload Progress Bar */}
           {phase === "uploading" && (
             <div className="space-y-2 pt-2" data-testid="upload-progress-container">
-              <div className="flex items-center justify-between text-xs font-mono text-slate-300">
+              <div className="flex items-center justify-between text-xs font-mono text-[#5B6472]">
                 <span>Uploading PDF...</span>
                 <span>{progress}%</span>
               </div>
-              <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+              <div className="w-full h-2 rounded-[2px] bg-[#E5E7EB] overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-200"
+                  className="h-full bg-[#2075CC] transition-all duration-200"
                   style={{ width: `${progress}%` }}
                   role="progressbar"
                   aria-valuenow={progress}
@@ -590,11 +572,11 @@ export function FileCaptureForm() {
           )}
 
           {/* Action Row */}
-          <div className="pt-2 flex items-center justify-end gap-3 border-t border-white/5">
+          <div className="pt-4 flex items-center justify-end gap-3 border-t border-[#E5E7EB]">
             <button
               type="submit"
               disabled={!file || Boolean(clientError) || isWorking}
-              className="lens-button-primary text-xs w-full sm:w-auto"
+              className="lens-button-primary text-xs h-10 px-6 w-full sm:w-auto"
               data-testid="upload-submit-btn"
             >
               {phase === "uploading" ? (

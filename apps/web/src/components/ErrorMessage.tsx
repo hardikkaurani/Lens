@@ -10,11 +10,11 @@ export function ErrorMessage({ message, onRetry, title = "Something went wrong" 
   return (
     <div
       role="alert"
-      className="p-4 rounded-xl border border-rose-500/30 bg-rose-950/20 text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+      className="p-4 rounded-[4px] border border-[#FFCDD2] bg-[#FFEBEE] text-[#C62828] flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fadeIn"
     >
       <div className="flex items-start gap-3">
         <svg
-          className="w-5 h-5 text-rose-400 shrink-0 mt-0.5"
+          className="w-5 h-5 text-[#C62828] shrink-0 mt-0.5"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
@@ -28,15 +28,15 @@ export function ErrorMessage({ message, onRetry, title = "Something went wrong" 
           />
         </svg>
         <div>
-          <h4 className="text-sm font-semibold text-rose-100">{title}</h4>
-          <p className="text-xs text-rose-300/90 mt-0.5">{message}</p>
+          <h4 className="text-sm font-semibold text-[#000000]">{title}</h4>
+          <p className="text-xs text-[#5B6472] mt-0.5">{message}</p>
         </div>
       </div>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="self-start sm:self-auto px-3 py-1.5 text-xs font-semibold rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/30 transition-colors"
+          className="self-start sm:self-auto px-3.5 py-1.5 text-xs font-medium rounded-[4px] bg-white hover:bg-slate-50 text-[#C62828] border border-[#FFCDD2] transition-colors"
         >
           Retry
         </button>
