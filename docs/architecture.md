@@ -1,7 +1,7 @@
 # LENS — Architecture Specification
 
 > **Document Status**: Stage 19 Active Implementation (Product Integration, Multi-Tenant Security & Acceptance Testing)
-> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), Flutter mobile client (`apps/mobile`), GitHub OAuth & activity ingestion, Unified Knowledge Search (Stage 16), Android Share Sheet daily capture integration (Stage 17), and Foundational Multi-Tenancy & Authentication (Stage 18) are **ACTIVE**. Comprehensive Stage 19 End-to-End Acceptance test suites verify cross-tenant security and reliability. Client-side authentication UI/token persistence and offline SQLite storage remain **PLANNED**.
+> **Implementation State**: Core infrastructure, database domain models, capture ingestion API, asynchronous URL ingestion worker, embedding generation pipeline, PostgreSQL full-text search, pgvector similarity search, hybrid search endpoint, Next.js web workspace (`apps/web`), Flutter mobile client (`apps/mobile`), GitHub OAuth & activity ingestion, Unified Knowledge Search (Stage 16), Android Share Sheet daily capture integration (Stage 17), Foundational Multi-Tenancy & Authentication (Stage 18), and Web & Mobile Client Authentication Integration (Stage 19.3) are **ACTIVE**. Comprehensive Stage 19 End-to-End Acceptance test suites verify cross-tenant security and reliability. Offline SQLite storage remains **PLANNED**.
 
 ---
 
@@ -625,9 +625,9 @@ The product integration test suite (`services/api/tests/test_stage19_e2e_accepta
 - Failure and recovery testing (health check degradation upon DB/Redis outage, safe error sanitization without credentials).
 - Production configuration audit (enforcement of secrets and entropy in production).
 
-### 11.3 Client Compatibility Boundary & Known Limitations
+### 11.3 Client Compatibility Boundary & Integration State
 
-- **Web Client (`apps/web`)**: Next.js client does not yet store JWT tokens or inject `Authorization: Bearer <token>` headers into `api-client.ts`. Backend endpoints correctly fail closed with HTTP 401 until client authentication UI and session management are wired.
-- **Mobile Client (`apps/mobile`)**: Flutter client does not yet store JWT tokens or inject Bearer headers into `api_client.dart`. Backend endpoints correctly return HTTP 401.
+- **Web Client (`apps/web`)**: Implements Next.js Backend-for-Frontend (BFF) architecture. The BFF proxy validates session credentials from HttpOnly cookies, strips client headers, verifies `/auth/me` identity, and injects Authorization Bearer tokens into upstream FastAPI requests. See [authentication.md](file:///C:/Users/hardi/Lens/docs/security/authentication.md).
+- **Mobile Client (`apps/mobile`)**: Implements hardware-backed session storage (`FlutterSecureStorage`), typed ApiClient fail-fast checks, session restoration resilience across network outages, and Android Share Sheet continuation across authentication gates.
 - **External Services**: GitHub OAuth is tested via local cryptographic state signing and client mocks; live OAuth requires a registered GitHub OAuth Application in production.
 - **Device-Level Testing**: Android Share Sheet was verified via Flutter widget and unit test suites; physical device and emulator runs require connected Android hardware.

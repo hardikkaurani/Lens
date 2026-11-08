@@ -9,6 +9,7 @@ import 'package:lens_mobile/core/errors/api_exception.dart';
 import 'package:lens_mobile/core/network/api_client.dart';
 import 'package:lens_mobile/core/share/incoming_share_service.dart';
 import 'package:lens_mobile/main.dart';
+import 'package:lens_mobile/models/capture.dart';
 import 'package:lens_mobile/models/user.dart';
 import 'package:lens_mobile/screens/login_screen.dart';
 import 'package:lens_mobile/screens/register_screen.dart';
@@ -150,6 +151,55 @@ void main() {
       expect(auth.isAuthenticated, isFalse);
       expect(await storage.getToken(), isNull);
     });
+
+    test('restoreSession preserves token and sets restorationFailed on network failure', () async {
+      final storage = InMemoryAuthTokenStorage('saved_offline_token');
+      final auth = AuthService(storage: storage);
+
+      await auth.restoreSession(() async {
+        throw ApiException.network(details: 'Connection refused');
+      });
+
+      expect(auth.isAuthenticated, isFalse);
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+      expect(auth.isRestorationFailed, isTrue);
+      // Critical security & resilience guarantee: token must NOT be cleared on network failure
+      expect(await storage.getToken(), equals('saved_offline_token'));
+    });
+
+    test('restoreSession preserves token on timeout and allows retry', () async {
+      final storage = InMemoryAuthTokenStorage('saved_timeout_token');
+      final auth = AuthService(storage: storage);
+
+      await auth.restoreSession(() async {
+        throw ApiException.timeout();
+      });
+
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+      expect(await storage.getToken(), equals('saved_timeout_token'));
+
+      // Retry restores successfully once connection is back
+      const user = User(id: 'u-retry', email: 'retry@lens.app', isActive: true);
+      await auth.retryRestoreSession(() async => user);
+
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('retry@lens.app'));
+    });
+
+    test('clearSessionAndLogin purges preserved token and resets to unauthenticated', () async {
+      final storage = InMemoryAuthTokenStorage('saved_token');
+      final auth = AuthService(storage: storage);
+
+      await auth.restoreSession(() async {
+        throw ApiException.network();
+      });
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+
+      await auth.clearSessionAndLogin();
+      expect(auth.status, equals(AuthStatus.unauthenticated));
+      expect(await storage.getToken(), isNull);
+    });
   });
 
   group('3. ApiClient Bearer Token Injection & Expiry Handling', () {
@@ -248,6 +298,63 @@ void main() {
       final client = ApiClient(httpClient: mockHttp);
       final token = await client.login(email: 'user@lens.app', password: 'Password123!');
       expect(token, equals('newly_issued_jwt_token'));
+    });
+
+    test('protected endpoints fail fast with 401 when token is missing without HTTP request', () async {
+      final mockHttp = MockHttpClient((req) async {
+        fail('No HTTP request should be sent when access token is missing');
+      });
+
+      final emptyStorage = InMemoryAuthTokenStorage();
+      final client = ApiClient(httpClient: mockHttp, tokenStorage: emptyStorage);
+
+      // listCaptures fails fast
+      await expectLater(
+        client.listCaptures(),
+        throwsA(isA<ApiException>().having((e) => e.isUnauthorized, 'isUnauthorized', isTrue)),
+      );
+
+      // getCapture fails fast
+      await expectLater(
+        client.getCapture('cap-123'),
+        throwsA(isA<ApiException>().having((e) => e.isUnauthorized, 'isUnauthorized', isTrue)),
+      );
+
+      // createCapture fails fast
+      await expectLater(
+        client.createCapture(CaptureCreate(sourceType: SourceType.url, originalUrl: 'https://example.com')),
+        throwsA(isA<ApiException>().having((e) => e.isUnauthorized, 'isUnauthorized', isTrue)),
+      );
+
+      // search fails fast
+      await expectLater(
+        client.search(query: 'test query'),
+        throwsA(isA<ApiException>().having((e) => e.isUnauthorized, 'isUnauthorized', isTrue)),
+      );
+
+      // Zero HTTP requests made
+      expect(mockHttp.recordedRequests, isEmpty);
+    });
+
+    test('public endpoints execute without requiring token in storage', () async {
+      final mockHttp = MockHttpClient((req) async {
+        if (req.url.path.endsWith('/health')) {
+          return http.Response(jsonEncode({'status': 'ok'}), 200, headers: {'content-type': 'application/json'});
+        }
+        if (req.url.path.endsWith('/auth/register')) {
+          return http.Response(jsonEncode({'id': 'u-reg', 'email': 'new@lens.app', 'is_active': true}), 200, headers: {'content-type': 'application/json'});
+        }
+        return http.Response('{}', 404);
+      });
+
+      final emptyStorage = InMemoryAuthTokenStorage();
+      final client = ApiClient(httpClient: mockHttp, tokenStorage: emptyStorage);
+
+      final health = await client.checkHealth();
+      expect(health['status'], equals('ok'));
+
+      final registered = await client.register(email: 'new@lens.app', password: 'Password123!');
+      expect(registered.email, equals('new@lens.app'));
     });
   });
 
@@ -438,6 +545,148 @@ void main() {
       expect(find.text('Review Shared Content'), findsOneWidget);
       expect(find.text('https://article-shared-before-login.com/post'), findsOneWidget);
       expect(find.text('Important Research'), findsOneWidget);
+
+      shareService.dispose();
+      fakeShare.dispose();
+    });
+  });
+
+  group('6. Startup Auth Gate & Session Recovery UI', () {
+    testWidgets('renders splash scaffold while session restoration is in progress', (tester) async {
+      final storage = InMemoryAuthTokenStorage('valid_token');
+      final auth = AuthService(storage: storage);
+
+      // Slow/pending profile fetch
+      final completer = Completer<User>();
+      unawaited(auth.restoreSession(() => completer.future));
+
+      final client = ApiClient(
+        httpClient: MockHttpClient((_) async => http.Response('{}', 200)),
+        authService: auth,
+      );
+
+      await tester.pumpWidget(
+        LensApp(
+          apiClient: client,
+          authService: auth,
+        ),
+      );
+      await tester.pump();
+
+      // Should display splash screen while restoring
+      expect(find.byKey(const Key('auth_splash_scaffold')), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(LoginScreen), findsNothing);
+
+      // Complete restoration
+      completer.complete(const User(id: 'u-done', email: 'done@lens.app', isActive: true));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('auth_splash_scaffold')), findsNothing);
+      expect(find.byType(MainNavigationShell), findsOneWidget);
+    });
+
+    testWidgets('renders restoration failed screen on network error and allows retry', (tester) async {
+      final storage = InMemoryAuthTokenStorage('valid_token');
+      final auth = AuthService(storage: storage);
+
+      // Fail with network error
+      await auth.restoreSession(() async => throw ApiException.network());
+
+      final client = ApiClient(
+        httpClient: MockHttpClient((_) async => http.Response('{}', 200)),
+        authService: auth,
+      );
+
+      await tester.pumpWidget(
+        LensApp(
+          apiClient: client,
+          authService: auth,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Shows restoration failed screen
+      expect(find.byKey(const Key('auth_restoration_failed_scaffold')), findsOneWidget);
+      expect(find.text('Unable to restore session'), findsOneWidget);
+      expect(find.byKey(const Key('retry_restore_button')), findsOneWidget);
+      expect(find.byKey(const Key('switch_to_login_button')), findsOneWidget);
+
+      // Test "Sign In with Another Account" button transitions to LoginScreen
+      await tester.tap(find.byKey(const Key('switch_to_login_button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LoginScreen), findsOneWidget);
+      expect(await storage.getToken(), isNull);
+    });
+
+    testWidgets('preserves incoming share while in restorationFailed state and resumes post-login',
+        (tester) async {
+      final storage = InMemoryAuthTokenStorage('expired_or_offline_token');
+      final auth = AuthService(storage: storage);
+
+      // Fail with network error
+      await auth.restoreSession(() async => throw ApiException.network());
+
+      final mockHttp = MockHttpClient((req) async {
+        if (req.url.path.endsWith('/auth/login')) {
+          return http.Response(
+            jsonEncode({'access_token': 'new_login_token', 'token_type': 'bearer'}),
+            200,
+          );
+        }
+        if (req.url.path.endsWith('/auth/me')) {
+          return http.Response(
+            jsonEncode({'id': 'u-post-offline', 'email': 'offline@lens.app', 'is_active': true}),
+            200,
+          );
+        }
+        if (req.url.path.endsWith('/captures')) {
+          return http.Response(
+            jsonEncode({'captures': [], 'total': 0, 'limit': 15, 'offset': 0}),
+            200,
+          );
+        }
+        return http.Response('{}', 200);
+      });
+
+      final client = ApiClient(httpClient: mockHttp, authService: auth);
+      final fakeShare = FakeSharePlatform(
+        initialShare: {
+          'text': 'https://example.com/share-during-offline',
+          'subject': 'Preserved Note',
+        },
+      );
+      final shareService = IncomingShareService(platform: fakeShare);
+
+      await tester.pumpWidget(
+        LensApp(
+          shareService: shareService,
+          apiClient: client,
+          authService: auth,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Shows restoration failed screen
+      expect(find.byKey(const Key('auth_restoration_failed_scaffold')), findsOneWidget);
+
+      // User chooses to sign in
+      await tester.tap(find.byKey(const Key('switch_to_login_button')));
+      await tester.pumpAndSettle();
+
+      // Shows LoginScreen
+      expect(find.byType(LoginScreen), findsOneWidget);
+
+      // Log in
+      await tester.enterText(find.widgetWithText(TextFormField, 'Email Address'), 'offline@lens.app');
+      await tester.enterText(find.widgetWithText(TextFormField, 'Password'), 'Password123!');
+      await tester.tap(find.widgetWithText(FilledButton, 'Sign In'));
+      await tester.pumpAndSettle();
+
+      // The share arrived during restoration failure must now be safely presented!
+      expect(find.text('Review Shared Content'), findsOneWidget);
+      expect(find.text('https://example.com/share-during-offline'), findsOneWidget);
 
       shareService.dispose();
       fakeShare.dispose();
