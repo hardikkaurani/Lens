@@ -254,18 +254,22 @@ The following table documents the verification, status, and resolution evidence 
    - Data proxy routes (`/api/proxy/[...path]`) forward upstream 401 Unauthorized responses directly to the client **without mutating or clearing cookies**. Data proxy never emits `Set-Cookie: Max-Age=0`.
    - In HTTP, browsers process `Set-Cookie: Max-Age=0` unconditionally without inspecting token content. Because background or out-of-order data requests (e.g. `/api/proxy/captures`) can be delayed, proxy cookie deletion introduced an unavoidable race where a stale request could wipe the cookie jar of a newer replacement login.
    - Session validation is driven by client lifecycle handlers intercepting 401s and querying `/api/auth/me`, which verifies the current cookie snapshot.
-2. **Concurrent Logout & Replacement Login Protection**:
-   - `POST /api/auth/logout` retrieves the request's token snapshot and supplies it to `clearAuthCookie(token)`.
-   - In `clearAuthCookie(expectedToken)`, token currency (`isLatestToken`) is validated both before and after `await cookies()`. If a replacement login completed concurrently (e.g., in another browser tab), `clearAuthCookie` aborts deletion and returns `false`, preventing in-flight logouts from destroying new session cookies.
-3. **Architectural Boundaries of Process-Local `SessionTokenRegistry`**:
-   - `SessionTokenRegistry` provides in-memory advisory coordination to mitigate local event-loop concurrency races on a single Node.js runtime.
-   - It is explicitly **not** a distributed session store or distributed lock across multi-instance or serverless deployments.
-   - The upstream FastAPI backend (`services/api`) remains the authoritative cryptographic source of truth: HMAC-SHA256 signatures, 7-day expiration timestamps, token types, and tenant isolation are verified on every backend request.
-   - Distributed instant token revocation across horizontal BFF workers is architected for Phase 2 (via a centralized Redis blacklist / session store).
-4. **Fail-Closed Multi-Instance & Cold Start Resilience**:
+2. **Fail-Closed Logout Semantics & Missing-Token Protection**:
+   - `POST /api/auth/logout` retrieves the request's token snapshot via `getStoredToken()`.
+   - **Missing or Absent Token**: If no affirmative token snapshot is present (`token` is null, undefined, or empty), the route returns HTTP 200 `{ success: true, message: "No active session to clear." }` **without mutating or deleting cookies**. A missing token snapshot NEVER authorizes unconditional cookie deletion, preventing unauthenticated or stale requests from wiping a newer session cookie established in another tab.
+   - **Cookie Storage Read Failure**: If cookie storage access fails or throws, `getStoredToken()` propagates the error, causing `POST /api/auth/logout` to return HTTP 500 fail-closed without mutating or clearing cookies.
+   - **Affirmative Token Verification**: `clearAuthCookie(expectedToken)` strictly requires a non-empty string. If `expectedToken` is missing, whitespace, or superseded, it immediately aborts deletion and returns `false`.
+3. **Double-Checked CAS Protection & Event-Loop Interleaving**:
+   - In `clearAuthCookie(expectedToken)`, token currency (`isLatestToken`) is validated both before and after `await cookies()`. If a replacement login completed on the event loop during asynchronous cookie store access, `clearAuthCookie` aborts deletion and returns `false`.
+   - It also cross-checks `cookieStore.get(LENS_TOKEN_COOKIE)`; if the stored cookie value differs from `expectedToken`, deletion is aborted.
+4. **Architectural Concurrency Boundaries & Inherent Browser / Multi-Worker Limitations**:
+   - **Process-Local Scope**: `SessionTokenRegistry` is an in-memory, process-local advisory mechanism on a single Node.js runtime. It does **not** provide distributed locking, multi-worker cross-process coordination, or persistence across serverless container restarts.
+   - **RFC 6265 Browser Response Delivery Ordering**: In HTTP, browsers process `Set-Cookie` headers in the exact order responses arrive over network connections, without conditional matching primitives (e.g. no `Set-Cookie: If-Match`). If a client's logout response is delayed by network transit and arrives at the browser *after* a newer login response, the browser will unconditionally process the `Max-Age=0` header. While data proxy non-mutation and fail-closed logout mitigate accidental deletions, true network-level response reordering cannot be solved purely by server-side cookie headers.
+   - **Need for Centralized Distributed Coordination (Phase 2 Redis Roadmap)**: Genuine cross-worker atomic compare-and-delete across a cluster of BFF servers requires shared state (e.g. Redis Lua scripts / transactions). Furthermore, because the FastAPI backend issues stateless 7-day HMAC-SHA256 JWTs, immediate token revocation across all backend instances requires a centralized Redis token revocation list / session database validated on every upstream request.
+5. **Fail-Closed Multi-Instance & Cold Start Resilience**:
    - In uncoordinated multi-instance or serverless environments (or following a process restart), `isTokenCurrent()` fails closed (`false`) when a token has no registry entry on that worker, preventing uncoordinated instances from wiping active cookies.
-5. **Untrusted Claim Demarcation**:
+6. **Untrusted Claim Demarcation**:
    - `parseJwtClaims()` performs structural decoding only; claims including `sub` are untrusted hints used solely for local routing and isolation.
-6. **Mobile FIFO Keystore Serialization & Delayed Restoration Cleanup Resilience**:
+7. **Mobile FIFO Keystore Serialization & Delayed Restoration Cleanup Resilience**:
    - `AuthService._runStorageMutation` reserves queue tail gates synchronously before yielding to `await previous`, guaranteeing strict FIFO execution and preventing concurrent waiters from racing.
    - Delayed 401 token cleanup failure during `restoreSession` records `storageCleanupError` and transitions to `restorationFailed` with UI retry; if a replacement login arrives while cleanup is pending, the replacement session is preserved without corruption.

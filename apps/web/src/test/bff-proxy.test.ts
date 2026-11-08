@@ -20,6 +20,9 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     serverAuth.resetLatestToken();
+    mockCookieStore.get.mockReset();
+    mockCookieStore.set.mockReset();
+    mockCookieStore.delete.mockReset();
   });
 
   describe("1. Login Route Validation & Fail-Closed Behavior", () => {
@@ -805,10 +808,13 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       });
       await expect(serverAuth.setAuthCookie("token123", 3600)).rejects.toThrow("Cookie storage unavailable");
 
+      const activeTok = "valid_active_token_xyz";
+      serverAuth.recordTokenIssued(activeTok);
+      mockCookieStore.get.mockReturnValue({ value: activeTok });
       mockCookieStore.delete.mockImplementationOnce(() => {
         throw new Error("Cookie storage deletion failed");
       });
-      await expect(serverAuth.clearAuthCookie()).rejects.toThrow("Cookie storage deletion failed");
+      await expect(serverAuth.clearAuthCookie(activeTok)).rejects.toThrow("Cookie storage deletion failed");
     });
 
     it("login route fails closed (500) and does not return false success when setAuthCookie throws", async () => {
@@ -847,6 +853,10 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
     });
 
     it("logout route fails closed (500) and does not return false success when clearAuthCookie throws", async () => {
+      const activeTok = "active_jwt_token_for_logout";
+      serverAuth.recordTokenIssued(activeTok);
+      mockCookieStore.get.mockReturnValue({ value: activeTok });
+
       vi.spyOn(serverAuth, "clearAuthCookie").mockRejectedValueOnce(
         new Error("Cookie store write error")
       );
@@ -864,6 +874,152 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       const data = await res.json();
       expect(data.detail).toContain("Failed to clear session authentication cookie");
       expect(data.success).toBeUndefined();
+    });
+
+    it("clearAuthCookie fail-closed semantics: missing, null, or whitespace token never deletes cookie", async () => {
+      mockCookieStore.delete.mockClear();
+      expect(await serverAuth.clearAuthCookie()).toBe(false);
+      expect(await serverAuth.clearAuthCookie(null)).toBe(false);
+      expect(await serverAuth.clearAuthCookie("")).toBe(false);
+      expect(await serverAuth.clearAuthCookie("   ")).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+    });
+
+    it("logout with missing token does not delete an active replacement cookie", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const tokenReplacement = makeTestJwt("user_missing_token_race", 10);
+      serverAuth.recordTokenIssued(tokenReplacement);
+      expect(serverAuth.isLatestToken(tokenReplacement)).toBe(true);
+
+      mockCookieStore.delete.mockClear();
+      mockCookieStore.get.mockReturnValue(undefined); // request has NO cookie
+
+      const req = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+      });
+
+      const res = await logoutHandler(req);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.message).toBe("No active session to clear.");
+
+      // Strict verification: No cookie deletion occurred and no Set-Cookie header emitted
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(res.headers.get("Set-Cookie")).toBeNull();
+      // Replacement session remains completely intact
+      expect(serverAuth.isLatestToken(tokenReplacement)).toBe(true);
+    });
+
+    it("cookie read failure during logout fails closed (500) and does not trigger unconditional deletion", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const activeToken = makeTestJwt("user_read_fail", 1);
+      serverAuth.recordTokenIssued(activeToken);
+
+      mockCookieStore.delete.mockClear();
+      mockCookieStore.get.mockImplementationOnce(() => {
+        throw new Error("Disk / secure keystore hardware I/O read failure");
+      });
+
+      const req = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+      });
+
+      const res = await logoutHandler(req);
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.detail).toContain("Failed to clear session authentication cookie");
+
+      // Strict verification: Cookie read error did NOT trigger unconditional deletion
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(res.headers.get("Set-Cookie")).toBeNull();
+      expect(serverAuth.isLatestToken(activeToken)).toBe(true);
+    });
+
+    it("deterministic asynchronous barrier: concurrent logout and replacement login interleaving", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const tokenA = makeTestJwt("user_barrier_race", 1);
+      const tokenB = makeTestJwt("user_barrier_race", 2);
+
+      // Establish initial session A
+      serverAuth.recordTokenIssued(tokenA);
+      expect(serverAuth.isLatestToken(tokenA)).toBe(true);
+
+      // Set up asynchronous barrier between Tab 1's getStoredToken and clearAuthCookie execution
+      let releaseBarrier!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+
+      // Tab 1 enters logout with tokenA in its request cookie snapshot
+      mockCookieStore.get.mockReturnValue({ value: tokenA });
+      mockCookieStore.delete.mockClear();
+
+      let cookieCalls = 0;
+      const { cookies } = await import("next/headers");
+      vi.mocked(cookies).mockImplementation(async () => {
+        cookieCalls++;
+        if (cookieCalls === 2) {
+          // Tab 1 enters clearAuthCookie and yields at the asynchronous cookies() boundary
+          await barrier;
+        }
+        return mockCookieStore as any;
+      });
+
+      const logoutReq = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+      });
+
+      // Launch Tab 1's in-flight logout asynchronously
+      const logoutPromise = logoutHandler(logoutReq);
+
+      // Yield control so Tab 1 reaches Call 2 (inside clearAuthCookie) and suspends at the barrier
+      await new Promise((r) => setTimeout(r, 10));
+
+      // While Tab 1 is suspended at the barrier, Tab 2 performs a replacement login establishing tokenB
+      mockCookieStore.get.mockReturnValue({ value: tokenB });
+      await serverAuth.setAuthCookie(tokenB, 3600);
+      expect(serverAuth.isLatestToken(tokenB)).toBe(true);
+      expect(serverAuth.isLatestToken(tokenA)).toBe(false);
+
+      // Now release Tab 1 to resume from its asynchronous cookies() boundary
+      releaseBarrier();
+      const logoutRes = await logoutPromise;
+
+      expect(logoutRes.status).toBe(200);
+
+      // In-flight logout for superseded tokenA must NOT delete tokenB from cookieStore!
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(logoutRes.headers.get("Set-Cookie")).toBeNull();
+      expect(serverAuth.isLatestToken(tokenB)).toBe(true);
+      expect(serverAuth.isLatestToken(tokenA)).toBe(false);
     });
   });
 });

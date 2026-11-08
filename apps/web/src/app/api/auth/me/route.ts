@@ -2,16 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { clearAuthCookie, getBackendApiUrl, getStoredToken } from "@/lib/server-auth";
 
 export async function GET(_request: NextRequest) {
-  const token = await getStoredToken();
-  if (!token) {
-    return NextResponse.json(
-      { detail: "Authentication credentials were not provided." },
-      { status: 401 }
-    );
-  }
-
-  const backendUrl = getBackendApiUrl();
   try {
+    const token = await getStoredToken();
+    if (!token) {
+      return NextResponse.json(
+        { detail: "Authentication credentials were not provided." },
+        { status: 401 }
+      );
+    }
+
+    const backendUrl = getBackendApiUrl();
     const res = await fetch(`${backendUrl}/auth/me`, {
       method: "GET",
       headers: {

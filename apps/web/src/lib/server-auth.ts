@@ -92,15 +92,14 @@ export function verifyCsrfOrigin(request: Request): boolean {
 
 /**
  * Extract the stored JWT access token from HttpOnly cookies.
+ * Propagates unexpected cookie store read errors to calling route handlers,
+ * preventing storage faults from masquerading as absent cookies and authorizing
+ * unsafe state transitions.
  */
 export async function getStoredToken(): Promise<string | null> {
-  try {
-    const cookieStore = await cookies();
-    const cookie = cookieStore.get(LENS_TOKEN_COOKIE);
-    return cookie?.value ?? null;
-  } catch {
-    return null;
-  }
+  const cookieStore = await cookies();
+  const cookie = cookieStore.get(LENS_TOKEN_COOKIE);
+  return cookie?.value ?? null;
 }
 
 /**
@@ -148,19 +147,35 @@ export function parseJwtClaims(token: string): JwtSessionClaims | null {
  * Per-user session tracking registry to prevent stale, delayed 401 responses
  * from clearing newer replacement sessions issued to the same user on this runtime instance.
  *
- * ARCHITECTURAL BOUNDARY & LIMITATIONS:
- * 1. This registry is an in-memory best-effort advisory coordination mechanism to mitigate local
- *    concurrency races on a single Node.js runtime. It does NOT claim to provide distributed locking,
- *    multi-instance synchronization, or persistence across worker restarts.
- * 2. True cryptographic security and token lifecycle enforcement are strictly the responsibility
- *    of the upstream FastAPI backend (services/api), which cryptographically verifies HMAC-SHA256
- *    signatures, expiration timestamps, token types, and subjects on every request.
- * 3. Session identity is tracked via the JWT 'sub' (User ID) claim hint. Different users operate
- *    in strict isolation: User A's login or expiry never interferes with User B's active session.
- * 4. Fail-closed semantics: If an instance or worker has no record of a token's issuance
- *    (e.g. after a process restart or on an uncoordinated serverless instance),
- *    isTokenCurrent() fails closed (returns false), preventing unverified tokens from
- *    unilaterally clearing cookies on other workers.
+ * ARCHITECTURAL BOUNDARY & CONCURRENCY LIMITATIONS:
+ * 1. Process-Local Advisory Mechanism:
+ *    This registry is strictly an in-memory best-effort advisory coordination mechanism to mitigate
+ *    local event loop interleaving races on a single Node.js runtime process.
+ *    It does NOT provide:
+ *    - Distributed locking or multi-worker synchronization across clustered or serverless instances.
+ *    - Cross-worker atomic compare-and-delete operations.
+ *    - Persistence across process restarts or container recycling.
+ * 2. HTTP RFC 6265 Browser Delivery Ordering Inherent Limitation:
+ *    Even with affirmative server-side checks before and after awaiting cookie storage, HTTP responses
+ *    are delivered and applied by browsers in the order they arrive over the network. Because HTTP
+ *    lacks conditional Set-Cookie semantics (e.g. no "Set-Cookie: If-Match"), a delayed response with
+ *    Max-Age=0 arriving after a newer login response will unconditionally wipe the cookie in the browser.
+ *    To mitigate this, non-identity data proxy routes (/api/proxy/[...path]) NEVER mutate or delete cookies,
+ *    and logout route fails closed if no verified active token snapshot is present.
+ * 3. Distributed Coordination Requirements (Phase 2 Roadmap):
+ *    Achieving atomic distributed compare-and-delete across multiple BFF worker instances requires
+ *    externalized shared state coordination (e.g. Redis with Lua scripts or WATCH/MULTI/EXEC).
+ *    Furthermore, because FastAPI backend issues stateless 7-day HMAC-SHA256 JWTs, true immediate
+ *    server-side revocation across all services requires a centralized Redis token blacklist or session
+ *    store validated on every upstream request.
+ * 4. Authoritative Cryptographic Security Boundary:
+ *    True cryptographic security and token lifecycle enforcement remain exclusively with the upstream
+ *    FastAPI backend (services/api), which cryptographically verifies HMAC-SHA256 signatures,
+ *    expiration timestamps, token types, and tenant subjects on every request.
+ * 5. Fail-Closed Multi-Instance Semantics:
+ *    If an instance or worker has no record of a token's issuance (e.g. after a process restart or on an
+ *    uncoordinated serverless instance), isTokenCurrent() fails closed (returns false), preventing
+ *    unverified tokens from unilaterally clearing cookies on other workers.
  */
 export class SessionTokenRegistry {
   private activeUserTokens = new Map<string, string>();
@@ -275,32 +290,49 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
 }
 
 /**
- * Clear the authentication cookie upon logout or token expiry.
- * If expectedToken is provided, conditionally clears ONLY if the token is still the active token
- * for its identity, preventing stale 401s from invalidating newer replacement logins.
- * Re-checks before and after awaiting cookieStore to prevent async boundary races.
- * Throws when cookie store deletion fails so routes never report false success.
+ * Clear the authentication cookie upon explicit logout or verified token expiry.
+ * Safe fail-closed semantics:
+ * 1. expectedToken MUST be provided as a non-empty string. If omitted, null, undefined,
+ *    or whitespace-only, cookie deletion is aborted (returns false) to prevent wiping
+ *    replacement or concurrent sessions.
+ * 2. Conditionally clears ONLY if expectedToken is still the active token in the local registry
+ *    both before and after awaiting cookieStore (mitigating event loop interleaving races).
+ * 3. Cross-checks cookieStore's currently stored token value; if present and not equal to expectedToken,
+ *    aborts deletion (returns false).
+ * 4. Throws when cookie store deletion fails so calling routes fail closed and never report false success.
  *
- * @returns true if the cookie was cleared; false if skipped because expectedToken was superseded or unverified.
+ * @returns true if the cookie was cleared; false if skipped because expectedToken was missing, superseded, or unverified.
  */
 export async function clearAuthCookie(expectedToken?: string | null): Promise<boolean> {
-  if (expectedToken !== undefined && expectedToken !== null) {
-    if (!isLatestToken(expectedToken)) {
-      return false;
-    }
+  if (!expectedToken || typeof expectedToken !== "string" || !expectedToken.trim()) {
+    // FAIL-CLOSED: A missing, null, or empty token snapshot MUST NEVER authorize
+    // destructive cookie mutation. Without an affirmative token identity to verify,
+    // deleting cookies risks wiping an active replacement login or concurrent session.
+    return false;
+  }
+
+  const trimmed = expectedToken.trim();
+
+  // Initial CAS check: abort immediately if expectedToken is already superseded
+  if (!isLatestToken(trimmed)) {
+    return false;
   }
 
   const cookieStore = await cookies();
 
-  // Re-check after awaiting cookieStore in case a concurrent login completed on the event loop
-  if (expectedToken !== undefined && expectedToken !== null) {
-    if (!isLatestToken(expectedToken)) {
-      return false;
-    }
+  // Double-check after awaiting cookieStore in case a concurrent login completed on the event loop
+  if (!isLatestToken(trimmed)) {
+    return false;
+  }
+
+  // Cross-check with cookieStore's currently stored token value if accessible
+  const currentCookie = cookieStore.get(LENS_TOKEN_COOKIE);
+  if (currentCookie?.value && currentCookie.value !== trimmed) {
+    return false;
   }
 
   cookieStore.delete(LENS_TOKEN_COOKIE);
-  recordTokenCleared(expectedToken);
+  recordTokenCleared(trimmed);
   return true;
 }
 
