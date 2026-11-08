@@ -1,28 +1,41 @@
 @import "tailwindcss";
 
 :root {
-  --bg-primary: #0a0d14;
-  --bg-surface: #111726;
-  --bg-elevated: #172033;
-  --bg-input: #0f1522;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-card: rgba(255, 255, 255, 0.12);
-  --border-highlight: rgba(99, 102, 241, 0.4);
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
-  --accent-primary: #6366f1;
-  --accent-hover: #4f46e5;
-  --accent-glow: rgba(99, 102, 241, 0.2);
+  /* Morgan Stanley Inspired Design Tokens */
+  --color-primary: #2075cc;
+  --color-secondary: #115aa4;
+  --color-border: #e5e7eb;
+  --color-neutral: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f8fafc;
+  --color-surface-hover: #f1f5f9;
+  --color-on-surface: #000000;
+  --color-text: #000000;
+  --color-text-body: #1e293b;
+  --color-muted: #5b6472;
+  --color-overlay: #0b1a2f;
+  --color-error: #c62828;
 
-  --status-pending: #f59e0b;
-  --status-pending-bg: rgba(245, 158, 11, 0.12);
-  --status-processing: #38bdf8;
-  --status-processing-bg: rgba(56, 189, 248, 0.12);
-  --status-ready: #10b981;
-  --status-ready-bg: rgba(16, 185, 129, 0.12);
-  --status-failed: #f43f5e;
-  --status-failed-bg: rgba(244, 63, 94, 0.12);
+  /* Semantic status tokens */
+  --status-pending: #b45309;
+  --status-pending-bg: #fef3c7;
+  --status-pending-border: #fde68a;
+
+  --status-processing: #115aa4;
+  --status-processing-bg: #eff6ff;
+  --status-processing-border: #bfdbfe;
+
+  --status-ready: #065f46;
+  --status-ready-bg: #ecfdf5;
+  --status-ready-border: #a7f3d0;
+
+  --status-failed: #c62828;
+  --status-failed-bg: #fef2f2;
+  --status-failed-border: #fecaca;
+
+  /* Typography Fallbacks */
+  --font-sans: "ms-sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Times New Roman", Times, Georgia, serif;
 }
 
 * {
@@ -33,11 +46,12 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background-color: var(--bg-primary);
-  color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: #f8fafc;
+  color: var(--color-text);
+  font-family: var(--font-sans);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
@@ -45,110 +59,141 @@ a {
   text-decoration: none;
 }
 
-/* Glassmorphic card styling */
+/* Institutional Cards: 1px border, 8px radius, white surface, minimal elevation */
 .lens-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-card);
-  border-radius: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
-  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .lens-card:hover {
-  border-color: var(--border-highlight);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  border-color: #cbd5e1;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.07);
 }
 
+/* Inputs: 4px radius, clean 12-16px padding, white surface */
 .lens-input {
-  background: var(--bg-input);
-  border: 1px solid var(--border-card);
-  border-radius: 8px;
-  color: var(--text-primary);
-  padding: 0.65rem 0.9rem;
-  font-size: 0.95rem;
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.4;
   width: 100%;
   outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .lens-input:focus {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px var(--accent-glow);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(32, 117, 204, 0.15);
 }
 
 .lens-input::placeholder {
-  color: var(--text-muted);
+  color: #94a3b8;
 }
 
+/* Primary Button: 48px height, 4px radius, #2075CC fill, white text, 500 weight */
 .lens-button-primary {
-  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  background-color: var(--color-primary);
   color: #ffffff;
-  border: none;
-  border-radius: 8px;
-  padding: 0.65rem 1.25rem;
-  font-size: 0.95rem;
-  font-weight: 600;
+  border: 1px solid var(--color-primary);
+  border-radius: 4px;
+  height: 48px;
+  padding: 12px 24px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.2;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
-  transition: opacity 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
-  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.3);
+  gap: 8px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
 }
 
 .lens-button-primary:hover:not(:disabled) {
-  opacity: 0.95;
-  transform: translateY(-1px);
-  box-shadow: 0 4px 15px rgba(99, 102, 241, 0.45);
+  background-color: var(--color-secondary);
+  border-color: var(--color-secondary);
 }
 
 .lens-button-primary:disabled {
-  opacity: 0.5;
+  opacity: 0.6;
   cursor: not-allowed;
-  transform: none;
 }
 
+/* Secondary Button: 48px height, 4px radius, transparent fill, #115AA4 text/border */
 .lens-button-secondary {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-card);
-  border-radius: 8px;
-  padding: 0.65rem 1.15rem;
-  font-size: 0.95rem;
+  background-color: transparent;
+  color: var(--color-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  height: 48px;
+  padding: 12px 24px;
+  font-size: 14px;
   font-weight: 500;
+  line-height: 1.2;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.5rem;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  gap: 8px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
 }
 
 .lens-button-secondary:hover:not(:disabled) {
-  background: #1f2b42;
-  border-color: var(--text-muted);
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.lens-button-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Link Button: text link in editorial secondary blue */
+.lens-button-link {
+  background: transparent;
+  border: none;
+  color: var(--color-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color 0.15s ease;
+}
+
+.lens-button-link:hover {
+  color: var(--color-primary);
 }
 
 /* Accessible focus ring */
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
-  outline: 2px solid var(--accent-primary);
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
 }
 
-/* Pulse animation for loading skeletons */
+/* Animations */
 @keyframes shimmer {
   0% {
-    opacity: 0.4;
+    opacity: 0.45;
   }
   50% {
-    opacity: 0.8;
+    opacity: 0.85;
   }
   100% {
-    opacity: 0.4;
+    opacity: 0.45;
   }
 }
 
@@ -156,7 +201,6 @@ textarea:focus-visible {
   animation: shimmer 1.5s infinite ease-in-out;
 }
 
-/* Spinner rotation */
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -165,4 +209,30 @@ textarea:focus-visible {
 
 .animate-spin {
   animation: spin 1s linear infinite;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
