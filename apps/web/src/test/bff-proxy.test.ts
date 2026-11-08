@@ -331,6 +331,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
 
     it("/api/auth/me verifies active session and clears cookie when backend reports 401", async () => {
       serverAuth.recordTokenIssued("active_token");
+      mockCookieStore.get.mockReturnValue({ value: "active_token" });
       vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("active_token");
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
@@ -883,6 +884,67 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(await serverAuth.clearAuthCookie("")).toBe(false);
       expect(await serverAuth.clearAuthCookie("   ")).toBe(false);
       expect(mockCookieStore.delete).not.toHaveBeenCalled();
+    });
+
+    it("clearAuthCookie fails closed when current cookie is missing in store (returns false, no deletion)", async () => {
+      const token = "active_token_missing_in_store";
+      serverAuth.recordTokenIssued(token);
+      expect(serverAuth.isLatestToken(token)).toBe(true);
+
+      mockCookieStore.get.mockReturnValue(undefined); // Missing cookie
+      mockCookieStore.delete.mockClear();
+
+      const cleared = await serverAuth.clearAuthCookie(token);
+      expect(cleared).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(serverAuth.isLatestToken(token)).toBe(true);
+    });
+
+    it("clearAuthCookie fails closed when current cookie has empty or whitespace value (returns false, no deletion)", async () => {
+      const token = "active_token_empty_val_in_store";
+      serverAuth.recordTokenIssued(token);
+      expect(serverAuth.isLatestToken(token)).toBe(true);
+
+      mockCookieStore.get.mockReturnValue({ value: "" }); // Empty value
+      mockCookieStore.delete.mockClear();
+
+      const clearedEmpty = await serverAuth.clearAuthCookie(token);
+      expect(clearedEmpty).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+
+      mockCookieStore.get.mockReturnValue({ value: "   " }); // Whitespace value
+      const clearedWhitespace = await serverAuth.clearAuthCookie(token);
+      expect(clearedWhitespace).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(serverAuth.isLatestToken(token)).toBe(true);
+    });
+
+    it("clearAuthCookie fails closed when current cookie value differs from expected token (returns false, no deletion)", async () => {
+      const tokenExpected = "active_token_expected";
+      serverAuth.recordTokenIssued(tokenExpected);
+      expect(serverAuth.isLatestToken(tokenExpected)).toBe(true);
+
+      mockCookieStore.get.mockReturnValue({ value: "different_active_token" }); // Different value
+      mockCookieStore.delete.mockClear();
+
+      const cleared = await serverAuth.clearAuthCookie(tokenExpected);
+      expect(cleared).toBe(false);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(serverAuth.isLatestToken(tokenExpected)).toBe(true);
+    });
+
+    it("clearAuthCookie affirmatively deletes cookie when current cookie exactly matches expected token (returns true)", async () => {
+      const tokenValid = "active_matching_token";
+      serverAuth.recordTokenIssued(tokenValid);
+      expect(serverAuth.isLatestToken(tokenValid)).toBe(true);
+
+      mockCookieStore.get.mockReturnValue({ value: tokenValid }); // Exact match
+      mockCookieStore.delete.mockClear();
+
+      const cleared = await serverAuth.clearAuthCookie(tokenValid);
+      expect(cleared).toBe(true);
+      expect(mockCookieStore.delete).toHaveBeenCalledWith(serverAuth.LENS_TOKEN_COOKIE);
+      expect(serverAuth.isLatestToken(tokenValid)).toBe(false);
     });
 
     it("logout with missing token does not delete an active replacement cookie", async () => {

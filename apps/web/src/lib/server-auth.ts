@@ -297,8 +297,10 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
  *    replacement or concurrent sessions.
  * 2. Conditionally clears ONLY if expectedToken is still the active token in the local registry
  *    both before and after awaiting cookieStore (mitigating event loop interleaving races).
- * 3. Cross-checks cookieStore's currently stored token value; if present and not equal to expectedToken,
- *    aborts deletion (returns false).
+ * 3. Fail-closed snapshot verification: The cookie MUST exist in the cookie store and its value
+ *    MUST exactly match expectedToken. If the cookie is missing, empty, or different, deletion
+ *    is aborted (returns false) — never deleting a cookie when its current value cannot be
+ *    affirmatively verified.
  * 4. Throws when cookie store deletion fails so calling routes fail closed and never report false success.
  *
  * @returns true if the cookie was cleared; false if skipped because expectedToken was missing, superseded, or unverified.
@@ -325,9 +327,19 @@ export async function clearAuthCookie(expectedToken?: string | null): Promise<bo
     return false;
   }
 
-  // Cross-check with cookieStore's currently stored token value if accessible
+  // Fail-closed snapshot verification: Cookie MUST exist in the store and its value
+  // MUST exactly match the expected token.
+  // - Missing cookie -> return false
+  // - Empty cookie value -> return false
+  // - Different cookie value -> return false
+  // - Exact matching cookie value -> continue with deletion
   const currentCookie = cookieStore.get(LENS_TOKEN_COOKIE);
-  if (currentCookie?.value && currentCookie.value !== trimmed) {
+  if (
+    !currentCookie ||
+    typeof currentCookie.value !== "string" ||
+    !currentCookie.value.trim() ||
+    currentCookie.value !== trimmed
+  ) {
     return false;
   }
 
