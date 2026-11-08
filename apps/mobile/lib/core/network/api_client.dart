@@ -227,7 +227,7 @@ class ApiClient {
       }
       if (res.statusCode == 401 && notifyAuthOn401) {
         _onSessionExpired?.call();
-        _authService?.handleSessionExpired();
+        await _authService?.handleSessionExpired();
       }
       throw ApiException.fromResponse(res.statusCode, res.body);
     } on SocketException {

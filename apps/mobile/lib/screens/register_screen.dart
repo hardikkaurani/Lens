@@ -290,11 +290,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     const SizedBox(height: 16),
 
                     // Navigation back to Login
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         const Text(
-                          'Already have an account?',
+                          'Already have an account? ',
                           style: TextStyle(color: Colors.white60, fontSize: 13),
                         ),
                         TextButton(
