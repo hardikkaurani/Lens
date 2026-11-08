@@ -250,16 +250,22 @@ The following table documents the verification, status, and resolution evidence 
 
 ### 5.5 Web Session Invalidation Correctness & Mobile FIFO Hardening
 
-1. **Per-User Session Tracking & CAS Invalidation (`SessionTokenRegistry`)**:
-   - `SessionTokenRegistry` tracks active tokens isolated by user identity hint (`sub`), preventing cross-user session collisions (Alice replacement login does not supersede Bob's active session).
-   - Invalidation uses atomic compare-and-clear (CAS): `recordTokenCleared(token)` only removes a user's entry if the cleared token matches the active token in the registry, preventing stale 401s from purging newer replacement sessions.
-2. **Double-Checked Async Boundary Protection (`clearAuthCookie`)**:
-   - In `clearAuthCookie(expectedToken)`, token currency (`isLatestToken`) is checked both before and after `await cookies()`. If a replacement login completes on the event loop during the asynchronous cookie store access, cookie deletion is aborted and returns `false`.
-   - Reverse proxy `/api/proxy/[...path]` only emits `Set-Cookie: Max-Age=0` if `clearAuthCookie` affirmatively succeeds, preventing browser cookie jar wipes on stale requests.
-3. **Fail-Closed Multi-Instance & Cold Start Resilience**:
-   - In uncoordinated multi-instance or serverless environments (or after process restart), `isTokenCurrent()` fails closed (`false`) when a token has no registry entry on that worker, preventing arbitrary instances from wiping active cookies.
-4. **Untrusted Claim Demarcation**:
-   - `parseJwtClaims()` performs structural decoding only; claims including `sub` are untrusted hints used solely for local routing. Cryptographic authenticity and expiration are strictly validated downstream by FastAPI backend HMAC-SHA256 verification.
-5. **Mobile FIFO Keystore Serialization & Delayed Restoration Cleanup Resilience**:
+1. **Elimination of Proxy Cookie Mutation on 401 (RFC 6265 Browser Race Mitigation)**:
+   - Data proxy routes (`/api/proxy/[...path]`) forward upstream 401 Unauthorized responses directly to the client **without mutating or clearing cookies**. Data proxy never emits `Set-Cookie: Max-Age=0`.
+   - In HTTP, browsers process `Set-Cookie: Max-Age=0` unconditionally without inspecting token content. Because background or out-of-order data requests (e.g. `/api/proxy/captures`) can be delayed, proxy cookie deletion introduced an unavoidable race where a stale request could wipe the cookie jar of a newer replacement login.
+   - Session validation is driven by client lifecycle handlers intercepting 401s and querying `/api/auth/me`, which verifies the current cookie snapshot.
+2. **Concurrent Logout & Replacement Login Protection**:
+   - `POST /api/auth/logout` retrieves the request's token snapshot and supplies it to `clearAuthCookie(token)`.
+   - In `clearAuthCookie(expectedToken)`, token currency (`isLatestToken`) is validated both before and after `await cookies()`. If a replacement login completed concurrently (e.g., in another browser tab), `clearAuthCookie` aborts deletion and returns `false`, preventing in-flight logouts from destroying new session cookies.
+3. **Architectural Boundaries of Process-Local `SessionTokenRegistry`**:
+   - `SessionTokenRegistry` provides in-memory advisory coordination to mitigate local event-loop concurrency races on a single Node.js runtime.
+   - It is explicitly **not** a distributed session store or distributed lock across multi-instance or serverless deployments.
+   - The upstream FastAPI backend (`services/api`) remains the authoritative cryptographic source of truth: HMAC-SHA256 signatures, 7-day expiration timestamps, token types, and tenant isolation are verified on every backend request.
+   - Distributed instant token revocation across horizontal BFF workers is architected for Phase 2 (via a centralized Redis blacklist / session store).
+4. **Fail-Closed Multi-Instance & Cold Start Resilience**:
+   - In uncoordinated multi-instance or serverless environments (or following a process restart), `isTokenCurrent()` fails closed (`false`) when a token has no registry entry on that worker, preventing uncoordinated instances from wiping active cookies.
+5. **Untrusted Claim Demarcation**:
+   - `parseJwtClaims()` performs structural decoding only; claims including `sub` are untrusted hints used solely for local routing and isolation.
+6. **Mobile FIFO Keystore Serialization & Delayed Restoration Cleanup Resilience**:
    - `AuthService._runStorageMutation` reserves queue tail gates synchronously before yielding to `await previous`, guaranteeing strict FIFO execution and preventing concurrent waiters from racing.
    - Delayed 401 token cleanup failure during `restoreSession` records `storageCleanupError` and transitions to `restorationFailed` with UI retry; if a replacement login arrives while cleanup is pending, the replacement session is preserved without corruption.

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import { POST as loginHandler } from "@/app/api/auth/login/route";
 import { POST as logoutHandler } from "@/app/api/auth/logout/route";
+import { GET as meHandler } from "@/app/api/auth/me/route";
 import { GET as proxyGet, POST as proxyPost } from "@/app/api/proxy/[...path]/route";
 import * as serverAuth from "@/lib/server-auth";
 
@@ -279,9 +280,8 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(recordedAuthHeader).toBe("Bearer cookie_stored_token");
     });
 
-    it("clears session cookie on backend 401 response", async () => {
+    it("data proxy forwards 401 without mutating or clearing cookies", async () => {
       vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("expired_token");
-      const clearAuthCookieSpy = vi.spyOn(serverAuth, "clearAuthCookie").mockResolvedValueOnce(true);
 
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ detail: "Token expired" }), {
@@ -298,10 +298,9 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
         params: Promise.resolve({ path: ["captures"] }),
       });
       expect(res.status).toBe(401);
-      expect(clearAuthCookieSpy).toHaveBeenCalled();
-      const setCookie = res.headers.get("Set-Cookie");
-      expect(setCookie).toContain("lens_access_token=");
-      expect(setCookie).toContain("Max-Age=0");
+      // Proxy data routes MUST NOT mutate or delete cookies on 401
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(res.headers.get("Set-Cookie")).toBeNull();
     });
 
     it("preserves replacement session cookie when 401 returns for stale token", async () => {
@@ -325,6 +324,57 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(res.status).toBe(401);
       expect(mockCookieStore.delete).not.toHaveBeenCalled();
       expect(res.headers.get("Set-Cookie")).toBeNull();
+    });
+
+    it("/api/auth/me verifies active session and clears cookie when backend reports 401", async () => {
+      serverAuth.recordTokenIssued("active_token");
+      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue("active_token");
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Session expired or invalid credentials." }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/auth/me", {
+        headers: { host: "localhost:3000" },
+      });
+
+      const res = await meHandler(req);
+      expect(res.status).toBe(401);
+      expect(mockCookieStore.delete).toHaveBeenCalledWith(serverAuth.LENS_TOKEN_COOKIE);
+    });
+
+    it("/api/auth/me does not clear cookie when 401 arrives for superseded token", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const tokenOld = makeTestJwt("user_me_race", 1);
+      const tokenNew = makeTestJwt("user_me_race", 2);
+
+      serverAuth.recordTokenIssued(tokenOld);
+      serverAuth.recordTokenIssued(tokenNew); // replacement login
+      vi.spyOn(serverAuth, "getStoredToken").mockResolvedValue(tokenOld);
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Token expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/auth/me", {
+        headers: { host: "localhost:3000" },
+      });
+
+      const res = await meHandler(req);
+      expect(res.status).toBe(401);
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(serverAuth.isLatestToken(tokenNew)).toBe(true);
     });
 
     it("13. Delayed 401 response cannot remove a replacement login cookie (real proxy response and cookie mutation)", async () => {
@@ -560,11 +610,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(serverAuth.isLatestToken(token2)).toBe(true);
       expect(serverAuth.isLatestToken(token1)).toBe(false);
 
-      // Clearing active token2: successfully clears user entry
-      serverAuth.recordTokenCleared(token2);
-      expect(serverAuth.isLatestToken(token2)).toBe(false);
-
-      // Explicit logout route: unconditionally clears cookie and cleans registry
+      // Explicit logout route: clears active token2 and removes it from registry
       mockCookieStore.get.mockReturnValue({ value: token2 });
       const logoutReq = new NextRequest("http://localhost:3000/api/auth/logout", {
         method: "POST",
@@ -573,6 +619,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       const logoutRes = await logoutHandler(logoutReq);
       expect(logoutRes.status).toBe(200);
       expect(mockCookieStore.delete).toHaveBeenCalledWith(serverAuth.LENS_TOKEN_COOKIE);
+      expect(serverAuth.isLatestToken(token2)).toBe(false);
     });
 
     it("19. parseJwtClaims strictly decodes claims and safely rejects malformed or untrusted inputs", () => {
@@ -615,6 +662,46 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       expect(serverAuth.parseJwtClaims("")).toBeNull();
       expect(serverAuth.parseJwtClaims(null as any)).toBeNull();
       expect(serverAuth.parseJwtClaims(undefined as any)).toBeNull();
+    });
+
+    it("20. Concurrent logout and login: in-flight logout for tokenA does NOT delete replacement session tokenB", async () => {
+      function makeTestJwt(sub: string, seq: number): string {
+        const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+        const payload = Buffer.from(JSON.stringify({ sub, seq, exp: 9999999999 })).toString("base64url");
+        return `${header}.${payload}.sig_${sub}_${seq}`;
+      }
+
+      const tokenA = makeTestJwt("user_logout_race", 1);
+      const tokenB = makeTestJwt("user_logout_race", 2);
+
+      // User initially establishes session A
+      serverAuth.recordTokenIssued(tokenA);
+      mockCookieStore.get.mockReturnValue({ value: tokenA });
+      expect(serverAuth.isLatestToken(tokenA)).toBe(true);
+
+      // While logout for tokenA is preparing to clear, a concurrent login completes with tokenB
+      mockCookieStore.get.mockReturnValue({ value: tokenA });
+      await serverAuth.setAuthCookie(tokenB, 3600);
+      expect(serverAuth.isLatestToken(tokenB)).toBe(true);
+      expect(serverAuth.isLatestToken(tokenA)).toBe(false);
+
+      mockCookieStore.delete.mockClear();
+
+      // Ensure mockCookieStore.get still returns tokenA for Tab 1's request snapshot
+      mockCookieStore.get.mockReturnValue({ value: tokenA });
+
+      // Now Tab 1's logout executes
+      const logoutReq = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: { host: "localhost:3000", origin: "http://localhost:3000" },
+      });
+      const logoutRes = await logoutHandler(logoutReq);
+      expect(logoutRes.status).toBe(200);
+
+      // In-flight logout for tokenA detected that tokenA was superseded by tokenB
+      // It must NOT delete tokenB from the cookie store!
+      expect(mockCookieStore.delete).not.toHaveBeenCalled();
+      expect(serverAuth.isLatestToken(tokenB)).toBe(true);
     });
 
     it("allows /captures when backend base URL contains /v1 prefix", async () => {

@@ -146,16 +146,21 @@ export function parseJwtClaims(token: string): JwtSessionClaims | null {
 
 /**
  * Per-user session tracking registry to prevent stale, delayed 401 responses
- * from clearing newer replacement sessions issued to the same user.
+ * from clearing newer replacement sessions issued to the same user on this runtime instance.
  *
- * Session identity is tracked via the JWT 'sub' (User ID) claim hint.
- * Different users operate in strict isolation: User A's login or expiry
- * never interferes with User B's active session.
- *
- * Fail-closed semantics: If an instance or worker has no record of a token's issuance
- * (e.g. after a process restart or on an uncoordinated serverless instance),
- * isTokenCurrent() fails closed (returns false), preventing unverified tokens from
- * unilaterally clearing cookies on other workers.
+ * ARCHITECTURAL BOUNDARY & LIMITATIONS:
+ * 1. This registry is an in-memory best-effort advisory coordination mechanism to mitigate local
+ *    concurrency races on a single Node.js runtime. It does NOT claim to provide distributed locking,
+ *    multi-instance synchronization, or persistence across worker restarts.
+ * 2. True cryptographic security and token lifecycle enforcement are strictly the responsibility
+ *    of the upstream FastAPI backend (services/api), which cryptographically verifies HMAC-SHA256
+ *    signatures, expiration timestamps, token types, and subjects on every request.
+ * 3. Session identity is tracked via the JWT 'sub' (User ID) claim hint. Different users operate
+ *    in strict isolation: User A's login or expiry never interferes with User B's active session.
+ * 4. Fail-closed semantics: If an instance or worker has no record of a token's issuance
+ *    (e.g. after a process restart or on an uncoordinated serverless instance),
+ *    isTokenCurrent() fails closed (returns false), preventing unverified tokens from
+ *    unilaterally clearing cookies on other workers.
  */
 export class SessionTokenRegistry {
   private activeUserTokens = new Map<string, string>();

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { clearAuthCookie, getStoredToken, recordTokenCleared, verifyCsrfOrigin } from "@/lib/server-auth";
+import { clearAuthCookie, getStoredToken, verifyCsrfOrigin } from "@/lib/server-auth";
 
 export async function POST(request: NextRequest) {
   if (!verifyCsrfOrigin(request)) {
@@ -11,9 +11,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const token = await getStoredToken();
-    await clearAuthCookie();
     if (token) {
-      recordTokenCleared(token);
+      // Conditionally clear only if this token has not already been superseded by a concurrent login
+      await clearAuthCookie(token);
+    } else {
+      await clearAuthCookie();
     }
   } catch {
     return NextResponse.json(

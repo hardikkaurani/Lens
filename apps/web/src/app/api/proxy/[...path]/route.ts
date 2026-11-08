@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  clearAuthCookie,
   getBackendApiUrl,
   getStoredToken,
-  LENS_TOKEN_COOKIE,
   verifyCsrfOrigin,
 } from "@/lib/server-auth";
 
@@ -177,19 +175,10 @@ async function handleProxy(
       }
     }
 
-    // If backend reports 401 Unauthorized, automatically purge the invalid session cookie
-    // ONLY IF the rejected token has not already been superseded by a newer session
-    if (backendRes.status === 401) {
-      const cleared = await clearAuthCookie(token);
-      if (cleared) {
-        const isProd = process.env.NODE_ENV === "production";
-        responseHeaders.set(
-          "Set-Cookie",
-          `${LENS_TOKEN_COOKIE}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax${isProd ? "; Secure" : ""}`
-        );
-      }
-    }
-
+    // Note: Upstream 401 Unauthorized responses are forwarded directly to the client
+    // WITHOUT mutating or deleting cookies on data proxy routes. Session state validation
+    // is performed by dedicated identity endpoints (/api/auth/me) and client lifecycle handlers,
+    // preventing delayed or out-of-order data requests from wiping replacement login cookies.
     return new NextResponse(backendRes.body, {
       status: backendRes.status,
       statusText: backendRes.statusText,
