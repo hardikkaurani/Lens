@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import { POST as loginHandler } from "@/app/api/auth/login/route";
+import { POST as logoutHandler } from "@/app/api/auth/logout/route";
 import { GET as proxyGet, POST as proxyPost } from "@/app/api/proxy/[...path]/route";
 import * as serverAuth from "@/lib/server-auth";
+
+const mockCookieStore = {
+  get: vi.fn(),
+  set: vi.fn(),
+  delete: vi.fn(),
+};
+
+vi.mock("next/headers", () => ({
+  cookies: vi.fn(() => Promise.resolve(mockCookieStore)),
+}));
 
 describe("BFF Auth & Proxy Hardening Security Tests", () => {
   beforeEach(() => {
@@ -322,6 +333,75 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       });
       expect(res.status).toBe(302);
       expect(res.headers.get("Location")).toBe("/api/proxy/captures/cap-123?view=detail");
+    });
+  });
+
+  describe("4. Cookie Mutation Integrity & Fail-Closed Behavior (Stage 19.3.1)", () => {
+    it("setAuthCookie throws when cookie store set fails and clearAuthCookie throws when delete fails", async () => {
+      mockCookieStore.set.mockImplementationOnce(() => {
+        throw new Error("Cookie storage unavailable");
+      });
+      await expect(serverAuth.setAuthCookie("token123", 3600)).rejects.toThrow("Cookie storage unavailable");
+
+      mockCookieStore.delete.mockImplementationOnce(() => {
+        throw new Error("Cookie storage deletion failed");
+      });
+      await expect(serverAuth.clearAuthCookie()).rejects.toThrow("Cookie storage deletion failed");
+    });
+
+    it("login route fails closed (500) and does not return false success when setAuthCookie throws", async () => {
+      vi.spyOn(serverAuth, "setAuthCookie").mockRejectedValueOnce(
+        new Error("Keystore unavailable")
+      );
+
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ access_token: "jwt-token-abc", token_type: "bearer", expires_in: 3600 }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ id: "u-123", email: "user@example.com", is_active: true }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          )
+        );
+
+      const req = new NextRequest("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({ email: "user@example.com", password: "Password123!" }),
+      });
+
+      const res = await loginHandler(req);
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.detail).toContain("Failed to establish secure session cookie");
+      expect(data.success).toBeUndefined();
+    });
+
+    it("logout route fails closed (500) and does not return false success when clearAuthCookie throws", async () => {
+      vi.spyOn(serverAuth, "clearAuthCookie").mockRejectedValueOnce(
+        new Error("Cookie store write error")
+      );
+
+      const req = new NextRequest("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: {
+          host: "localhost:3000",
+          origin: "http://localhost:3000",
+        },
+      });
+
+      const res = await logoutHandler(req);
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.detail).toContain("Failed to clear session authentication cookie");
+      expect(data.success).toBeUndefined();
     });
   });
 });

@@ -92,6 +92,54 @@ describe("Web Authentication & Client Integration", () => {
       );
     });
 
+    it("getMe enforces 15-second default timeout and throws ApiClientError with isTimeout=true", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce((_url, options) => {
+        return new Promise((_resolve, reject) => {
+          const signal = options?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => {
+            const err = new Error("The user aborted a request.");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      });
+
+      await expect(apiClient.getMe({ timeoutMs: 20 })).rejects.toMatchObject({
+        isTimeout: true,
+      });
+    });
+
+    it("getMe correctly preserves caller AbortSignal cancellation with isTimeout=false", async () => {
+      const callerController = new AbortController();
+
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce((_url, options) => {
+        return new Promise((_resolve, reject) => {
+          const signal = options?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted.");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      });
+
+      const getMePromise = apiClient.getMe({ signal: callerController.signal, timeoutMs: 5000 });
+      callerController.abort();
+
+      await expect(getMePromise).rejects.toMatchObject({
+        isTimeout: false,
+      });
+    });
+
+    it("getMe rejects immediately if caller AbortSignal is pre-aborted", async () => {
+      const callerController = new AbortController();
+      callerController.abort();
+
+      await expect(apiClient.getMe({ signal: callerController.signal })).rejects.toMatchObject({
+        isTimeout: false,
+      });
+    });
+
     it("logout clears cookie session via /api/auth/logout", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ message: "Logged out successfully" }), {

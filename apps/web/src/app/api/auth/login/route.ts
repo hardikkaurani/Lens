@@ -124,7 +124,14 @@ export async function POST(request: NextRequest) {
     }
 
     // 3. Persist JWT in HttpOnly cookie ONLY AFTER all checks and profile verification succeed
-    await setAuthCookie(accessToken, expiresIn);
+    try {
+      await setAuthCookie(accessToken, expiresIn);
+    } catch {
+      return NextResponse.json(
+        { detail: "Failed to establish secure session cookie." },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(
       {

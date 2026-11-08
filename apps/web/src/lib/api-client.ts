@@ -545,19 +545,75 @@ export const apiClient = {
 
   /**
    * Fetch authenticated user profile using HttpOnly cookie session.
+   * Enforces a 15-second default timeout while preserving caller AbortSignal cancellation.
    */
-  async getMe(params: { signal?: AbortSignal } = {}): Promise<User> {
-    const res = await fetch("/api/auth/me", {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      credentials: "same-origin",
-      signal: params.signal,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+  async getMe(params: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<User> {
+    const timeoutMs = params.timeoutMs ?? 15000;
+    const controller = new AbortController();
+    let isTimedOut = false;
+
+    if (params.signal?.aborted) {
+      throw new ApiClientError(0, "The request was aborted.", { isTimeout: false });
     }
-    return (await res.json()) as User;
+
+    const onCallerAbort = () => {
+      controller.abort();
+    };
+
+    if (params.signal) {
+      params.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timeoutId = setTimeout(() => {
+      isTimedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const res = await fetch("/api/auth/me", {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+      }
+      return (await res.json()) as User;
+    } catch (err: unknown) {
+      if (err instanceof ApiClientError) {
+        throw err;
+      }
+      if (err instanceof Error && err.name === "AbortError") {
+        if (isTimedOut) {
+          throw new ApiClientError(
+            0,
+            "Request to retrieve user profile timed out.",
+            { isTimeout: true }
+          );
+        }
+        throw new ApiClientError(
+          0,
+          "The request was aborted.",
+          { isTimeout: false }
+        );
+      }
+      if (err instanceof Error) {
+        throw new ApiClientError(
+          0,
+          "Unable to connect to the LENS API service. Ensure the backend is running.",
+          { isNetworkError: true }
+        );
+      }
+      throw new ApiClientError(0, "An unexpected error occurred while communicating with the server.");
+    } finally {
+      clearTimeout(timeoutId);
+      if (params.signal) {
+        params.signal.removeEventListener("abort", onCallerAbort);
+      }
+    }
   },
 
   /**

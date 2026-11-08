@@ -105,33 +105,27 @@ export async function getStoredToken(): Promise<string | null> {
 
 /**
  * Set the JWT access token in an HttpOnly, Secure, SameSite=Lax cookie.
+ * Throws when cookie store mutation fails so routes never report false success.
  */
 export async function setAuthCookie(token: string, expiresInSeconds: number): Promise<void> {
   const isProduction = process.env.NODE_ENV === "production";
-  try {
-    const cookieStore = await cookies();
-    cookieStore.set(LENS_TOKEN_COOKIE, token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: "lax",
-      path: "/",
-      maxAge: expiresInSeconds,
-    });
-  } catch {
-    // Gracefully handle invocations outside Next request scope
-  }
+  const cookieStore = await cookies();
+  cookieStore.set(LENS_TOKEN_COOKIE, token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "lax",
+    path: "/",
+    maxAge: expiresInSeconds,
+  });
 }
 
 /**
  * Clear the authentication cookie upon logout or token expiry.
+ * Throws when cookie store deletion fails so routes never report false success.
  */
 export async function clearAuthCookie(): Promise<void> {
-  try {
-    const cookieStore = await cookies();
-    cookieStore.delete(LENS_TOKEN_COOKIE);
-  } catch {
-    // Gracefully handle invocations outside Next request scope
-  }
+  const cookieStore = await cookies();
+  cookieStore.delete(LENS_TOKEN_COOKIE);
 }
 
 /**

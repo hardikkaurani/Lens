@@ -9,6 +9,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  await clearAuthCookie();
+  try {
+    await clearAuthCookie();
+  } catch {
+    return NextResponse.json(
+      { detail: "Failed to clear session authentication cookie." },
+      { status: 500 }
+    );
+  }
+
   return NextResponse.json({ success: true, message: "Logged out successfully." }, { status: 200 });
 }
