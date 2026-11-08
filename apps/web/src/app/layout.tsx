@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
+import { AuthProvider } from "@/lib/auth-context";
 
 function getMetadataBase(): URL | undefined {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL;
@@ -56,7 +57,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased bg-[#0a0d14] text-slate-100">
-        <AppShell>{children}</AppShell>
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -1,5 +1,6 @@
 import {
   isCaptureDetail,
+  type AuthSessionResponse,
   type CaptureCreatePayload,
   type CaptureDetail,
   type CaptureListResponse,
@@ -14,6 +15,7 @@ import {
   type HealthResponse,
   type SearchResponse,
   type UploadCaptureOptions,
+  type User,
 } from "@/types/api";
 
 /**
@@ -40,15 +42,26 @@ export class ApiClientError extends Error {
 }
 
 /**
- * Resolve the API base URL from client-side public environment variable,
- * falling back safely to local development port 8000.
+ * Resolve the API base URL.
+ * In browser environments, always routes through the Next.js BFF proxy to attach HttpOnly session cookies.
+ * In server-side environments, uses NEXT_PUBLIC_API_BASE_URL or defaults to localhost:8000.
  */
 export function getApiBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return "/api/proxy";
+  }
   const envUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
   if (envUrl && envUrl.trim()) {
     return envUrl.trim().replace(/\/+$/, "");
   }
   return "http://localhost:8000";
+}
+
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+  unauthorizedHandler = handler;
 }
 
 /**
@@ -103,7 +116,11 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   const timeoutMs = options.timeoutMs ?? 15000;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let isTimedOut = false;
+  const timeoutId = setTimeout(() => {
+    isTimedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   // Link caller signal if provided
   if (options.signal) {
@@ -114,6 +131,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     const res = await fetch(url, {
       ...options,
       signal: controller.signal,
+      credentials: "same-origin",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -124,6 +142,9 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     clearTimeout(timeoutId);
 
     if (!res.ok) {
+      if (res.status === 401 && !url.includes("/api/auth/login") && !url.includes("/api/auth/register")) {
+        unauthorizedHandler?.();
+      }
       let errorData: unknown = null;
       try {
         errorData = await res.json();
@@ -144,10 +165,17 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
 
     if (err instanceof Error) {
       if (err.name === "AbortError") {
+        if (isTimedOut) {
+          throw new ApiClientError(
+            0,
+            "The request timed out. Please try again.",
+            { isTimeout: true }
+          );
+        }
         throw new ApiClientError(
           0,
-          "The request was aborted or timed out. Please try again.",
-          { isTimeout: true }
+          "The request was aborted.",
+          { isTimeout: false }
         );
       }
       return Promise.reject(
@@ -222,6 +250,7 @@ export const apiClient = {
 
     return new Promise<CaptureDetail>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      xhr.withCredentials = true;
       xhr.open("POST", url);
       xhr.timeout = timeoutMs;
       xhr.responseType = "json";
@@ -487,6 +516,140 @@ export const apiClient = {
       method: "GET",
       signal: params.signal,
     });
+  },
+
+  /**
+   * Register a new user account.
+   */
+  async register(payload: { email: string; password: string; signal?: AbortSignal }): Promise<User> {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ email: payload.email, password: payload.password }),
+      credentials: "same-origin",
+      signal: payload.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as User;
+  },
+
+  /**
+   * Authenticate with email and password via Next.js BFF and set HttpOnly session cookie.
+   */
+  async login(payload: { email: string; password: string; signal?: AbortSignal }): Promise<AuthSessionResponse> {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ email: payload.email, password: payload.password }),
+      credentials: "same-origin",
+      signal: payload.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as AuthSessionResponse;
+  },
+
+  /**
+   * Fetch authenticated user profile using HttpOnly cookie session.
+   * Enforces a 15-second default timeout while preserving caller AbortSignal cancellation.
+   */
+  async getMe(params: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<User> {
+    const timeoutMs = params.timeoutMs ?? 15000;
+    const controller = new AbortController();
+    let isTimedOut = false;
+
+    if (params.signal?.aborted) {
+      throw new ApiClientError(0, "The request was aborted.", { isTimeout: false });
+    }
+
+    const onCallerAbort = () => {
+      controller.abort();
+    };
+
+    if (params.signal) {
+      params.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+
+    const timeoutId = setTimeout(() => {
+      isTimedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      const res = await fetch("/api/auth/me", {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        let err: unknown;
+        try {
+          err = await res.json();
+        } catch (jsonErr: unknown) {
+          if (jsonErr instanceof Error && jsonErr.name === "AbortError") {
+            throw jsonErr;
+          }
+          err = {};
+        }
+        throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+      }
+      return (await res.json()) as User;
+    } catch (err: unknown) {
+      if (err instanceof ApiClientError) {
+        throw err;
+      }
+      if (err instanceof Error && err.name === "AbortError") {
+        if (isTimedOut) {
+          throw new ApiClientError(
+            0,
+            "Request to retrieve user profile timed out.",
+            { isTimeout: true }
+          );
+        }
+        throw new ApiClientError(
+          0,
+          "The request was aborted.",
+          { isTimeout: false }
+        );
+      }
+      if (err instanceof Error) {
+        throw new ApiClientError(
+          0,
+          "Unable to connect to the LENS API service. Ensure the backend is running.",
+          { isNetworkError: true }
+        );
+      }
+      throw new ApiClientError(0, "An unexpected error occurred while communicating with the server.");
+    } finally {
+      clearTimeout(timeoutId);
+      if (params.signal) {
+        params.signal.removeEventListener("abort", onCallerAbort);
+      }
+    }
+  },
+
+  /**
+   * Log out and terminate the current user session by clearing the HttpOnly cookie.
+   */
+  async logout(params: { signal?: AbortSignal } = {}): Promise<{ success: boolean }> {
+    const res = await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      signal: params.signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiClientError(res.status, extractSafeErrorMessage(res.status, err));
+    }
+    return (await res.json()) as { success: boolean };
   },
 };
 

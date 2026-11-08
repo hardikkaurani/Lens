@@ -6,6 +6,7 @@ import Link from "next/link";
 import { apiClient, ApiClientError } from "@/lib/api-client";
 import { ErrorMessage } from "@/components/ErrorMessage";
 import { FileCaptureForm } from "@/components/FileCaptureForm";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 type CaptureTypeTab = "url" | "text" | "file";
 
@@ -108,7 +109,8 @@ export default function NewCapturePage() {
   };
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    <ProtectedRoute>
+      <div className="space-y-6 max-w-2xl">
       {/* Header */}
       <div className="pb-4 border-b border-white/10 flex items-center justify-between">
         <div>
@@ -302,5 +304,6 @@ export default function NewCapturePage() {
         </>
       )}
     </div>
+    </ProtectedRoute>
   );
 }

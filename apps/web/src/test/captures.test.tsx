@@ -4,23 +4,46 @@ import React from "react";
 import CapturesPage from "@/app/captures/page";
 import NewCapturePage from "@/app/captures/new/page";
 import { apiClient, ApiClientError } from "@/lib/api-client";
-import type { Capture, CaptureDetail, CaptureListResponse } from "@/types/api";
+import type { Capture, CaptureDetail, CaptureListResponse, User } from "@/types/api";
+
+import { AuthProvider } from "@/lib/auth-context";
 
 const mockRouterPush = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockRouterPush }),
+  usePathname: () => "/captures/new",
+  useSearchParams: () => new URLSearchParams(),
 }));
+
+const mockAuthUser: User = {
+  id: "u-1",
+  email: "user@example.com",
+  is_active: true,
+};
+
+function renderWithAuth(ui: React.ReactElement, initialUser: User | null = mockAuthUser) {
+  return render(
+    <AuthProvider initialUser={initialUser} initialLoading={false}>
+      {ui}
+    </AuthProvider>
+  );
+}
 
 describe("Captures Management & Creation (Tests 4-12)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     mockRouterPush.mockReset();
+    vi.spyOn(apiClient, "getMe").mockResolvedValue({
+      id: "u-1",
+      email: "user@example.com",
+      is_active: true,
+    });
   });
 
   // 4. Capture list loading
   it("4. displays loading skeleton while captures are being fetched", () => {
     vi.spyOn(apiClient, "listCaptures").mockReturnValue(new Promise(() => {})); // pending promise
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     expect(screen.getAllByTestId("loading-skeleton").length).toBeGreaterThan(0);
   });
@@ -51,7 +74,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
     };
     vi.spyOn(apiClient, "listCaptures").mockResolvedValue(mockResponse);
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("FastAPI Documentation")).toBeInTheDocument();
@@ -70,7 +93,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       offset: 0,
     });
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("No captures yet")).toBeInTheDocument();
@@ -84,7 +107,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       new ApiClientError(500, "Unable to load captures from database.")
     );
 
-    render(<CapturesPage />);
+    renderWithAuth(<CapturesPage />);
 
     await waitFor(() => {
       expect(screen.getByText("Unable to load captures from database.")).toBeInTheDocument();
@@ -113,7 +136,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
 
     const createSpy = vi.spyOn(apiClient, "createCapture").mockResolvedValue(createdCapture);
 
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     const urlInput = screen.getByLabelText(/Webpage URL/i);
     const titleInput = screen.getByLabelText(/Optional Title/i);
@@ -154,7 +177,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
 
     const createSpy = vi.spyOn(apiClient, "createCapture").mockResolvedValue(createdCapture);
 
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     // Switch to Text tab
     const textTabBtn = screen.getByRole("button", { name: /Text \/ Note/i });
@@ -184,7 +207,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
   it("10. rejects empty URL, invalid scheme, and whitespace-only text client-side", async () => {
     const createSpy = vi.spyOn(apiClient, "createCapture");
 
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     // Test empty URL
     const submitBtn = screen.getByTestId("submit-capture-btn");
@@ -216,7 +239,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       new ApiClientError(422, "Validation failed on original_url: Unsupported URL scheme")
     );
 
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     const urlInput = screen.getByLabelText(/Webpage URL/i);
     fireEvent.change(urlInput, { target: { value: "https://example.com" } });
@@ -235,7 +258,7 @@ describe("Captures Management & Creation (Tests 4-12)", () => {
       new ApiClientError(500, "Internal database error occurred.")
     );
 
-    render(<NewCapturePage />);
+    renderWithAuth(<NewCapturePage />);
 
     const urlInput = screen.getByLabelText(/Webpage URL/i);
     fireEvent.change(urlInput, { target: { value: "https://example.com/page" } });

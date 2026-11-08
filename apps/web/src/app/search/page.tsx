@@ -10,6 +10,7 @@ import { ErrorMessage } from "@/components/ErrorMessage";
 import { LoadingListSkeleton } from "@/components/LoadingSkeleton";
 import { formatScorePercentage } from "@/lib/format";
 import { sanitizeUrl } from "@/lib/security";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 const FILTER_OPTIONS = [
   { id: "all", label: "All Sources" },
@@ -473,8 +474,10 @@ function SearchContent() {
 
 export default function SearchPage() {
   return (
-    <Suspense fallback={<LoadingListSkeleton count={3} />}>
-      <SearchContent />
-    </Suspense>
+    <ProtectedRoute>
+      <Suspense fallback={<LoadingListSkeleton count={3} />}>
+        <SearchContent />
+      </Suspense>
+    </ProtectedRoute>
   );
 }
