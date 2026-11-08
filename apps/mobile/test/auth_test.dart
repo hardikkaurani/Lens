@@ -1674,6 +1674,52 @@ void main() {
       expect(await storage.getToken(backendAuthority: 'auth.lens.internal'), equals('token_c_b'));
     });
 
+    test('Test 9: Strict FIFO serialization with 3 concurrent mutations waiting on the same authority', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      final executionOrder = <String>[];
+      final activeOperations = <String>[];
+      var maxConcurrency = 0;
+
+      Future<void> runTrackedMutation(String name, Duration delay) async {
+        await auth.runStorageMutationForTesting('test-authority', () async {
+          activeOperations.add(name);
+          if (activeOperations.length > maxConcurrency) {
+            maxConcurrency = activeOperations.length;
+          }
+          executionOrder.add('$name-start');
+          await Future<void>.delayed(delay);
+          executionOrder.add('$name-end');
+          activeOperations.remove(name);
+        });
+      }
+
+      // Launch A, B, and C concurrently on the same authority
+      final futA = runTrackedMutation('A', const Duration(milliseconds: 30));
+      final futB = runTrackedMutation('B', const Duration(milliseconds: 20));
+      final futC = runTrackedMutation('C', const Duration(milliseconds: 10));
+
+      await Future.wait([futA, futB, futC]);
+
+      // Assert: Concurrency never exceeded 1 at any point in time
+      expect(maxConcurrency, equals(1));
+      expect(activeOperations, isEmpty);
+
+      // Assert: Strict sequential FIFO completion order
+      expect(
+        executionOrder,
+        equals([
+          'A-start',
+          'A-end',
+          'B-start',
+          'B-end',
+          'C-start',
+          'C-end',
+        ]),
+      );
+    });
+
     test('Test 10: FailingAuthTokenStorage matches production authority-scoped semantics', () async {
       final storage = FailingAuthTokenStorage();
 

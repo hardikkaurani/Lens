@@ -37,18 +37,21 @@ class AuthService extends ChangeNotifier {
 
   /// Serializes credential mutations (save and clear operations) per authority key
   /// to eliminate race conditions between in-flight deletions and subsequent logins.
+  ///
+  /// CRITICAL INVARIANT: The queue tail gate MUST be registered synchronously BEFORE
+  /// awaiting the previous operation so that multiple concurrent callers form a strict
+  /// FIFO chain and cannot bypass serialization.
   Future<T> _runStorageMutation<T>(String? backendAuthority, Future<T> Function() action) async {
     final key = _storageQueueKey(backendAuthority);
     final previous = _storageQueues[key];
+    final gate = Completer<void>();
+    _storageQueues[key] = gate.future;
 
     if (previous != null) {
       try {
         await previous;
       } catch (_) {}
     }
-
-    final gate = Completer<void>();
-    _storageQueues[key] = gate.future;
 
     try {
       final result = await action();
@@ -61,6 +64,11 @@ class AuthService extends ChangeNotifier {
         _storageQueues.remove(key);
       }
     }
+  }
+
+  @visibleForTesting
+  Future<T> runStorageMutationForTesting<T>(String? backendAuthority, Future<T> Function() action) {
+    return _runStorageMutation(backendAuthority, action);
   }
 
   User? get currentUser => _currentUser;

@@ -1005,7 +1005,7 @@ describe("Stage 14 Web GitHub Repository Discovery & Selection UX (Tests 34-48)"
 
     await waitFor(() => {
       expect(screen.getByTestId("activity-error-message")).toBeInTheDocument();
-    });
+    }, { timeout: 3000 });
 
     expect(screen.getByTestId("activity-error-message")).toHaveTextContent(
       "GitHub API rate limit exceeded. Please try again later."

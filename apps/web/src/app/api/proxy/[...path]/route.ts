@@ -182,8 +182,8 @@ async function handleProxy(
     // ONLY IF the rejected token has not already been superseded by a newer session
     if (backendRes.status === 401) {
       const currentToken = await getStoredToken();
-      if (currentToken === token && (await isLatestToken(token))) {
-        await clearAuthCookie();
+      if (currentToken === token && isLatestToken(token)) {
+        await clearAuthCookie(token);
         const isProd = process.env.NODE_ENV === "production";
         responseHeaders.set(
           "Set-Cookie",

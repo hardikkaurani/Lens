@@ -104,124 +104,128 @@ export async function getStoredToken(): Promise<string | null> {
 }
 
 /**
- * Interface for distributed or shared token storage backends (e.g. Redis, memcached,
- * key-value database, or multi-instance coordination cache).
+ * Decoded payload claims from a stateless JWT access token.
  */
-export interface DistributedTokenStore {
-  get(key: string): Promise<string | null>;
-  set(key: string, value: string): Promise<void>;
-  delete(key: string): Promise<void>;
+export interface JwtSessionClaims {
+  sub: string;
+  email?: string;
+  iat?: number;
+  exp?: number;
+  [key: string]: unknown;
 }
 
 /**
- * Global/shared distributed token store implementation.
- * Uses globalThis singleton to coordinate across workers and allows pluggable adapters.
+ * Extract claims from a JWT access token without cryptographic signature verification
+ * (backend FastAPI handles signature validation). Used for session identity
+ * and multi-tenant user isolation.
  */
-class GlobalDistributedTokenStore implements DistributedTokenStore {
-  private getMap(): Map<string, string> {
-    const g = globalThis as unknown as { __lens_distributed_token_store__?: Map<string, string> };
-    if (!g.__lens_distributed_token_store__) {
-      g.__lens_distributed_token_store__ = new Map<string, string>();
+export function parseJwtClaims(token: string): JwtSessionClaims | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = Buffer.from(payloadBase64, "base64").toString("utf-8");
+    const parsed = JSON.parse(json);
+    if (parsed && typeof parsed === "object" && typeof parsed.sub === "string") {
+      return parsed as JwtSessionClaims;
     }
-    return g.__lens_distributed_token_store__;
-  }
-
-  async get(key: string): Promise<string | null> {
-    return this.getMap().get(key) ?? null;
-  }
-
-  async set(key: string, value: string): Promise<void> {
-    this.getMap().set(key, value);
-  }
-
-  async delete(key: string): Promise<void> {
-    this.getMap().delete(key);
+    return null;
+  } catch {
+    return null;
   }
 }
 
 /**
- * Coordination contract for session token lifecycle across requests and instances.
- * In distributed or serverless deployments (Kubernetes pods, Cloud Run, AWS Lambda),
- * multiple application instances share session state via a DistributedTokenStore.
+ * Per-user session tracking registry to prevent stale, delayed 401 responses
+ * from clearing newer replacement sessions issued to the same user.
+ *
+ * Session identity is established via the JWT 'sub' (User ID) claim.
+ * Different users operate in strict isolation: User A's login or expiry
+ * never interferes with User B's active session.
  */
-export interface SessionTokenCoordinator {
-  recordTokenIssued(token: string): Promise<void>;
-  recordTokenCleared(): Promise<void>;
-  isTokenCurrent(token: string | null): Promise<boolean>;
-  reset(): Promise<void>;
-}
+export class SessionTokenRegistry {
+  private activeUserTokens = new Map<string, string>();
+  private fallbackLatestToken: string | null = null;
 
-export class DistributedSessionCoordinator implements SessionTokenCoordinator {
-  public static readonly LATEST_TOKEN_KEY = "lens:session:latest_token";
-  private store: DistributedTokenStore;
-
-  constructor(store?: DistributedTokenStore) {
-    this.store = store ?? new GlobalDistributedTokenStore();
+  recordIssued(token: string): void {
+    const trimmed = token.trim();
+    const claims = parseJwtClaims(trimmed);
+    if (claims?.sub) {
+      this.activeUserTokens.set(claims.sub, trimmed);
+    } else {
+      this.fallbackLatestToken = trimmed;
+    }
   }
 
-  setStore(store: DistributedTokenStore): void {
-    this.store = store;
+  recordCleared(token?: string | null): void {
+    if (token) {
+      const claims = parseJwtClaims(token.trim());
+      if (claims?.sub) {
+        this.activeUserTokens.delete(claims.sub);
+        return;
+      }
+    }
+    this.fallbackLatestToken = null;
   }
 
-  async recordTokenIssued(token: string): Promise<void> {
-    await this.store.set(DistributedSessionCoordinator.LATEST_TOKEN_KEY, token.trim());
-  }
-
-  async recordTokenCleared(): Promise<void> {
-    await this.store.delete(DistributedSessionCoordinator.LATEST_TOKEN_KEY);
-  }
-
-  async isTokenCurrent(token: string | null): Promise<boolean> {
+  isTokenCurrent(token: string | null): boolean {
     if (!token || token.trim().length === 0) return false;
-    const latest = await this.store.get(DistributedSessionCoordinator.LATEST_TOKEN_KEY);
-    if (latest === null) {
-      return true;
+    const trimmed = token.trim();
+    const claims = parseJwtClaims(trimmed);
+    if (claims?.sub) {
+      const latestForUser = this.activeUserTokens.get(claims.sub);
+      if (latestForUser === undefined) {
+        return true;
+      }
+      return latestForUser === trimmed;
     }
-    return latest === token.trim();
+    if (this.fallbackLatestToken === null) return true;
+    return this.fallbackLatestToken === trimmed;
   }
 
-  async reset(): Promise<void> {
-    await this.store.delete(DistributedSessionCoordinator.LATEST_TOKEN_KEY);
+  reset(): void {
+    this.activeUserTokens.clear();
+    this.fallbackLatestToken = null;
   }
 }
 
-let activeCoordinator: SessionTokenCoordinator = new DistributedSessionCoordinator();
+let activeRegistry = new SessionTokenRegistry();
 
-export function setSessionTokenCoordinator(coordinator: SessionTokenCoordinator): void {
-  activeCoordinator = coordinator;
+export function getSessionTokenRegistry(): SessionTokenRegistry {
+  return activeRegistry;
 }
 
-export function getSessionTokenCoordinator(): SessionTokenCoordinator {
-  return activeCoordinator;
+export function setSessionTokenRegistry(registry: SessionTokenRegistry): void {
+  activeRegistry = registry;
 }
 
 /**
  * Record that a new token was established (e.g. on login or session setup).
  * Coordinates across requests and instances to prevent delayed 401s from wiping newer sessions.
  */
-export async function recordTokenIssued(token: string): Promise<void> {
-  await activeCoordinator.recordTokenIssued(token);
+export function recordTokenIssued(token: string): void {
+  activeRegistry.recordIssued(token);
 }
 
 /**
  * Record that the token was explicitly cleared (e.g. on logout).
  */
-export async function recordTokenCleared(): Promise<void> {
-  await activeCoordinator.recordTokenCleared();
+export function recordTokenCleared(token?: string | null): void {
+  activeRegistry.recordCleared(token);
 }
 
 /**
  * Reset token tracking (used in tests and state resets).
  */
-export async function resetLatestToken(): Promise<void> {
-  await activeCoordinator.reset();
+export function resetLatestToken(): void {
+  activeRegistry.reset();
 }
 
 /**
- * Check if the given token is still the latest issued token across instances.
+ * Check if the given token is still the latest issued token for its session identity.
  */
-export async function isLatestToken(token: string | null): Promise<boolean> {
-  return activeCoordinator.isTokenCurrent(token);
+export function isLatestToken(token: string | null): boolean {
+  return activeRegistry.isTokenCurrent(token);
 }
 
 /**
@@ -238,17 +242,17 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
     path: "/",
     maxAge: expiresInSeconds,
   });
-  await recordTokenIssued(token);
+  recordTokenIssued(token);
 }
 
 /**
  * Clear the authentication cookie upon logout or token expiry.
  * Throws when cookie store deletion fails so routes never report false success.
  */
-export async function clearAuthCookie(): Promise<void> {
+export async function clearAuthCookie(token?: string | null): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.delete(LENS_TOKEN_COOKIE);
-  await recordTokenCleared();
+  recordTokenCleared(token);
 }
 
 /**
