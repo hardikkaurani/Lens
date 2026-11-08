@@ -1056,6 +1056,106 @@ void main() {
       expect(auth.isLoading, isFalse);
       expect(auth.status, equals(AuthStatus.unauthenticated));
     });
+
+    test('restoreSession sets restorationFailed and records storageCleanupError when token clearance fails on 401', () async {
+      final storage = FailingAuthTokenStorage()
+        ..token = 'invalid_jwt_token'
+        ..failOnClear = true;
+      final auth = AuthService(storage: storage);
+
+      await auth.restoreSession(() async {
+        throw const ApiException(
+          statusCode: 401,
+          message: 'Invalid credentials or token expired',
+        );
+      });
+
+      // MUST NOT report unauthenticated when token remains persisted in storage
+      expect(auth.status, equals(AuthStatus.restorationFailed));
+      expect(auth.isAuthenticated, isFalse);
+      expect(auth.currentUser, isNull);
+      expect(auth.hasStorageCleanupError, isTrue);
+      expect(auth.storageCleanupError, isNotNull);
+      expect(auth.storageCleanupError.toString(), contains('Simulated keystore clear failure'));
+
+      // Token is still in storage
+      expect(storage.token, equals('invalid_jwt_token'));
+
+      // Retry cleanup after keystore becomes healthy
+      storage.failOnClear = false;
+      await auth.retryStorageCleanup();
+      expect(auth.hasStorageCleanupError, isFalse);
+      expect(auth.storageCleanupError, isNull);
+      expect(storage.token, isNull);
+    });
+
+    test('handleSessionExpired represents storage clearance failure while transitioning to unauthenticated', () async {
+      final storage = FailingAuthTokenStorage()
+        ..token = 'active_jwt_token'
+        ..failOnClear = true;
+      final auth = AuthService(storage: storage);
+
+      // Initialize authenticated session
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'user@lens.app', isActive: true),
+        token: 'active_jwt_token',
+      );
+      expect(auth.isAuthenticated, isTrue);
+
+      // Trigger 401 session expiry while storage clearance fails
+      await auth.handleSessionExpired();
+
+      // UI safely transitions to unauthenticated so expired session cannot be used
+      expect(auth.status, equals(AuthStatus.unauthenticated));
+      expect(auth.isAuthenticated, isFalse);
+      expect(auth.currentUser, isNull);
+
+      // Persistence failure is explicitly exposed rather than falsely claiming credentials were removed
+      expect(auth.hasStorageCleanupError, isTrue);
+      expect(auth.storageCleanupError, isNotNull);
+      expect(auth.storageCleanupError.toString(), contains('Simulated keystore clear failure'));
+
+      // Direct propagation when requested
+      expect(
+        () => auth.handleSessionExpired(null, null, true),
+        throwsA(isA<AuthStorageException>()),
+      );
+
+      // Retry cleanup after keystore recovers
+      storage.failOnClear = false;
+      await auth.retryStorageCleanup();
+      expect(auth.hasStorageCleanupError, isFalse);
+      expect(auth.storageCleanupError, isNull);
+      expect(storage.token, isNull);
+    });
+
+    test('stale handleSessionExpired or restoreSession cannot invalidate newer active login session', () async {
+      final storage = InMemoryAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Session 1 is active
+      await auth.setSession(
+        user: const User(id: 'u-1', email: 'session1@lens.app', isActive: true),
+        token: 'token_session_1',
+      );
+      final int session1Id = auth.sessionId;
+
+      // Newer login establishes Session 2
+      await auth.setSession(
+        user: const User(id: 'u-2', email: 'session2@lens.app', isActive: true),
+        token: 'token_session_2',
+      );
+      expect(auth.sessionId, isNot(equals(session1Id)));
+
+      // Stale 401 arriving from Session 1 request must be discarded
+      await auth.handleSessionExpired(session1Id);
+
+      // Session 2 MUST remain active, authenticated, and intact
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('session2@lens.app'));
+      expect(auth.hasStorageCleanupError, isFalse);
+    });
   });
 }
 
@@ -1063,12 +1163,14 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
   bool failOnSave = false;
   bool failOnGet = false;
   bool failOnClear = false;
+  String? token;
 
   @override
   Future<void> saveToken(String token, {String? backendAuthority}) async {
     if (failOnSave) {
       throw const AuthStorageException('Simulated keystore save failure');
     }
+    this.token = token;
   }
 
   @override
@@ -1076,7 +1178,7 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnGet) {
       throw const AuthStorageException('Simulated keystore read failure');
     }
-    return null;
+    return token;
   }
 
   @override
@@ -1084,6 +1186,7 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnClear) {
       throw const AuthStorageException('Simulated keystore clear failure');
     }
+    token = null;
   }
 
   @override
@@ -1091,6 +1194,6 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnGet) {
       throw const AuthStorageException('Simulated keystore read failure');
     }
-    return false;
+    return token != null && token!.isNotEmpty;
   }
 }
