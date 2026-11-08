@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../core/auth/auth_service.dart';
 import '../core/network/api_client.dart';
 import '../core/theme/app_theme.dart';
 import '../core/utils/formatters.dart';
@@ -15,8 +16,13 @@ import 'capture_detail_screen.dart';
 /// Main screen displaying the paginated list of captured information.
 class CapturesScreen extends StatefulWidget {
   final ApiClient? apiClient;
+  final AuthService? authService;
 
-  const CapturesScreen({super.key, this.apiClient});
+  const CapturesScreen({
+    super.key,
+    this.apiClient,
+    this.authService,
+  });
 
   @override
   State<CapturesScreen> createState() => _CapturesScreenState();
@@ -141,6 +147,14 @@ class _CapturesScreenState extends State<CapturesScreen> {
             tooltip: 'Refresh',
             onPressed: _loadInitial,
           ),
+          if (widget.authService != null && widget.authService!.isAuthenticated)
+            IconButton(
+              icon: const Icon(Icons.logout_rounded),
+              tooltip: 'Sign Out',
+              onPressed: () async {
+                await widget.authService!.logout();
+              },
+            ),
         ],
       ),
       body: _buildBody(),
