@@ -223,6 +223,7 @@ describe("Web Authentication & Client Integration", () => {
     it("handles successful login and redirects to default or custom redirect url", async () => {
       mockSearchParams = new URLSearchParams("redirect=/settings");
       vi.spyOn(apiClient, "login").mockResolvedValueOnce({
+        success: true,
         user: { id: "u-1", email: "user@example.com", is_active: true },
       });
 

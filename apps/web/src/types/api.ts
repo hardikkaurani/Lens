@@ -248,7 +248,7 @@ export interface User {
   id: string;
   email: string;
   is_active: boolean;
-  created_at: string;
+  created_at?: string;
 }
 
 export interface AuthSessionResponse {
