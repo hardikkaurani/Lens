@@ -2,25 +2,16 @@
 
 > **A personal information capture and retrieval system**: anything you encounter and want to find again should be easy to capture, understand, connect, and retrieve.
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/hardikkaurani/Lens/ci.yml?branch=main&logo=githubactions&logoColor=white)](https://github.com/hardikkaurani/Lens/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js&logoColor=white)](https://nextjs.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Flutter](https://img.shields.io/badge/Flutter-3.41+-02569B?logo=flutter&logoColor=white)](https://flutter.dev/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![pgvector](https://img.shields.io/badge/pgvector-enabled-brightgreen)](https://github.com/pgvector/pgvector)
-
 ---
 
-## 🚀 Current Status: **Stage 11 — Secure Binary File & PDF Capture Foundation**
+## Current Status: Stage 11 — Secure Binary File & PDF Capture Foundation
 
 > [!NOTE]
 > LENS now supports secure binary document upload and asynchronous ingestion for PDF files. Uploaded documents are stored in local MinIO (S3-compatible object storage), validated with strict magic byte and size enforcement, indexed through bounded page-by-page text extraction, partitioned into deterministic chunks, embedded with 1536-dimensional vector representations, and made instantly searchable via the unified hybrid search API. OCR and image document processing remain explicitly deferred.
 
 ---
 
-## 🎯 Core Problem
+## Core Problem
 
 Modern knowledge work suffers from severe information fragmentation:
 
@@ -30,7 +21,7 @@ Modern knowledge work suffers from severe information fragmentation:
 
 ---
 
-## 🔄 Core Product Loop
+## Core Product Loop
 
 ```text
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
@@ -46,7 +37,7 @@ Modern knowledge work suffers from severe information fragmentation:
 
 ---
 
-## ✨ Main Capabilities (V1 Roadmap)
+## Main Capabilities (V1 Roadmap)
 
 - **Omni-Capture Interface**: Unified ingestion for URLs, raw notes, GitHub repositories, and media.
 - **Intelligent Processing Pipeline**: Asynchronous background jobs handling metadata extraction, text chunking, and embedding generation.
@@ -57,7 +48,7 @@ Modern knowledge work suffers from severe information fragmentation:
 
 ---
 
-## 🏗️ High-Level Architecture
+## High-Level Architecture
 
 ```mermaid
 graph TD
@@ -89,7 +80,7 @@ graph TD
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 lens/
@@ -110,24 +101,24 @@ lens/
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 | Layer | Technology | Status |
 | :--- | :--- | :--- |
-| **Web Frontend** | Next.js 16 (App Router, Turbopack), React 19, TypeScript 5 | ✅ **Active** |
-| **Mobile Frontend** | Flutter 3.41+, Dart 3.11+, Material 3 | ✅ **Active** |
-| **Backend API** | FastAPI 0.115+, Python 3.11+, Pydantic v2 | ✅ **Active** |
-| **Background Worker** | Python 3.11+, BeautifulSoup4, HTTPX, pypdf | ✅ **Active** |
-| **Primary Database** | PostgreSQL 16 + `pgvector` extension | ✅ **Active** |
-| **Cache & Queue** | Redis 7.4 (Reliable List Queue via `BLMOVE`) | ✅ **Active** |
-| **Object Storage** | S3-Compatible (MinIO) | ✅ **Active** |
-| **Authentication** | JWT (Access + Refresh) + HttpOnly Cookies | 🚧 **In Progress** (Stage 19) |
-| **Integrations** | GitHub OAuth & Webhooks | 📋 **Planned** |
-| **Local Containerization** | Docker & Docker Compose | ✅ **Active** |
+| **Web Frontend** | Next.js 16 (App Router, Turbopack), React 19, TypeScript 5 | Active |
+| **Mobile Frontend** | Flutter 3.41+, Dart 3.11+, Material 3 | Active |
+| **Backend API** | FastAPI 0.115+, Python 3.11+, Pydantic v2 | Active |
+| **Background Worker** | Python 3.11+, BeautifulSoup4, HTTPX, pypdf | Active |
+| **Primary Database** | PostgreSQL 16 + `pgvector` extension | Active |
+| **Cache & Queue** | Redis 7.4 (Reliable List Queue via `BLMOVE`) | Active |
+| **Object Storage** | S3-Compatible (MinIO) | Active |
+| **Authentication** | JWT (Access + Refresh) + HttpOnly Cookies | In Progress (Stage 19) |
+| **Integrations** | GitHub OAuth & Webhooks | Planned |
+| **Local Containerization** | Docker & Docker Compose | Active |
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -194,9 +185,10 @@ flutter run
 
 ---
 
-## 🔌 API Highlights
+## API Highlights
 
 ### Capture Ingestion
+
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `POST` | `/captures` | Ingest URL or text capture |
@@ -205,6 +197,7 @@ flutter run
 | `POST` | `/captures/upload` | Upload PDF binary (multipart) |
 
 ### Hybrid Search
+
 ```bash
 curl "http://localhost:8000/search?q=fastapi+async&limit=5"
 ```
@@ -213,7 +206,7 @@ Returns grouped results with `hybrid_score`, `lexical_score`, `semantic_score`, 
 
 ---
 
-## 🌐 Web Workspace (`apps/web`)
+## Web Workspace (`apps/web`)
 
 - **Routes**: `/captures`, `/captures/new`, `/captures/[id]`, `/search`, `/settings`, `/login`, `/register`
 - **Features**: Source badges, status indicators, bounded live polling, race-condition-safe search, XSS/URL injection defense
@@ -221,7 +214,7 @@ Returns grouped results with `hybrid_score`, `lexical_score`, `semantic_score`, 
 
 ---
 
-## 📱 Mobile App (`apps/mobile`)
+## Mobile App (`apps/mobile`)
 
 - **Screens**: Captures feed, New Capture (URL/Note tabs), Capture Detail, Search, Server Config
 - **Connectivity**: USB reverse proxy (`adb reverse tcp:8000 tcp:8000`), Wi-Fi LAN, Emulator preset
@@ -229,7 +222,7 @@ Returns grouped results with `hybrid_score`, `lexical_score`, `semantic_score`, 
 
 ---
 
-## 🛡️ Security & Secrets
+## Security & Secrets
 
 > [!CAUTION]
 > **NEVER commit secrets, API keys, tokens, certificates, or `.env*` files.**
@@ -240,37 +233,16 @@ Returns grouped results with `hybrid_score`, `lexical_score`, `semantic_score`, 
 
 ---
 
-## 🤝 Contributing
-
-1. **Fork** the repository
-2. **Create a branch**: `git checkout -b feat/your-feature` or `fix/your-fix`
-3. **Make changes** with clear, focused commits
-4. **Run checks**:
-   - Web: `npm run typecheck && npm run lint && npm run test`
-   - API: `ruff check . && pytest`
-   - Mobile: `flutter analyze && flutter test`
-5. **Open a PR** with a clear description and linked issues
-
-### Commit Message Convention
-Follows [Conventional Commits](https://www.conventionalcommits.org/):
-- `feat:` — new feature
-- `fix:` — bug fix
-- `docs:` — documentation
-- `refactor:` — code restructuring
-- `test:` — test changes
-- `chore:` — maintenance
-
----
-
-## 📄 License
+## License
 
 **MIT License** — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-Built with ❤️ using excellent open-source tools:
+Built using excellent open-source tools:
+
 - [Next.js](https://nextjs.org/), [React](https://react.dev/), [TailwindCSS](https://tailwindcss.com/)
 - [FastAPI](https://fastapi.tiangolo.com/), [SQLAlchemy](https://www.sqlalchemy.org/), [Alembic](https://alembic.sqlalchemy.org/)
 - [Flutter](https://flutter.dev/), [Dart](https://dart.dev/)
