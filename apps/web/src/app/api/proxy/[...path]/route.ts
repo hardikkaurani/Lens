@@ -3,6 +3,7 @@ import {
   clearAuthCookie,
   getBackendApiUrl,
   getStoredToken,
+  isLatestToken,
   LENS_TOKEN_COOKIE,
   verifyCsrfOrigin,
 } from "@/lib/server-auth";
@@ -181,7 +182,7 @@ async function handleProxy(
     // ONLY IF the rejected token has not already been superseded by a newer session
     if (backendRes.status === 401) {
       const currentToken = await getStoredToken();
-      if (currentToken === token) {
+      if (currentToken === token && isLatestToken(token)) {
         await clearAuthCookie();
         const isProd = process.env.NODE_ENV === "production";
         responseHeaders.set(

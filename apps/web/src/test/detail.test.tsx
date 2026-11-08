@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import React from "react";
 import { CaptureDetailContent } from "@/components/CaptureDetailContent";
@@ -206,5 +206,58 @@ describe("Capture Detail Page (Tests 13-19)", () => {
         screen.getByText("No extracted textual chunks available for this capture.")
       ).toBeInTheDocument();
     });
+  });
+
+  // 16. Capture detail timeout displays error message and does not leave infinite loading skeleton
+  it("16. displays error message and stops loading when getCapture times out, without leaving infinite loading skeleton", async () => {
+    vi.spyOn(apiClient, "getCapture").mockRejectedValueOnce(
+      new ApiClientError(0, "The request timed out. Please try again.", { isTimeout: true })
+    );
+
+    render(<CaptureDetailContent id="cap-timeout" />);
+
+    // Must show error message and dismiss loading skeleton
+    await waitFor(() => {
+      expect(screen.getByText(/The request timed out/i)).toBeInTheDocument();
+    });
+    expect(screen.queryAllByTestId("loading-skeleton")).toHaveLength(0);
+  });
+
+  // 17. Retry resets the polling budget and reloads
+  it("17. clicking retry resets loading state, clears error, and resets polling budget", async () => {
+    const getCaptureSpy = vi.spyOn(apiClient, "getCapture")
+      .mockRejectedValueOnce(
+        new ApiClientError(0, "The request timed out. Please try again.", { isTimeout: true })
+      )
+      .mockResolvedValueOnce({
+        id: "cap-retry",
+        source_type: "url",
+        processing_status: "completed",
+        processing_error: null,
+        processed_at: "2026-10-02T12:00:00Z",
+        title: "Retried Capture",
+        original_url: "https://example.com/retried",
+        content: null,
+        mime_type: "text/html",
+        source_id: null,
+        created_at: "2026-10-02T12:00:00Z",
+        updated_at: "2026-10-02T12:00:00Z",
+        metadata: null,
+        chunks: [],
+      });
+
+    render(<CaptureDetailContent id="cap-retry" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/The request timed out/i)).toBeInTheDocument();
+    });
+
+    const retryBtn = screen.getByRole("button", { name: /retry/i });
+    fireEvent.click(retryBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Retried Capture")).toBeInTheDocument();
+    });
+    expect(getCaptureSpy).toHaveBeenCalledTimes(2);
   });
 });

@@ -196,6 +196,28 @@ describe("Web Authentication & Client Integration", () => {
       });
     });
 
+    it("14. request dispatcher distinguishes caller AbortSignal cancellation from timeout", async () => {
+      const callerController = new AbortController();
+
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce((_url, options) => {
+        return new Promise((_resolve, reject) => {
+          const signal = options?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted.");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      });
+
+      const listPromise = apiClient.listCaptures({ signal: callerController.signal });
+      callerController.abort();
+
+      await expect(listPromise).rejects.toMatchObject({
+        isTimeout: false,
+      });
+    });
+
     it("logout clears cookie session via /api/auth/logout", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
         new Response(JSON.stringify({ message: "Logged out successfully" }), {

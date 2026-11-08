@@ -1463,6 +1463,116 @@ void main() {
       expect(auth.failedCleanupAuthority, isNull);
       expect(await storage.getToken(backendAuthority: 'auth-d.lens.internal'), isNull);
     });
+
+    test('Test 4: logout races with replacement login', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Establish Session A
+      const userA = User(id: 'u-logout-a', email: 'logout-a@lens.app', isActive: true);
+      await auth.setSession(
+        user: userA,
+        token: 'token_logout_a',
+        backendAuthority: 'auth-a.lens.internal',
+      );
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // Start logout for Session A
+      final logoutFuture = auth.logout(backendAuthority: 'auth-a.lens.internal');
+      await clearStarted.future;
+
+      // While logout is awaiting storage deletion, replacement login occurs
+      const userB = User(id: 'u-logout-b', email: 'logout-b@lens.app', isActive: true);
+      await auth.setSession(
+        user: userB,
+        token: 'token_logout_b',
+        backendAuthority: 'auth-b.lens.internal',
+      );
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('logout-b@lens.app'));
+
+      // Complete the old logout deletion
+      clearGate.complete();
+      await logoutFuture;
+
+      // Replacement session B MUST survive!
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('logout-b@lens.app'));
+      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
+      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('token_logout_b'));
+    });
+
+    test('Test 5: clearSessionAndLogin races with replacement login', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Establish Session A
+      const userA = User(id: 'u-cs-a', email: 'cs-a@lens.app', isActive: true);
+      await auth.setSession(
+        user: userA,
+        token: 'token_cs_a',
+        backendAuthority: 'auth-a.lens.internal',
+      );
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // Start clearSessionAndLogin for Session A
+      final clearFuture = auth.clearSessionAndLogin(backendAuthority: 'auth-a.lens.internal');
+      await clearStarted.future;
+
+      // While clearSessionAndLogin is awaiting storage deletion, replacement login occurs
+      const userB = User(id: 'u-cs-b', email: 'cs-b@lens.app', isActive: true);
+      await auth.setSession(
+        user: userB,
+        token: 'token_cs_b',
+        backendAuthority: 'auth-b.lens.internal',
+      );
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.currentUser?.email, equals('cs-b@lens.app'));
+
+      // Complete the old clearSessionAndLogin deletion
+      clearGate.complete();
+      await clearFuture;
+
+      // Replacement session B MUST survive!
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('cs-b@lens.app'));
+      expect(auth.activeBackendAuthority, equals('auth-b.lens.internal'));
+      expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('token_cs_b'));
+    });
+
+    test('Test 10: FailingAuthTokenStorage matches production authority-scoped semantics', () async {
+      final storage = FailingAuthTokenStorage();
+
+      await storage.saveToken('token_for_auth_a', backendAuthority: 'auth-a');
+      await storage.saveToken('token_for_auth_b', backendAuthority: 'auth-b');
+      await storage.saveToken('global_token');
+
+      // Reads isolate authority
+      expect(await storage.getToken(backendAuthority: 'auth-a'), equals('token_for_auth_a'));
+      expect(await storage.getToken(backendAuthority: 'auth-b'), equals('token_for_auth_b'));
+      expect(await storage.getToken(), equals('global_token'));
+
+      // Scoped clear does not wipe global or other authority
+      await storage.clearToken(backendAuthority: 'auth-a');
+      expect(await storage.getToken(backendAuthority: 'auth-a'), isNull);
+      expect(await storage.getToken(backendAuthority: 'auth-b'), equals('token_for_auth_b'));
+      expect(await storage.getToken(), equals('global_token'));
+
+      // Unscoped clear only wipes global token
+      await storage.clearToken();
+      expect(await storage.getToken(), isNull);
+      expect(await storage.getToken(backendAuthority: 'auth-b'), equals('token_for_auth_b'));
+    });
   });
 }
 
@@ -1531,15 +1641,22 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
   bool failOnSave = false;
   bool failOnGet = false;
   bool failOnClear = false;
-  String? token;
   final Map<String, String> tokens = {};
+
+  String? get token => tokens[InMemoryAuthTokenStorage.formatKey(null)];
+  set token(String? val) {
+    if (val != null) {
+      tokens[InMemoryAuthTokenStorage.formatKey(null)] = val;
+    } else {
+      tokens.remove(InMemoryAuthTokenStorage.formatKey(null));
+    }
+  }
 
   @override
   Future<void> saveToken(String token, {String? backendAuthority}) async {
     if (failOnSave) {
       throw const AuthStorageException('Simulated keystore save failure');
     }
-    this.token = token;
     final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
     tokens[key] = token;
   }
@@ -1549,11 +1666,8 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnGet) {
       throw const AuthStorageException('Simulated keystore read failure');
     }
-    if (backendAuthority != null && backendAuthority.isNotEmpty) {
-      final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
-      return tokens[key];
-    }
-    return token ?? tokens[InMemoryAuthTokenStorage.formatKey(null)];
+    final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
+    return tokens[key];
   }
 
   @override
@@ -1561,13 +1675,8 @@ class FailingAuthTokenStorage implements AuthTokenStorage {
     if (failOnClear) {
       throw const AuthStorageException('Simulated keystore clear failure');
     }
-    token = null;
-    if (backendAuthority != null && backendAuthority.isNotEmpty) {
-      final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
-      tokens.remove(key);
-    } else {
-      tokens.clear();
-    }
+    final key = InMemoryAuthTokenStorage.formatKey(backendAuthority);
+    tokens.remove(key);
   }
 
   @override

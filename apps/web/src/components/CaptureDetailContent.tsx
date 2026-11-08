@@ -40,7 +40,6 @@ export function CaptureDetailContent({ id }: { id: string }) {
       })
       .catch((err: unknown) => {
         if (!isMounted) return;
-        if (err instanceof ApiClientError && err.isTimeout) return;
 
         if (err instanceof ApiClientError && err.status === 404) {
           setIsNotFound(true);
@@ -126,6 +125,8 @@ export function CaptureDetailContent({ id }: { id: string }) {
         <ErrorMessage
           message={error}
           onRetry={() => {
+            pollAttemptsRef.current = 0;
+            setError(null);
             setLoading(true);
             setRefreshKey((k) => k + 1);
           }}

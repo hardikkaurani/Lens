@@ -103,6 +103,41 @@ export async function getStoredToken(): Promise<string | null> {
   }
 }
 
+let latestIssuedToken: string | null = null;
+
+/**
+ * Record that a new token was established (e.g. on login or session setup).
+ * Used to coordinate request-scoped cookie operations and prevent delayed 401s
+ * from wiping newer sessions.
+ */
+export function recordTokenIssued(token: string): void {
+  latestIssuedToken = token.trim();
+}
+
+/**
+ * Record that the token was explicitly cleared (e.g. on logout).
+ */
+export function recordTokenCleared(): void {
+  latestIssuedToken = null;
+}
+
+/**
+ * Reset token tracking (used in tests and state resets).
+ */
+export function resetLatestToken(): void {
+  latestIssuedToken = null;
+}
+
+/**
+ * Check if the given token is still the latest issued token.
+ * If no token has been explicitly tracked, defaults to true.
+ */
+export function isLatestToken(token: string | null): boolean {
+  if (!token || token.trim().length === 0) return false;
+  if (latestIssuedToken === null) return true;
+  return latestIssuedToken === token.trim();
+}
+
 /**
  * Set the JWT access token in an HttpOnly, Secure, SameSite=Lax cookie.
  * Throws when cookie store mutation fails so routes never report false success.
@@ -117,6 +152,7 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
     path: "/",
     maxAge: expiresInSeconds,
   });
+  recordTokenIssued(token);
 }
 
 /**
@@ -126,6 +162,7 @@ export async function setAuthCookie(token: string, expiresInSeconds: number): Pr
 export async function clearAuthCookie(): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.delete(LENS_TOKEN_COOKIE);
+  recordTokenCleared();
 }
 
 /**

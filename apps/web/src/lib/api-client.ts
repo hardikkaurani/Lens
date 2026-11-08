@@ -116,7 +116,11 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   const timeoutMs = options.timeoutMs ?? 15000;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let isTimedOut = false;
+  const timeoutId = setTimeout(() => {
+    isTimedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   // Link caller signal if provided
   if (options.signal) {
@@ -161,10 +165,17 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
 
     if (err instanceof Error) {
       if (err.name === "AbortError") {
+        if (isTimedOut) {
+          throw new ApiClientError(
+            0,
+            "The request timed out. Please try again.",
+            { isTimeout: true }
+          );
+        }
         throw new ApiClientError(
           0,
-          "The request was aborted or timed out. Please try again.",
-          { isTimeout: true }
+          "The request was aborted.",
+          { isTimeout: false }
         );
       }
       return Promise.reject(
