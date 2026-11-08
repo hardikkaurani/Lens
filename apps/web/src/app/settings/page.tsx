@@ -329,36 +329,36 @@ export function SettingsContent() {
     const s = repo.activity_sync_status || "idle";
     if (s === "syncing") {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-cyan-950/50 text-cyan-300 border border-cyan-500/30" data-testid={`activity-status-${repo.id}`}>
-          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#EFF6FF] text-[#2075CC] border border-[#BFDBFE]" data-testid={`activity-status-${repo.id}`}>
+          <span className="w-1.5 h-1.5 rounded-full bg-[#2075CC] animate-pulse" />
           Syncing...
         </span>
       );
     }
     if (s === "queued") {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-950/50 text-amber-300 border border-amber-500/30" data-testid={`activity-status-${repo.id}`}>
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]" data-testid={`activity-status-${repo.id}`}>
           Queued
         </span>
       );
     }
     if (s === "synced") {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-950/50 text-emerald-300 border border-emerald-500/30" data-testid={`activity-status-${repo.id}`}>
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#ECFDF5] text-[#065F46] border border-[#A7F3D0]" data-testid={`activity-status-${repo.id}`}>
           Synced
         </span>
       );
     }
     if (s === "partial") {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-950/50 text-amber-300 border border-amber-500/30" data-testid={`activity-status-${repo.id}`}>
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#FFFBEB] text-[#92400E] border border-[#FDE68A]" data-testid={`activity-status-${repo.id}`}>
           Partial Sync
         </span>
       );
     }
     if (s === "failed") {
       return (
-        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-rose-950/50 text-rose-300 border border-rose-500/30" data-testid={`activity-status-${repo.id}`}>
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#FEF2F2] text-[#C62828] border border-[#FEE2E2]" data-testid={`activity-status-${repo.id}`}>
           Sync Failed
         </span>
       );
@@ -396,11 +396,11 @@ export function SettingsContent() {
   };
 
   return (
-    <div className="space-y-8 max-w-4xl" data-testid="settings-page">
+    <div className="space-y-8 max-w-5xl" data-testid="settings-page">
       {/* Page Title Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white tracking-tight">Integrations & Settings</h1>
-        <p className="text-sm text-slate-400 mt-1">
+      <div className="pb-5 border-b border-[#E5E7EB]">
+        <h1 className="text-2xl font-semibold text-[#0F172A] tracking-tight">Integrations & Settings</h1>
+        <p className="text-sm text-[#5B6472] mt-1">
           Manage third-party platform connections and indexing permissions.
         </p>
       </div>
@@ -409,24 +409,24 @@ export function SettingsContent() {
       {activeNotification && (
         <div
           role="alert"
-          className={`p-4 rounded-xl text-xs flex items-center justify-between border ${
+          className={`p-4 rounded-[4px] text-xs flex items-center justify-between border ${
             activeNotification.type === "success"
-              ? "bg-emerald-950/30 border-emerald-500/30 text-emerald-200"
-              : "bg-rose-950/30 border-rose-500/30 text-rose-200"
+              ? "bg-[#ECFDF5] border-[#A7F3D0] text-[#065F46]"
+              : "bg-[#FEF2F2] border-[#FEE2E2] text-[#C62828]"
           }`}
           data-testid="settings-notification"
         >
           <div className="flex items-center gap-2.5">
             {activeNotification.type === "success" ? (
-              <svg className="w-4 h-4 shrink-0 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4 shrink-0 text-[#10B981]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             ) : (
-              <svg className="w-4 h-4 shrink-0 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4 shrink-0 text-[#C62828]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             )}
-            <span>{activeNotification.message}</span>
+            <span className="font-medium">{activeNotification.message}</span>
           </div>
           <button
             type="button"
@@ -434,7 +434,7 @@ export function SettingsContent() {
               setDismissedNotification(true);
               setActionNotification(null);
             }}
-            className="text-slate-400 hover:text-white p-1 rounded"
+            className="text-[#5B6472] hover:text-[#0F172A] p-1 rounded transition-colors"
             aria-label="Dismiss notification"
           >
             ✕
@@ -447,43 +447,43 @@ export function SettingsContent() {
 
       {/* Integrations Section */}
       <section className="space-y-4">
-        <h2 className="text-base font-semibold text-slate-200">Connected Accounts</h2>
+        <h2 className="text-base font-semibold text-[#0F172A]">Connected Accounts</h2>
 
         {isLoading ? (
           /* Loading Skeleton */
-          <div className="lens-card p-6 space-y-4 animate-pulse bg-[#0d121e]" data-testid="settings-loading">
+          <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-6 space-y-4 animate-pulse shadow-[0_1px_3px_rgba(0,0,0,0.03)]" data-testid="settings-loading">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-slate-800" />
+                <div className="w-10 h-10 rounded-[4px] bg-[#F1F5F9]" />
                 <div className="space-y-2">
-                  <div className="w-24 h-4 rounded bg-slate-800" />
-                  <div className="w-48 h-3 rounded bg-slate-800/60" />
+                  <div className="w-24 h-4 rounded bg-[#F1F5F9]" />
+                  <div className="w-48 h-3 rounded bg-[#F1F5F9]" />
                 </div>
               </div>
-              <div className="w-20 h-6 rounded bg-slate-800" />
+              <div className="w-20 h-6 rounded bg-[#F1F5F9]" />
             </div>
           </div>
         ) : status?.connected ? (
           /* CONNECTED STATE */
-          <div className="lens-card p-6 space-y-6 bg-[#0d121e]" data-testid="github-connected-card">
+          <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-6 space-y-6 shadow-[0_1px_3px_rgba(0,0,0,0.03)]" data-testid="github-connected-card">
             {/* Account Info Header */}
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-white">
+                <div className="w-11 h-11 rounded-[4px] bg-[#F8FAFC] border border-[#E5E7EB] flex items-center justify-center text-[#0F172A]">
                   <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24">
                     <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
                   </svg>
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-white text-base">GitHub</h3>
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" data-testid="status-badge-connected">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <h3 className="font-semibold text-[#0F172A] text-base">GitHub</h3>
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-[4px] text-xs font-mono font-medium bg-[#ECFDF5] text-[#065F46] border border-[#A7F3D0]" data-testid="status-badge-connected">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] animate-pulse" />
                       Connected
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Account: <span className="text-slate-200 font-mono font-medium" data-testid="connected-username">@{status.github_username || "unknown"}</span>
+                  <p className="text-xs text-[#5B6472] mt-0.5">
+                    Account: <span className="text-[#0F172A] font-mono font-medium" data-testid="connected-username">@{status.github_username || "unknown"}</span>
                   </p>
                 </div>
               </div>
@@ -492,7 +492,7 @@ export function SettingsContent() {
                 type="button"
                 onClick={handleDisconnect}
                 disabled={isDisconnecting}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-rose-500/20 text-rose-300 hover:text-rose-200 hover:bg-rose-950/30 transition-colors disabled:opacity-50"
+                className="px-3.5 py-1.5 rounded-[4px] text-xs font-medium border border-[#FCA5A5] text-[#C62828] bg-white hover:bg-[#FEF2F2] transition-colors disabled:opacity-50"
                 data-testid="disconnect-github-btn"
               >
                 {isDisconnecting ? "Disconnecting..." : "Disconnect"}
@@ -500,18 +500,18 @@ export function SettingsContent() {
             </div>
 
             {/* Connection Details Metadata */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-white/5 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4 border-t border-[#F1F5F9] text-xs">
               <div>
-                <span className="text-slate-500 block font-mono text-[11px]">Authorized Scope</span>
-                <span className="text-slate-300 font-mono">{status.scope || "read:user"}</span>
+                <span className="text-[#5B6472] block font-mono text-[11px] uppercase tracking-wider">Authorized Scope</span>
+                <span className="text-[#0F172A] font-mono font-medium mt-0.5 block">{status.scope || "read:user"}</span>
               </div>
               <div>
-                <span className="text-slate-500 block font-mono text-[11px]">Connected At</span>
-                <span className="text-slate-300 font-mono">{formatDate(status.connected_at)}</span>
+                <span className="text-[#5B6472] block font-mono text-[11px] uppercase tracking-wider">Connected At</span>
+                <span className="text-[#0F172A] font-mono font-medium mt-0.5 block">{formatDate(status.connected_at)}</span>
               </div>
               <div>
-                <span className="text-slate-500 block font-mono text-[11px]">Last Verified</span>
-                <span className="text-slate-300 font-mono">{formatDate(status.last_verified_at)}</span>
+                <span className="text-[#5B6472] block font-mono text-[11px] uppercase tracking-wider">Last Verified</span>
+                <span className="text-[#0F172A] font-mono font-medium mt-0.5 block">{formatDate(status.last_verified_at)}</span>
               </div>
             </div>
 
@@ -519,16 +519,16 @@ export function SettingsContent() {
             {status.has_required_scope === false && (
               <div
                 role="alert"
-                className="p-4 rounded-xl text-xs bg-amber-950/40 border border-amber-500/40 text-amber-200 flex flex-wrap items-center justify-between gap-3"
+                className="p-4 rounded-[4px] text-xs bg-[#FFFBEB] border border-[#FDE68A] text-[#92400E] flex flex-wrap items-center justify-between gap-3"
                 data-testid="missing-scope-warning"
               >
                 <div className="flex items-center gap-2.5">
-                  <svg className="w-5 h-5 shrink-0 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg className="w-5 h-5 shrink-0 text-[#D97706]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                   <div>
-                    <span className="font-semibold block text-amber-300">Repository Discovery Permission Required</span>
-                    <span className="text-[11px] text-amber-200/90">
+                    <span className="font-semibold block text-[#92400E]">Repository Discovery Permission Required</span>
+                    <span className="text-[11px] text-[#B45309]">
                       {status.missing_scope_reason ||
                         "Your GitHub connection is missing repository permissions (repo or public_repo scope). Please reconnect your account to grant access."}
                     </span>
@@ -536,7 +536,7 @@ export function SettingsContent() {
                 </div>
                 <a
                   href={apiClient.getGitHubConnectUrl()}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors shrink-0"
+                  className="px-3.5 py-1.5 rounded-[4px] text-xs font-semibold bg-[#2075CC] text-white hover:bg-[#115AA4] transition-colors shrink-0"
                   data-testid="reconnect-github-btn"
                 >
                   Reconnect GitHub
@@ -545,11 +545,11 @@ export function SettingsContent() {
             )}
 
             {/* REPOSITORY DISCOVERY & SELECTION SECTION */}
-            <div className="border-t border-white/10 pt-5 space-y-4" data-testid="repositories-section">
+            <div className="border-t border-[#E5E7EB] pt-6 space-y-4" data-testid="repositories-section">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
-                  <h4 className="text-sm font-semibold text-white">Discovered Repositories</h4>
-                  <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                  <h4 className="text-sm font-semibold text-[#0F172A]">Discovered Repositories</h4>
+                  <span className="px-2 py-0.5 rounded-[4px] text-[11px] font-mono bg-[#F8FAFC] text-[#334155] border border-[#E5E7EB]">
                     {totalRepos}
                   </span>
                 </div>
@@ -560,7 +560,7 @@ export function SettingsContent() {
                     value={repoSearch}
                     onChange={(e) => setRepoSearch(e.target.value)}
                     placeholder="Search repositories..."
-                    className="px-2.5 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors w-44 sm:w-56"
+                    className="h-9 px-3 rounded-[4px] text-xs bg-white border border-[#E5E7EB] text-[#0F172A] placeholder-[#94A3B8] focus:outline-none focus:border-[#2075CC] transition-colors w-44 sm:w-60"
                     data-testid="repo-search-input"
                   />
 
@@ -568,7 +568,7 @@ export function SettingsContent() {
                     type="button"
                     onClick={handleSyncRepositories}
                     disabled={isSyncingRepos}
-                    className="lens-button-primary text-xs px-3.5 py-1.5 font-medium flex items-center gap-1.5 disabled:opacity-50"
+                    className="h-9 px-3.5 rounded-[4px] text-xs font-medium text-white bg-[#2075CC] hover:bg-[#115AA4] transition-colors flex items-center gap-1.5 disabled:opacity-50"
                     data-testid="sync-repos-btn"
                   >
                     {isSyncingRepos ? (
@@ -590,7 +590,7 @@ export function SettingsContent() {
                     type="button"
                     onClick={() => handleSyncActivities()}
                     disabled={isSyncingActivities || selectedRepos.length === 0}
-                    className="lens-button-primary text-xs px-3.5 py-1.5 font-medium flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="h-9 px-3.5 rounded-[4px] text-xs font-medium text-white bg-[#2075CC] hover:bg-[#115AA4] transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     data-testid="sync-activities-btn"
                   >
                     {isSyncingActivities && !activitySyncRepoId ? (
@@ -614,10 +614,10 @@ export function SettingsContent() {
               {repoError && (
                 <div
                   role="alert"
-                  className="p-3 rounded-lg text-xs bg-rose-950/40 border border-rose-500/30 text-rose-200 flex items-center gap-2"
+                  className="p-3 rounded-[4px] text-xs bg-[#FEF2F2] border border-[#FEE2E2] text-[#C62828] flex items-center gap-2"
                   data-testid="repo-error-message"
                 >
-                  <svg className="w-4 h-4 shrink-0 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg className="w-4 h-4 shrink-0 text-[#C62828]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <span>{repoError}</span>
@@ -628,11 +628,11 @@ export function SettingsContent() {
               {activityError && (
                 <div
                   role="alert"
-                  className="p-3 rounded-lg text-xs bg-rose-950/40 border border-rose-500/30 text-rose-200 flex items-center justify-between gap-2"
+                  className="p-3 rounded-[4px] text-xs bg-[#FEF2F2] border border-[#FEE2E2] text-[#C62828] flex items-center justify-between gap-2"
                   data-testid="activity-error-message"
                 >
                   <div className="flex items-center gap-2">
-                    <svg className="w-4 h-4 shrink-0 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg className="w-4 h-4 shrink-0 text-[#C62828]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                     <span>{activityError}</span>
@@ -640,7 +640,7 @@ export function SettingsContent() {
                   <button
                     type="button"
                     onClick={() => handleSyncActivities()}
-                    className="text-xs font-semibold text-rose-300 hover:text-white underline ml-2 shrink-0"
+                    className="text-xs font-semibold text-[#C62828] hover:underline ml-2 shrink-0"
                     data-testid="retry-activities-btn"
                   >
                     Retry
@@ -652,32 +652,32 @@ export function SettingsContent() {
               {isLoadingRepos ? (
                 <div className="space-y-2 animate-pulse" data-testid="repos-loading">
                   {[1, 2, 3].map((i) => (
-                    <div key={i} className="h-16 rounded-lg bg-slate-900/60 border border-slate-800" />
+                    <div key={i} className="h-16 rounded-[4px] bg-[#F8FAFC] border border-[#E5E7EB]" />
                   ))}
                 </div>
               ) : filteredRepos.length === 0 ? (
                 <div
-                  className="p-8 text-center rounded-xl border border-dashed border-slate-800 bg-slate-900/20 text-slate-400 space-y-2"
+                  className="p-8 text-center rounded-[8px] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] text-[#5B6472] space-y-2"
                   data-testid="repo-empty-state"
                 >
-                  <svg className="w-8 h-8 mx-auto text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg className="w-8 h-8 mx-auto text-[#94A3B8]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                   </svg>
-                  <p className="text-xs font-medium text-slate-300">
+                  <p className="text-xs font-semibold text-[#0F172A]">
                     {repositories.length === 0
                       ? "No repositories discovered yet. Click 'Sync Repositories' to discover your GitHub repositories."
                       : "No repositories match your search filter."}
                   </p>
-                  <p className="text-[11px] text-slate-500">
+                  <p className="text-[11px] text-[#5B6472]">
                     Discovering repositories imports metadata and prepares selection for future ingestion.
                   </p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-96 overflow-y-auto pr-1" data-testid="repo-list">
+                <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1" data-testid="repo-list">
                   {filteredRepos.map((repo) => (
                     <div
                       key={repo.id}
-                      className="p-3 rounded-lg border border-slate-800/80 bg-slate-900/40 hover:bg-slate-900/80 transition-colors flex flex-col gap-2"
+                      className="p-3.5 rounded-[4px] border border-[#E5E7EB] bg-[#F8FAFC] hover:bg-white hover:border-[#CBD5E1] transition-all flex flex-col gap-2"
                       data-testid={`repo-item-${repo.id}`}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -686,7 +686,7 @@ export function SettingsContent() {
                             type="checkbox"
                             checked={repo.is_selected}
                             onChange={() => handleToggleSelect(repo)}
-                            className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-900 text-cyan-600 focus:ring-cyan-500 cursor-pointer"
+                            className="mt-1 h-4 w-4 rounded-[2px] border-[#CBD5E1] text-[#2075CC] focus:ring-[#2075CC] cursor-pointer"
                             data-testid={`repo-checkbox-${repo.id}`}
                             aria-label={`Select ${repo.full_name}`}
                           />
@@ -697,7 +697,7 @@ export function SettingsContent() {
                                 href={repo.html_url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-xs font-semibold text-white hover:text-cyan-400 transition-colors truncate font-mono"
+                                className="text-xs font-semibold text-[#0F172A] hover:text-[#2075CC] transition-colors truncate font-mono"
                                 data-testid={`repo-name-${repo.id}`}
                               >
                                 {repo.full_name}
@@ -705,41 +705,41 @@ export function SettingsContent() {
 
                               {/* Badges */}
                               <span
-                                className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                                className={`px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono border font-medium ${
                                   repo.is_private
-                                    ? "bg-amber-950/30 text-amber-300 border-amber-800/40"
-                                    : "bg-slate-800 text-slate-300 border-slate-700"
+                                    ? "bg-[#FFFBEB] text-[#92400E] border-[#FDE68A]"
+                                    : "bg-white text-[#5B6472] border-[#E5E7EB]"
                                 }`}
                               >
                                 {repo.is_private ? "Private" : "Public"}
                               </span>
 
                               {repo.is_archived && (
-                                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-rose-950/30 text-rose-300 border border-rose-800/40">
+                                <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#FEF2F2] text-[#C62828] border border-[#FEE2E2] font-medium">
                                   Archived
                                 </span>
                               )}
 
                               {repo.is_fork && (
-                                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-purple-950/30 text-purple-300 border border-purple-800/40">
+                                <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#FAF5FF] text-[#6B21A8] border border-[#E9D5FF] font-medium">
                                   Fork
                                 </span>
                               )}
 
                               {repo.language && (
-                                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-blue-950/30 text-blue-300 border border-blue-800/40">
+                                <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#EFF6FF] text-[#2075CC] border border-[#BFDBFE] font-medium">
                                   {repo.language}
                                 </span>
                               )}
                             </div>
 
                             {repo.description && (
-                              <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                              <p className="text-[11px] text-[#5B6472] mt-1 line-clamp-2">
                                 {repo.description}
                               </p>
                             )}
 
-                            <div className="flex flex-wrap items-center gap-4 mt-1.5 text-[10px] text-slate-500 font-mono">
+                            <div className="flex flex-wrap items-center gap-4 mt-1.5 text-[10px] text-[#5B6472] font-mono">
                               {repo.default_branch && <span>Branch: {repo.default_branch}</span>}
                               {repo.last_synced_at && <span>Synced: {formatDate(repo.last_synced_at)}</span>}
                             </div>
@@ -749,23 +749,23 @@ export function SettingsContent() {
 
                       {/* Activity Ingestion Section */}
                       {repo.is_selected && (
-                        <div className="flex flex-wrap items-center justify-between gap-2 mt-1 pt-2 border-t border-slate-800/60 text-[11px]" data-testid={`repo-activity-section-${repo.id}`}>
+                        <div className="flex flex-wrap items-center justify-between gap-2 mt-1 pt-2.5 border-t border-[#E5E7EB] text-[11px]" data-testid={`repo-activity-section-${repo.id}`}>
                           <div className="flex items-center gap-2">
-                            <span className="text-slate-400">Activities:</span>
+                            <span className="text-[#5B6472] font-medium">Activities:</span>
                             {renderActivityStatusBadge(repo)}
                             {(!repo.activity_sync_status || repo.activity_sync_status === "idle") && (
-                              <span className="text-[10px] text-slate-500 font-mono" data-testid={`activity-status-${repo.id}`}>Idle</span>
+                              <span className="text-[10px] text-[#5B6472] font-mono" data-testid={`activity-status-${repo.id}`}>Idle</span>
                             )}
                           </div>
 
                           {repo.activity_sync_error && (
-                            <div className="flex items-center gap-1.5 text-rose-400" data-testid={`repo-activity-error-${repo.id}`}>
+                            <div className="flex items-center gap-1.5 text-[#C62828]" data-testid={`repo-activity-error-${repo.id}`}>
                               <span className="text-[10px]">{repo.activity_sync_error}</span>
                               <button
                                 type="button"
                                 onClick={() => handleSyncActivities(repo.id)}
                                 disabled={isSyncingActivities}
-                                className="text-[10px] underline font-medium hover:text-white ml-1"
+                                className="text-[10px] underline font-medium hover:text-[#991B1B] ml-1"
                                 data-testid={`retry-repo-sync-${repo.id}`}
                               >
                                 Retry
@@ -776,9 +776,9 @@ export function SettingsContent() {
                           {(() => {
                             const categoryCounts = getCategoryCounts(repo);
                             return categoryCounts.length > 0 ? (
-                              <div className="text-[10px] font-mono text-slate-400 flex flex-wrap items-center gap-1.5" data-testid={`repo-counts-${repo.id}`}>
+                              <div className="text-[10px] font-mono text-[#5B6472] flex flex-wrap items-center gap-1.5" data-testid={`repo-counts-${repo.id}`}>
                                 {categoryCounts.map(([type, count]) => (
-                                  <span key={type} className="bg-slate-800/90 px-1.5 py-0.5 rounded text-slate-300 border border-slate-700/50">
+                                  <span key={type} className="bg-white px-2 py-0.5 rounded-[4px] text-[#334155] border border-[#E5E7EB]">
                                     {type}: {String(count)}
                                   </span>
                                 ))}
@@ -787,7 +787,7 @@ export function SettingsContent() {
                           })()}
 
                           {repo.activity_last_synced_at && (
-                            <span className="text-[10px] text-slate-500 font-mono ml-auto" data-testid={`repo-activity-synced-at-${repo.id}`}>
+                            <span className="text-[10px] text-[#5B6472] font-mono ml-auto" data-testid={`repo-activity-synced-at-${repo.id}`}>
                               Ingested: {formatDate(repo.activity_last_synced_at)}
                             </span>
                           )}
@@ -799,11 +799,11 @@ export function SettingsContent() {
               )}
 
               {/* INGESTED ACTIVITIES PREVIEW */}
-              <div className="border-t border-white/5 pt-4">
+              <div className="border-t border-[#E5E7EB] pt-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <h5 className="text-xs font-semibold text-slate-300">Ingested Activity Stream</h5>
-                    <span className="text-[11px] text-slate-500">(Stage 15 Preview)</span>
+                    <h5 className="text-xs font-semibold text-[#0F172A]">Ingested Activity Stream</h5>
+                    <span className="text-[11px] text-[#5B6472] font-mono">(Live Preview)</span>
                   </div>
                   <button
                     type="button"
@@ -814,7 +814,7 @@ export function SettingsContent() {
                         handleLoadActivities();
                       }
                     }}
-                    className="text-xs font-medium text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1"
+                    className="text-xs font-semibold text-[#2075CC] hover:text-[#115AA4] transition-colors flex items-center gap-1"
                     data-testid="toggle-activities-btn"
                   >
                     {showActivityDrawer ? "Hide Activities" : "View Recent Activities"}
@@ -825,9 +825,9 @@ export function SettingsContent() {
                 </div>
 
                 {showActivityDrawer && (
-                  <div className="mt-3 space-y-3 bg-slate-900/30 p-3.5 rounded-xl border border-slate-800" data-testid="activities-drawer">
+                  <div className="mt-3 space-y-3 bg-[#F8FAFC] p-4 rounded-[8px] border border-[#E5E7EB]" data-testid="activities-drawer">
                     {/* Activity Filter Buttons */}
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       {["", "pull_request", "issue", "commit", "review"].map((type) => (
                         <button
                           key={type || "all"}
@@ -836,10 +836,10 @@ export function SettingsContent() {
                             setActivityTypeFilter(type);
                             handleLoadActivities(type);
                           }}
-                          className={`px-2 py-1 rounded text-[11px] font-mono transition-colors ${
+                          className={`px-2.5 py-1 rounded-[4px] text-[11px] font-mono font-medium transition-colors border ${
                             activityTypeFilter === type
-                              ? "bg-cyan-950/80 text-cyan-300 border border-cyan-500/40"
-                              : "bg-slate-800/60 text-slate-400 hover:text-white border border-slate-700/50"
+                              ? "bg-[#2075CC] text-white border-[#2075CC]"
+                              : "bg-white text-[#5B6472] hover:text-[#0F172A] border-[#E5E7EB]"
                           }`}
                           data-testid={`activity-filter-${type || "all"}`}
                         >
@@ -849,11 +849,11 @@ export function SettingsContent() {
                     </div>
 
                     {isLoadingActivities ? (
-                      <div className="py-6 text-center text-xs text-slate-500 animate-pulse" data-testid="activities-loading">
+                      <div className="py-6 text-center text-xs text-[#5B6472] animate-pulse" data-testid="activities-loading">
                         Loading ingested activities...
                       </div>
                     ) : activities.length === 0 ? (
-                      <div className="py-6 text-center text-xs text-slate-500" data-testid="activities-empty">
+                      <div className="py-6 text-center text-xs text-[#5B6472]" data-testid="activities-empty">
                         No activities ingested yet. Select a repository and click &apos;Sync Activities&apos;.
                       </div>
                     ) : (
@@ -861,43 +861,43 @@ export function SettingsContent() {
                         {activities.map((act) => (
                           <div
                             key={act.id}
-                            className="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800 flex items-start justify-between gap-3 text-xs"
+                            className="p-3 rounded-[4px] bg-white border border-[#E5E7EB] flex items-start justify-between gap-3 text-xs shadow-[0_1px_2px_rgba(0,0,0,0.02)]"
                             data-testid={`activity-item-${act.id}`}
                           >
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
-                                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-slate-800 text-cyan-300 border border-slate-700">
+                                <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono uppercase bg-[#EFF6FF] text-[#2075CC] border border-[#BFDBFE] font-medium">
                                   {act.activity_type.replace("_", " ")}
                                 </span>
                                 {act.state && (
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800/80 text-slate-300 border border-slate-700/50">
+                                  <span className="px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono bg-[#F8FAFC] text-[#5B6472] border border-[#E5E7EB]">
                                     {act.state}
                                   </span>
                                 )}
                                 {act.author_login && (
-                                  <span className="text-[11px] text-slate-400 font-mono">
+                                  <span className="text-[11px] text-[#5B6472] font-mono">
                                     @{act.author_login}
                                   </span>
                                 )}
                                 {act.source_created_at && (
-                                  <span className="text-[10px] text-slate-500 font-mono ml-auto">
+                                  <span className="text-[10px] text-[#5B6472] font-mono ml-auto">
                                     {formatDate(act.source_created_at)}
                                   </span>
                                 )}
                               </div>
-                              <div className="mt-1">
+                              <div className="mt-1.5">
                                 {act.html_url ? (
                                   <a
                                     href={act.html_url}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="text-white hover:text-cyan-400 font-medium truncate block transition-colors"
+                                    className="text-[#0F172A] hover:text-[#2075CC] font-semibold truncate block transition-colors"
                                     data-testid={`activity-title-${act.id}`}
                                   >
                                     {act.title || act.external_id}
                                   </a>
                                 ) : (
-                                  <span className="text-white font-medium truncate block" data-testid={`activity-title-${act.id}`}>
+                                  <span className="text-[#0F172A] font-semibold truncate block" data-testid={`activity-title-${act.id}`}>
                                     {act.title || act.external_id}
                                   </span>
                                 )}
@@ -914,22 +914,22 @@ export function SettingsContent() {
           </div>
         ) : (
           /* DISCONNECTED STATE */
-          <div className="lens-card p-6 space-y-4 bg-[#0d121e]" data-testid="github-disconnected-card">
+          <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-6 space-y-4 shadow-[0_1px_3px_rgba(0,0,0,0.03)]" data-testid="github-disconnected-card">
             <div className="flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400">
+                <div className="w-11 h-11 rounded-[4px] bg-[#F8FAFC] border border-[#E5E7EB] flex items-center justify-center text-[#5B6472]">
                   <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24">
                     <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
                   </svg>
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="font-semibold text-white text-base">GitHub</h3>
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-medium bg-slate-700/40 text-slate-400 border border-slate-600/30" data-testid="status-badge-disconnected">
+                    <h3 className="font-semibold text-[#0F172A] text-base">GitHub</h3>
+                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-[4px] text-xs font-mono font-medium bg-[#F1F5F9] text-[#5B6472] border border-[#E2E8F0]" data-testid="status-badge-disconnected">
                       Not Connected
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <p className="text-xs text-[#5B6472] mt-0.5">
                     Connect your account to enable future repository, issue, and PR knowledge indexing.
                   </p>
                 </div>
@@ -938,15 +938,15 @@ export function SettingsContent() {
               {/* Direct Server OAuth Navigation Link */}
               <a
                 href={apiClient.getGitHubConnectUrl()}
-                className="lens-button-primary text-xs px-4 py-2 font-medium"
+                className="h-10 px-5 rounded-[4px] text-xs font-semibold text-white bg-[#2075CC] hover:bg-[#115AA4] transition-colors flex items-center justify-center shrink-0"
                 data-testid="connect-github-btn"
               >
                 Connect GitHub
               </a>
             </div>
 
-            <p className="text-[11px] text-slate-500 pt-2 border-t border-white/5">
-              Permissions requested: <code className="text-slate-400 font-mono">read:user, repo</code>. GitHub&apos;s <code className="text-slate-400 font-mono">repo</code> scope grants full read and write access to your public and private repositories.
+            <p className="text-[11px] text-[#5B6472] pt-3 border-t border-[#F1F5F9]">
+              Permissions requested: <code className="text-[#0F172A] font-mono">read:user, repo</code>. GitHub&apos;s <code className="text-[#0F172A] font-mono">repo</code> scope grants full read and write access to your public and private repositories.
             </p>
           </div>
         )}
@@ -958,7 +958,7 @@ export function SettingsContent() {
 export default function SettingsPage() {
   return (
     <ProtectedRoute>
-      <Suspense fallback={<div className="p-8 text-center text-xs text-slate-500">Loading settings...</div>}>
+      <Suspense fallback={<div className="p-8 text-center text-xs text-[#5B6472]">Loading settings...</div>}>
         <SettingsContent />
       </Suspense>
     </ProtectedRoute>

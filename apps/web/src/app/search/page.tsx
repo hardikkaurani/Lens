@@ -199,28 +199,28 @@ function SearchContent() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 max-w-5xl">
       {/* Header */}
-      <div className="pb-4 border-b border-white/10">
-        <h1 className="text-2xl font-bold tracking-tight text-white">Search Knowledge Base</h1>
-        <p className="text-sm text-slate-400 mt-1">
+      <div className="pb-5 border-b border-[#E5E7EB]">
+        <h1 className="text-2xl font-semibold tracking-tight text-[#0F172A]">Search Knowledge Base</h1>
+        <p className="text-sm text-[#5B6472] mt-1">
           Unified knowledge retrieval combining captured items (notes, links, PDFs) and ingested GitHub activities (PRs, issues, commits, reviews).
         </p>
       </div>
 
       {/* Search Input Bar */}
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      <form onSubmit={handleSubmit} className="flex gap-2.5">
         <div className="relative flex-1">
           <input
             type="search"
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
             placeholder="Search concepts, code, links, notes, PRs, commits (e.g. 'fastapi async pool')..."
-            className="lens-input pl-10 pr-4 py-3 text-sm rounded-xl"
+            className="w-full h-12 pl-10 pr-4 text-sm bg-white border border-[#E5E7EB] rounded-[4px] text-[#0F172A] placeholder-[#94A3B8] focus:outline-none focus:border-[#2075CC] focus:ring-1 focus:ring-[#2075CC] transition-colors"
             autoFocus
           />
           <svg
-            className="w-5 h-5 text-slate-400 absolute left-3 top-3.5"
+            className="w-4 h-4 text-[#5B6472] absolute left-3.5 top-4"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -232,7 +232,7 @@ function SearchContent() {
         <button
           type="submit"
           disabled={!inputVal.trim()}
-          className="lens-button-primary px-5 py-3 rounded-xl text-sm"
+          className="h-12 px-6 rounded-[4px] text-sm font-semibold text-white bg-[#2075CC] hover:bg-[#115AA4] disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0 flex items-center justify-center gap-2"
           data-testid="search-submit-btn"
         >
           {loading ? (
@@ -251,7 +251,7 @@ function SearchContent() {
 
       {/* Source Category Filter Pills */}
       <div className="flex flex-wrap items-center gap-1.5" data-testid="search-filter-pills">
-        <span className="text-xs text-slate-400 mr-1 font-mono">Filter:</span>
+        <span className="text-[11px] font-semibold text-[#5B6472] mr-1.5 font-mono uppercase tracking-wider">Filter:</span>
         {FILTER_OPTIONS.map((opt) => {
           const isSelected = selectedFilter === opt.id;
           return (
@@ -260,10 +260,10 @@ function SearchContent() {
               type="button"
               onClick={() => handleFilterSelect(opt.id)}
               aria-pressed={isSelected}
-              className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-[4px] text-xs font-medium transition-colors border ${
                 isSelected
-                  ? "bg-indigo-600 text-white shadow-sm shadow-indigo-500/20"
-                  : "bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700/80 border border-slate-700/50"
+                  ? "bg-[#2075CC] text-white border-[#2075CC] shadow-xs"
+                  : "bg-white text-[#5B6472] hover:text-[#0F172A] hover:bg-[#F8FAFC] border-[#E5E7EB]"
               }`}
               data-testid={`filter-btn-${opt.id}`}
             >
@@ -275,8 +275,8 @@ function SearchContent() {
 
       {/* Degraded Search Warning Banner */}
       {response?.degraded && (
-        <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2.5">
-          <svg className="w-4 h-4 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="p-4 rounded-[4px] bg-[#FFFBEB] border border-[#FDE68A] text-[#92400E] text-xs flex items-center gap-2.5">
+          <svg className="w-4 h-4 text-[#D97706] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           <span>
@@ -293,24 +293,29 @@ function SearchContent() {
 
       {/* Empty Search Prompt (Initial State) */}
       {!loading && !response && !error && (
-        <div className="lens-card p-10 text-center text-slate-400 space-y-2">
-          <svg className="w-10 h-10 mx-auto text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <p className="text-sm">Type a search query above and press Enter to search.</p>
+        <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-12 text-center text-[#5B6472] space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+          <div className="w-12 h-12 mx-auto rounded-full bg-[#F8FAFC] border border-[#E5E7EB] flex items-center justify-center text-[#2075CC]">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
+          <p className="text-sm font-semibold text-[#0F172A]">Type a search query above and press Enter to search.</p>
+          <p className="text-xs text-[#5B6472] max-w-sm mx-auto">
+            Search concepts, notes, links, and code commits across your integrated knowledge base.
+          </p>
         </div>
       )}
 
       {/* No Results State */}
       {!loading && response && response.results.length === 0 && !error && (
-        <div className="lens-card p-10 text-center space-y-3">
-          <div className="w-12 h-12 mx-auto rounded-full bg-slate-800/80 flex items-center justify-center text-slate-400">
+        <div className="bg-white border border-[#E5E7EB] rounded-[8px] p-12 text-center space-y-3 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+          <div className="w-12 h-12 mx-auto rounded-full bg-[#F8FAFC] border border-[#E5E7EB] flex items-center justify-center text-[#5B6472]">
             <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </div>
-          <h3 className="text-sm font-semibold text-white">No matching captures found</h3>
-          <p className="text-xs text-slate-400 max-w-sm mx-auto">
+          <h3 className="text-sm font-semibold text-[#0F172A]">No matching captures found</h3>
+          <p className="text-xs text-[#5B6472] max-w-sm mx-auto">
             We couldn&apos;t find any content matching &quot;{response.query}&quot;. Try different keywords or conceptual terms.
           </p>
         </div>
@@ -319,7 +324,7 @@ function SearchContent() {
       {/* Results List */}
       {!loading && response && response.results.length > 0 && (
         <div className="space-y-4" data-testid="search-results">
-          <div className="flex items-center justify-between text-xs text-slate-400 px-1 font-mono">
+          <div className="flex items-center justify-between text-xs text-[#5B6472] px-1 font-mono">
             <span>
               Found {response.total} result{response.total === 1 ? "" : "s"} for &quot;{response.query}&quot;
               {response.source_filter && ` (${response.source_filter})`}
@@ -336,7 +341,7 @@ function SearchContent() {
             return (
               <div
                 key={res.capture_id}
-                className="lens-card p-5 space-y-3.5 group hover:border-indigo-500/40"
+                className="bg-white border border-[#E5E7EB] hover:border-[#2075CC]/50 rounded-[8px] p-5 space-y-3.5 transition-all shadow-[0_1px_3px_rgba(0,0,0,0.03)]"
                 data-testid={`search-result-${res.capture_id}`}
               >
                 {/* Header Row */}
@@ -344,38 +349,38 @@ function SearchContent() {
                   <div className="flex flex-wrap items-center gap-2">
                     <SourceTypeBadge sourceType={res.source_type} />
                     {res.repository_name && (
-                      <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                      <span className="px-2 py-0.5 rounded-[4px] text-[11px] font-mono bg-[#F8FAFC] text-[#334155] border border-[#E5E7EB]">
                         {res.repository_name}
                       </span>
                     )}
                     {res.state && (
                       <span
-                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono border ${
+                        className={`px-1.5 py-0.5 rounded-[4px] text-[10px] font-mono border font-medium ${
                           res.state === "open"
-                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+                            ? "bg-[#ECFDF5] text-[#065F46] border-[#A7F3D0]"
                             : res.state === "merged"
-                            ? "bg-purple-500/10 text-purple-400 border-purple-500/20"
-                            : "bg-slate-800 text-slate-400 border-slate-700"
+                            ? "bg-[#FAF5FF] text-[#6B21A8] border-[#E9D5FF]"
+                            : "bg-[#F8FAFC] text-[#5B6472] border-[#E5E7EB]"
                         }`}
                       >
                         {res.state.toUpperCase()}
                       </span>
                     )}
                     {res.author_login && (
-                      <span className="text-[11px] font-mono text-slate-400">
+                      <span className="text-[11px] font-mono text-[#5B6472]">
                         @{res.author_login}
                       </span>
                     )}
-                    <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    <span className="px-2 py-0.5 rounded-[4px] text-xs font-semibold bg-[#EFF6FF] text-[#2075CC] border border-[#BFDBFE]">
                       Relevance: {formatScorePercentage(res.best_score)}
                     </span>
                     {res.best_lexical_score !== null && (
-                      <span className="text-[11px] font-mono text-slate-400" title="Normalized Full-Text Keyword Score">
+                      <span className="text-[11px] font-mono text-[#5B6472]" title="Normalized Full-Text Keyword Score">
                         Lexical: {formatScorePercentage(res.best_lexical_score)}
                       </span>
                     )}
                     {res.best_semantic_score !== null && (
-                      <span className="text-[11px] font-mono text-slate-400" title="Cosine Semantic Vector Score">
+                      <span className="text-[11px] font-mono text-[#5B6472]" title="Cosine Semantic Vector Score">
                         Semantic: {formatScorePercentage(res.best_semantic_score)}
                       </span>
                     )}
@@ -387,19 +392,19 @@ function SearchContent() {
                         href={safeUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs text-cyan-400 hover:text-cyan-300 font-medium self-start sm:self-auto flex items-center gap-1 font-mono"
+                        className="text-xs text-[#2075CC] hover:text-[#115AA4] font-medium self-start sm:self-auto flex items-center gap-1 font-mono"
                         data-testid={`inspect-github-${res.capture_id}`}
                       >
                         <span>View on GitHub</span>
                         <span>↗</span>
                       </a>
                     ) : (
-                      <span className="text-xs text-slate-500 font-mono">GitHub Activity</span>
+                      <span className="text-xs text-[#5B6472] font-mono">GitHub Activity</span>
                     )
                   ) : (
                     <Link
                       href={`/captures/${res.capture_id}`}
-                      className="text-xs text-indigo-400 hover:text-indigo-300 font-medium self-start sm:self-auto flex items-center gap-1"
+                      className="text-xs text-[#2075CC] hover:text-[#115AA4] font-semibold self-start sm:self-auto flex items-center gap-1"
                     >
                       <span>Inspect Capture</span>
                       <span>→</span>
@@ -408,7 +413,7 @@ function SearchContent() {
                 </div>
 
                 {/* Title */}
-                <h3 className="text-base font-semibold text-white group-hover:text-indigo-300 transition-colors">
+                <h3 className="text-base font-semibold text-[#0F172A] hover:text-[#2075CC] transition-colors">
                   {isGitHub && safeUrl ? (
                     <a
                       href={safeUrl}
@@ -421,19 +426,19 @@ function SearchContent() {
                   ) : isGitHub ? (
                     <span>{titleDisplay}</span>
                   ) : (
-                    <Link href={`/captures/${res.capture_id}`}>
+                    <Link href={`/captures/${res.capture_id}`} className="hover:underline">
                       {titleDisplay}
                     </Link>
                   )}
                 </h3>
 
                 {safeUrl && !isGitHub && (
-                  <p className="text-xs text-slate-400 font-mono truncate">
+                  <p className="text-xs text-[#5B6472] font-mono truncate">
                     <a
                       href={safeUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="hover:underline hover:text-indigo-300"
+                      className="hover:underline hover:text-[#2075CC]"
                     >
                       {safeUrl}
                     </a>
@@ -442,18 +447,18 @@ function SearchContent() {
 
                 {/* Matching Chunks / Excerpt */}
                 {res.matching_chunks && res.matching_chunks.length > 0 && (
-                  <div className="space-y-2 pt-1 border-t border-white/5">
+                  <div className="space-y-2 pt-2 border-t border-[#F1F5F9]">
                     {res.matching_chunks.map((chunk) => (
                       <div
                         key={chunk.chunk_id}
-                        className="p-3 rounded-lg bg-[#0d121e] border border-white/5 text-xs text-slate-300/90 leading-relaxed font-sans"
+                        className="p-3 rounded-[4px] bg-[#F8FAFC] border border-[#E5E7EB] text-xs text-[#334155] leading-relaxed font-sans"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pb-1 mb-1 border-b border-white/5">
+                        <div className="flex items-center justify-between text-[11px] font-mono text-[#5B6472] pb-1.5 mb-1.5 border-b border-[#E5E7EB]">
                           <span>
                             {isGitHub ? "Activity snippet" : `Chunk #${chunk.chunk_index + 1} match`}
                           </span>
                           <div className="flex gap-2">
-                            <span>Score: {formatScorePercentage(chunk.score)}</span>
+                            <span className="font-semibold text-[#2075CC]">Score: {formatScorePercentage(chunk.score)}</span>
                             {chunk.lexical_score !== null && <span>Lex: {formatScorePercentage(chunk.lexical_score)}</span>}
                             {chunk.semantic_score !== null && <span>Sem: {formatScorePercentage(chunk.semantic_score)}</span>}
                           </div>
