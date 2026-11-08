@@ -1550,6 +1550,130 @@ void main() {
       expect(await storage.getToken(backendAuthority: 'auth-b.lens.internal'), equals('token_cs_b'));
     });
 
+    test('Test 6: Same-authority session expiry clearToken racing with replacement login saveToken preserves replacement token in secure storage', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Establish Session A on authority A
+      const userA = User(id: 'u-race-a', email: 'race-a@lens.app', isActive: true);
+      await auth.setSession(
+        user: userA,
+        token: 'token_race_a',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // Session A expires on authority A
+      final expiryFuture = auth.handleSessionExpired(1, 'auth.lens.internal');
+      await clearStarted.future;
+
+      // While clearToken is pending at the keystore gate, replacement login begins on the SAME authority
+      const userB = User(id: 'u-race-b', email: 'race-b@lens.app', isActive: true);
+      final loginFuture = auth.setSession(
+        user: userB,
+        token: 'token_race_b',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      // Release the clearToken gate in storage
+      clearGate.complete();
+
+      // Await both operations
+      await expiryFuture;
+      await loginFuture;
+
+      // Assert: Replacement Session B's token MUST be preserved in storage!
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('race-b@lens.app'));
+      expect(auth.activeBackendAuthority, equals('auth.lens.internal'));
+      expect(await storage.getToken(backendAuthority: 'auth.lens.internal'), equals('token_race_b'));
+    });
+
+    test('Test 7: Same-authority logout clearToken racing with replacement login saveToken preserves replacement token in secure storage', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Establish Session A on authority A
+      const userA = User(id: 'u-l-a', email: 'la@lens.app', isActive: true);
+      await auth.setSession(
+        user: userA,
+        token: 'token_l_a',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // Logout starts on authority A
+      final logoutFuture = auth.logout(backendAuthority: 'auth.lens.internal');
+      await clearStarted.future;
+
+      // While clearToken is pending, replacement login begins on the SAME authority
+      const userB = User(id: 'u-l-b', email: 'lb@lens.app', isActive: true);
+      final loginFuture = auth.setSession(
+        user: userB,
+        token: 'token_l_b',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      clearGate.complete();
+
+      await logoutFuture;
+      await loginFuture;
+
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('lb@lens.app'));
+      expect(await storage.getToken(backendAuthority: 'auth.lens.internal'), equals('token_l_b'));
+    });
+
+    test('Test 8: Same-authority clearSessionAndLogin clearToken racing with replacement login saveToken preserves replacement token in secure storage', () async {
+      final storage = ControlledAuthTokenStorage();
+      final auth = AuthService(storage: storage);
+
+      // Establish Session A on authority A
+      const userA = User(id: 'u-c-a', email: 'ca@lens.app', isActive: true);
+      await auth.setSession(
+        user: userA,
+        token: 'token_c_a',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      final clearGate = Completer<void>();
+      final clearStarted = Completer<void>();
+      storage.clearTokenGate = clearGate;
+      storage.clearTokenStarted = clearStarted;
+
+      // clearSessionAndLogin starts on authority A
+      final clearFuture = auth.clearSessionAndLogin(backendAuthority: 'auth.lens.internal');
+      await clearStarted.future;
+
+      // While clearToken is pending, replacement login begins on the SAME authority
+      const userB = User(id: 'u-c-b', email: 'cb@lens.app', isActive: true);
+      final loginFuture = auth.setSession(
+        user: userB,
+        token: 'token_c_b',
+        backendAuthority: 'auth.lens.internal',
+      );
+
+      clearGate.complete();
+
+      await clearFuture;
+      await loginFuture;
+
+      expect(auth.isAuthenticated, isTrue);
+      expect(auth.status, equals(AuthStatus.authenticated));
+      expect(auth.currentUser?.email, equals('cb@lens.app'));
+      expect(await storage.getToken(backendAuthority: 'auth.lens.internal'), equals('token_c_b'));
+    });
+
     test('Test 10: FailingAuthTokenStorage matches production authority-scoped semantics', () async {
       final storage = FailingAuthTokenStorage();
 

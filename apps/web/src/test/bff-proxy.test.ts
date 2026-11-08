@@ -16,9 +16,10 @@ vi.mock("next/headers", () => ({
 }));
 
 describe("BFF Auth & Proxy Hardening Security Tests", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks();
-    serverAuth.resetLatestToken();
+    serverAuth.setSessionTokenCoordinator(new serverAuth.DistributedSessionCoordinator());
+    await serverAuth.resetLatestToken();
   });
 
   describe("1. Login Route Validation & Fail-Closed Behavior", () => {
@@ -333,7 +334,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       // Shared browser cookie jar
       const browserCookieJar = new Map<string, string>();
       browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_a");
-      serverAuth.recordTokenIssued("token_a");
+      await serverAuth.recordTokenIssued("token_a");
 
       // Request 1 takes a snapshot of cookies carrying token_a
       const req1Token = browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)!;
@@ -355,7 +356,7 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
 
       // While Request 1 is delayed, a replacement login occurs for Session B
       browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_b");
-      serverAuth.recordTokenIssued("token_b");
+      await serverAuth.recordTokenIssued("token_b");
 
       // Request 1's backend 401 response finally returns
       finishBackendRes(
@@ -375,6 +376,78 @@ describe("BFF Auth & Proxy Hardening Security Tests", () => {
       }
 
       // Assert: Replacement token_b survives in the shared browser cookie jar!
+      expect(browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)).toBe("token_b");
+      expect(res1.headers.get("Set-Cookie")).toBeNull();
+    });
+
+    it("14. Distributed / multi-instance deployment: delayed 401 on Instance 1 sees token issued on Instance 2 via DistributedTokenStore and preserves cookie", async () => {
+      // Simulate shared distributed cache / store (e.g. Redis, memcached)
+      const sharedDistributedKV = new Map<string, string>();
+      const distributedStore: serverAuth.DistributedTokenStore = {
+        async get(key: string) {
+          return sharedDistributedKV.get(key) ?? null;
+        },
+        async set(key: string, value: string) {
+          sharedDistributedKV.set(key, value);
+        },
+        async delete(key: string) {
+          sharedDistributedKV.delete(key);
+        },
+      };
+
+      // Instance 1 and Instance 2 are separate instances with separate coordinators sharing the store
+      const instance1Coordinator = new serverAuth.DistributedSessionCoordinator(distributedStore);
+      const instance2Coordinator = new serverAuth.DistributedSessionCoordinator(distributedStore);
+
+      // Connect Instance 1 as the active coordinator for Request 1
+      serverAuth.setSessionTokenCoordinator(instance1Coordinator);
+
+      // Browser starts with token_a
+      const browserCookieJar = new Map<string, string>();
+      browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_a");
+      await instance1Coordinator.recordTokenIssued("token_a");
+
+      // Instance 1 receives Request 1 with snapshot containing token_a
+      const req1Token = browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)!;
+      vi.spyOn(serverAuth, "getStoredToken").mockImplementation(async () => req1Token);
+
+      // Delayed backend response on Instance 1
+      let finishBackendRes!: (res: Response) => void;
+      const delayedBackendFetch = new Promise<Response>((resolve) => {
+        finishBackendRes = resolve;
+      });
+      vi.spyOn(globalThis, "fetch").mockImplementationOnce(() => delayedBackendFetch);
+
+      const req1 = new NextRequest("http://localhost:3000/api/proxy/captures", {
+        headers: { host: "localhost:3000" },
+      });
+      const proxyPromise = proxyGet(req1, {
+        params: Promise.resolve({ path: ["captures"] }),
+      });
+
+      // Meanwhile, Instance 2 handles a replacement login for Session B and updates the distributed store
+      browserCookieJar.set(serverAuth.LENS_TOKEN_COOKIE, "token_b");
+      await instance2Coordinator.recordTokenIssued("token_b");
+
+      // Backend 401 finally arrives on Instance 1
+      finishBackendRes(
+        new Response(JSON.stringify({ detail: "Token A revoked or expired" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      const res1 = await proxyPromise;
+      expect(res1.status).toBe(401);
+
+      // If res1 attempted to set Max-Age=0, it would affect the browser cookie jar
+      const setCookie = res1.headers.get("Set-Cookie");
+      if (setCookie && setCookie.includes("Max-Age=0")) {
+        browserCookieJar.delete(serverAuth.LENS_TOKEN_COOKIE);
+      }
+
+      // Assert: Instance 1 consulted the distributed store, saw token_a was superseded by token_b,
+      // and DID NOT emit a Set-Cookie deletion header!
       expect(browserCookieJar.get(serverAuth.LENS_TOKEN_COOKIE)).toBe("token_b");
       expect(res1.headers.get("Set-Cookie")).toBeNull();
     });

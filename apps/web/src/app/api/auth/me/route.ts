@@ -23,7 +23,7 @@ export async function GET(_request: NextRequest) {
     if (res.status === 401) {
       // Purge invalid cookie only if it has not already been replaced by a newer session
       const currentToken = await getStoredToken();
-      if (currentToken === token && isLatestToken(token)) {
+      if (currentToken === token && (await isLatestToken(token))) {
         await clearAuthCookie();
       }
       return NextResponse.json(

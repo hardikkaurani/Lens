@@ -15,6 +15,7 @@ enum AuthStatus {
 /// Central state manager for mobile user authentication and session lifecycle.
 class AuthService extends ChangeNotifier {
   final AuthTokenStorage _storage;
+  final Map<String, Future<void>> _storageQueues = {};
   User? _currentUser;
   AuthStatus _status = AuthStatus.initial;
   bool _isLoading = false;
@@ -26,6 +27,41 @@ class AuthService extends ChangeNotifier {
 
   AuthService({AuthTokenStorage? storage})
       : _storage = storage ?? SecureAuthTokenStorage();
+
+  String _storageQueueKey(String? backendAuthority) {
+    if (backendAuthority == null || backendAuthority.trim().isEmpty) {
+      return 'global';
+    }
+    return backendAuthority.trim().toLowerCase();
+  }
+
+  /// Serializes credential mutations (save and clear operations) per authority key
+  /// to eliminate race conditions between in-flight deletions and subsequent logins.
+  Future<T> _runStorageMutation<T>(String? backendAuthority, Future<T> Function() action) async {
+    final key = _storageQueueKey(backendAuthority);
+    final previous = _storageQueues[key];
+
+    if (previous != null) {
+      try {
+        await previous;
+      } catch (_) {}
+    }
+
+    final gate = Completer<void>();
+    _storageQueues[key] = gate.future;
+
+    try {
+      final result = await action();
+      return result;
+    } finally {
+      if (!gate.isCompleted) {
+        gate.complete();
+      }
+      if (_storageQueues[key] == gate.future) {
+        _storageQueues.remove(key);
+      }
+    }
+  }
 
   User? get currentUser => _currentUser;
   AuthStatus get status => _status;
@@ -61,7 +97,10 @@ class AuthService extends ChangeNotifier {
     final targetAuthority = backendAuthority ?? _failedCleanupAuthority ?? _activeBackendAuthority;
     final int opSessionId = _sessionId;
     try {
-      await _storage.clearToken(backendAuthority: targetAuthority);
+      await _runStorageMutation(targetAuthority, () async {
+        if (_sessionId != opSessionId) return;
+        await _storage.clearToken(backendAuthority: targetAuthority);
+      });
       if (_sessionId == opSessionId) {
         _storageCleanupError = null;
         _failedCleanupAuthority = null;
@@ -125,7 +164,10 @@ class AuthService extends ChangeNotifier {
       if (e is ApiException && e.isUnauthorized) {
         // Confirmed 401 Unauthorized: credentials/token invalid or revoked
         try {
-          await _storage.clearToken(backendAuthority: backendAuthority);
+          await _runStorageMutation(backendAuthority, () async {
+            if (_sessionId != requestSessionId) return;
+            await _storage.clearToken(backendAuthority: backendAuthority);
+          });
           // CONCURRENCY INVARIANT: If session generation changed while clearToken was in-flight,
           // a replacement login or concurrent lifecycle change took ownership. Discard stale update.
           if (_sessionId != requestSessionId) return;
@@ -171,7 +213,10 @@ class AuthService extends ChangeNotifier {
     final targetAuthority = backendAuthority ?? _activeBackendAuthority;
     final int opSessionId = _sessionId;
     try {
-      await _storage.clearToken(backendAuthority: targetAuthority);
+      await _runStorageMutation(targetAuthority, () async {
+        if (_sessionId != opSessionId) return;
+        await _storage.clearToken(backendAuthority: targetAuthority);
+      });
       if (_sessionId == opSessionId) {
         _storageCleanupError = null;
         _failedCleanupAuthority = null;
@@ -202,7 +247,9 @@ class AuthService extends ChangeNotifier {
     required String token,
     String? backendAuthority,
   }) async {
-    await _storage.saveToken(token, backendAuthority: backendAuthority);
+    await _runStorageMutation(backendAuthority, () async {
+      await _storage.saveToken(token, backendAuthority: backendAuthority);
+    });
     _sessionId++;
     _currentUser = user;
     _activeBackendAuthority = backendAuthority;
@@ -243,7 +290,10 @@ class AuthService extends ChangeNotifier {
 
     AuthStorageException? clearError;
     try {
-      await _storage.clearToken(backendAuthority: targetAuthority);
+      await _runStorageMutation(targetAuthority, () async {
+        if (_sessionId != expectedSessionIdAfterExpiry) return;
+        await _storage.clearToken(backendAuthority: targetAuthority);
+      });
     } catch (e) {
       clearError = e is AuthStorageException
           ? e
@@ -283,7 +333,10 @@ class AuthService extends ChangeNotifier {
   Future<void> logout({String? backendAuthority}) async {
     final targetAuthority = backendAuthority ?? _activeBackendAuthority;
     final int opSessionId = _sessionId;
-    await _storage.clearToken(backendAuthority: targetAuthority);
+    await _runStorageMutation(targetAuthority, () async {
+      if (_sessionId != opSessionId) return;
+      await _storage.clearToken(backendAuthority: targetAuthority);
+    });
     if (_sessionId == opSessionId) {
       _sessionId++;
       _currentUser = null;
