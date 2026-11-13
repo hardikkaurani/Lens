@@ -14,6 +14,7 @@ Note: The authorization boundary (get_current_user, JWT token decoding, password
 is NEVER mocked and runs 100% authentic production code.
 """
 
+import copy
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Optional
 import uuid
@@ -23,12 +24,15 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.testclient import TestClient
 
+real_async_session_execute = AsyncSession.execute
+
 from app.core.config import get_settings
 from app.core.security import create_access_token, get_jwt_secret, hash_password
 from app.db.models import (
     Capture,
     ContentChunk,
     GitHubActivity,
+    GitHubActivityType,
     GitHubConnection,
     GitHubRepository,
     ProcessingStatus,
@@ -68,10 +72,21 @@ class MockQueryResult:
     def scalars(self) -> "MockQueryResult":
         return self
 
+    def one(self) -> Any:
+        return self.scalar_one()
+
+    def one_or_none(self) -> Any:
+        return self.scalar_one_or_none()
+
     def all(self) -> list[Any]:
         if isinstance(self._data, list):
             return self._data
         return [self._data] if self._data is not None else []
+
+    def first(self) -> Any:
+        if isinstance(self._data, list):
+            return self._data[0] if self._data else None
+        return self._data
 
     def mappings(self) -> list[dict[str, Any]]:
         if isinstance(self._data, list):
@@ -110,6 +125,7 @@ class FakeAsyncSession:
     def __init__(self, db_store: InMemoryDatabase):
         self.db = db_store
         self.pending: list[Any] = []
+        self.identity_map: dict[tuple[type, Any], Any] = {}
 
     def add(self, instance: Any) -> None:
         self.pending.append(instance)
@@ -119,24 +135,131 @@ class FakeAsyncSession:
             instance.created_at = datetime.now(timezone.utc)
         if hasattr(instance, "updated_at") and getattr(instance, "updated_at", None) is None:
             instance.updated_at = datetime.now(timezone.utc)
+        if isinstance(instance, GitHubRepository):
+            if getattr(instance, "activity_sync_status", None) is None:
+                instance.activity_sync_status = "idle"
+            if getattr(instance, "activity_sync_metadata", None) is None:
+                instance.activity_sync_metadata = {}
+        if isinstance(instance, GitHubConnection):
+            if getattr(instance, "token_metadata", None) is None:
+                instance.token_metadata = {}
+        if isinstance(instance, GitHubActivity):
+            if getattr(instance, "ingested_at", None) is None:
+                instance.ingested_at = datetime.now(timezone.utc)
+            if isinstance(instance.activity_type, str):
+                instance.activity_type = GitHubActivityType(instance.activity_type)
+            if getattr(instance, "payload", None) is None:
+                instance.payload = {}
+        if isinstance(instance, Capture):
+            if getattr(instance, "user_id", None) is None:
+                if self.db.users:
+                    instance.user_id = next(iter(self.db.users.values())).id
+        self.identity_map[(type(instance), instance.id)] = instance
+
+    def add_all(self, instances: list[Any]) -> None:
+        for instance in instances:
+            self.add(instance)
+
+    async def delete(self, instance: Any) -> None:
+        if isinstance(instance, GitHubRepository):
+            self.db.github_repositories.pop(instance.id, None)
+            self.identity_map.pop((GitHubRepository, instance.id), None)
+            acts_to_del = [k for k, v in self.db.github_activities.items() if v.repository_id == instance.id]
+            for k in acts_to_del:
+                self.db.github_activities.pop(k, None)
+                self.identity_map.pop((GitHubActivity, k), None)
+        elif isinstance(instance, GitHubConnection):
+            self.db.github_connections.pop(instance.id, None)
+            self.identity_map.pop((GitHubConnection, instance.id), None)
+            repos = [k for k, v in self.db.github_repositories.items() if v.connection_id == instance.id]
+            for rk in repos:
+                self.db.github_repositories.pop(rk, None)
+                self.identity_map.pop((GitHubRepository, rk), None)
+                acts = [k for k, v in self.db.github_activities.items() if v.repository_id == rk]
+                for ak in acts:
+                    self.db.github_activities.pop(ak, None)
+                    self.identity_map.pop((GitHubActivity, ak), None)
+        elif isinstance(instance, GitHubActivity):
+            self.db.github_activities.pop(instance.id, None)
+            self.identity_map.pop((GitHubActivity, instance.id), None)
+        elif isinstance(instance, Capture):
+            self.db.captures.pop(instance.id, None)
+            self.identity_map.pop((Capture, instance.id), None)
+            chunks = [k for k, v in self.db.chunks.items() if v.capture_id == instance.id]
+            for ck in chunks:
+                self.db.chunks.pop(ck, None)
+                self.identity_map.pop((ContentChunk, ck), None)
+        elif isinstance(instance, ContentChunk):
+            self.db.chunks.pop(instance.id, None)
+            self.identity_map.pop((ContentChunk, instance.id), None)
+        elif isinstance(instance, User):
+            self.db.users.pop(instance.id, None)
+            self.identity_map.pop((User, instance.id), None)
 
     async def commit(self) -> None:
+        from sqlalchemy.exc import IntegrityError
         for item in self.pending:
-            if isinstance(item, User):
-                self.db.users[item.id] = item
-            elif isinstance(item, Capture):
-                self.db.captures[item.id] = item
-            elif isinstance(item, ContentChunk):
-                self.db.chunks[item.id] = item
-            elif isinstance(item, SourceMetadata):
-                self.db.source_metadata[item.id] = item
-            elif isinstance(item, GitHubConnection):
-                self.db.github_connections[item.id] = item
+            if isinstance(item, GitHubActivity):
+                for existing in self.db.github_activities.values():
+                    if (
+                        existing.id != item.id
+                        and existing.repository_id == item.repository_id
+                        and existing.activity_type == item.activity_type
+                        and existing.external_id == item.external_id
+                    ):
+                        raise IntegrityError(
+                            "duplicate activity identity",
+                            params=None,
+                            orig=Exception("duplicate key value violates unique constraint"),
+                        )
+                self.db.github_activities[item.id] = copy.copy(item)
+                self.identity_map[(GitHubActivity, item.id)] = item
             elif isinstance(item, GitHubRepository):
-                self.db.github_repositories[item.id] = item
-            elif isinstance(item, GitHubActivity):
-                self.db.github_activities[item.id] = item
+                for existing in self.db.github_repositories.values():
+                    if (
+                        existing.id != item.id
+                        and existing.connection_id == item.connection_id
+                        and existing.github_repository_id == item.github_repository_id
+                    ):
+                        raise IntegrityError(
+                            "duplicate repository identity",
+                            params=None,
+                            orig=Exception("duplicate key value violates unique constraint"),
+                        )
+                self.db.github_repositories[item.id] = copy.copy(item)
+                self.identity_map[(GitHubRepository, item.id)] = item
+            elif isinstance(item, User):
+                for existing in self.db.users.values():
+                    if existing.id != item.id and existing.email.lower() == item.email.lower():
+                        raise IntegrityError(
+                            "duplicate email",
+                            params=None,
+                            orig=Exception("duplicate key value violates unique constraint"),
+                        )
+                self.db.users[item.id] = copy.copy(item)
+                self.identity_map[(User, item.id)] = item
+            elif isinstance(item, Capture):
+                self.db.captures[item.id] = copy.copy(item)
+                self.identity_map[(Capture, item.id)] = item
+            elif isinstance(item, ContentChunk):
+                self.db.chunks[item.id] = copy.copy(item)
+                self.identity_map[(ContentChunk, item.id)] = item
+            elif isinstance(item, SourceMetadata):
+                self.db.source_metadata[item.id] = copy.copy(item)
+                self.identity_map[(SourceMetadata, item.id)] = item
+            elif isinstance(item, GitHubConnection):
+                self.db.github_connections[item.id] = copy.copy(item)
+                self.identity_map[(GitHubConnection, item.id)] = item
         self.pending.clear()
+
+        # Sync modified tracked objects from identity_map into db
+        for (cls, ident), obj in list(self.identity_map.items()):
+            if cls is GitHubConnection and ident in self.db.github_connections:
+                self.db.github_connections[ident] = copy.copy(obj)
+            elif cls is GitHubRepository and ident in self.db.github_repositories:
+                self.db.github_repositories[ident] = copy.copy(obj)
+            elif cls is GitHubActivity and ident in self.db.github_activities:
+                self.db.github_activities[ident] = copy.copy(obj)
 
     async def rollback(self) -> None:
         self.pending.clear()
@@ -145,7 +268,28 @@ class FakeAsyncSession:
         await self.commit()
 
     async def refresh(self, instance: Any, attribute_names=None) -> None:
-        pass
+        ident = getattr(instance, "id", None)
+        cls = type(instance)
+        fresh = None
+        if cls is GitHubConnection:
+            fresh = self.db.github_connections.get(ident)
+        elif cls is GitHubRepository:
+            fresh = self.db.github_repositories.get(ident)
+        elif cls is GitHubActivity:
+            fresh = self.db.github_activities.get(ident)
+        elif cls is Capture:
+            fresh = self.db.captures.get(ident)
+        elif cls is User:
+            fresh = self.db.users.get(ident)
+        if fresh is not None:
+            if attribute_names:
+                for attr in attribute_names:
+                    val = getattr(fresh, attr, None)
+                    setattr(instance, attr, copy.deepcopy(val) if isinstance(val, (dict, list)) else val)
+            else:
+                for k, v in fresh.__dict__.items():
+                    if not k.startswith("_"):
+                        setattr(instance, k, copy.deepcopy(v) if isinstance(v, (dict, list)) else v)
 
     async def close(self) -> None:
         pass
@@ -166,16 +310,36 @@ class FakeAsyncSession:
             await self.commit()
 
     async def get(self, entity_cls: Any, ident: Any) -> Any:
+        if (entity_cls, ident) in self.identity_map:
+            return self.identity_map[(entity_cls, ident)]
+        obj = None
         if entity_cls is User:
-            return self.db.users.get(ident)
-        if entity_cls is Capture:
-            return self.db.captures.get(ident)
-        if entity_cls is GitHubConnection:
-            return self.db.github_connections.get(ident)
+            obj = self.db.users.get(ident)
+        elif entity_cls is Capture:
+            obj = self.db.captures.get(ident)
+        elif entity_cls is GitHubConnection:
+            obj = self.db.github_connections.get(ident)
+        elif entity_cls is GitHubRepository:
+            obj = self.db.github_repositories.get(ident)
+        elif entity_cls is GitHubActivity:
+            obj = self.db.github_activities.get(ident)
+        elif entity_cls is ContentChunk:
+            obj = self.db.chunks.get(ident)
+        if obj is not None:
+            cloned = copy.copy(obj)
+            self.identity_map[(entity_cls, ident)] = cloned
+            return cloned
         return None
 
-    async def execute(self, statement: Any, params: Optional[dict[str, Any]] = None) -> MockQueryResult:
+    async def execute(self, statement: Any, params: Optional[dict[str, Any]] = None, *args: Any, **kwargs: Any) -> MockQueryResult:
+        from sqlalchemy.exc import OperationalError
+        if "1 / 0" in str(statement):
+            raise OperationalError("SELECT 1 / 0", {}, Exception("division by zero"))
+
         stmt_str = str(statement).lower()
+
+        if "select 1" in stmt_str:
+            return MockQueryResult(1)
 
         compiled_params = {}
         if hasattr(statement, "compile"):
@@ -189,12 +353,29 @@ class FakeAsyncSession:
         # Handle raw SQL for Search
         if "from content_chunks cc" in stmt_str:
             user_id = compiled_params.get("user_id")
-            query_str = compiled_params.get("query", "").lower()
+            capture_types = set(compiled_params.get("capture_types") or [])
+            is_lexical = "raw_lex_score" in stmt_str or "ts_rank_cd" in stmt_str
+            is_vector = "cos_dist" in stmt_str or "<=>" in stmt_str
+
+            query_str = compiled_params.get("query", "").strip().lower()
+            words = [w for w in query_str.split() if w]
+
             results = []
             for chunk in self.db.chunks.values():
                 capture = self.db.captures.get(chunk.capture_id)
-                if capture and capture.user_id == user_id:
-                    if query_str in chunk.content.lower() or (capture.title and query_str in capture.title.lower()):
+                if not capture or capture.user_id != user_id:
+                    continue
+                cap_type = capture.source_type.value if hasattr(capture.source_type, "value") else str(capture.source_type)
+                if capture_types and cap_type not in capture_types:
+                    continue
+
+                content_lower = (chunk.content or "").lower()
+                title_lower = (capture.title or "").lower()
+
+                if is_lexical:
+                    words_matched = sum(1 for w in words if w in content_lower or w in title_lower) if words else 0
+                    if words_matched > 0 or not words:
+                        lex_score = (words_matched / len(words)) if words else 1.0
                         results.append({
                             "chunk_id": chunk.id,
                             "capture_id": capture.id,
@@ -202,37 +383,82 @@ class FakeAsyncSession:
                             "content": chunk.content,
                             "title": capture.title,
                             "original_url": capture.original_url,
-                            "source_type": capture.source_type.value,
-                            "raw_lex_score": 1.0,
-                            "cos_dist": 0.1,
+                            "source_type": cap_type,
+                            "raw_lex_score": lex_score,
+                        })
+                elif is_vector:
+                    if chunk.embedding is not None:
+                        chunk_vec_str = "[" + ",".join(str(v) for v in chunk.embedding) + "]"
+                        query_vec_str = compiled_params.get("query_vector")
+                        dist = 0.0 if query_vec_str == chunk_vec_str else 0.1
+                        results.append({
+                            "chunk_id": chunk.id,
+                            "capture_id": capture.id,
+                            "chunk_index": chunk.chunk_index,
+                            "content": chunk.content,
+                            "title": capture.title,
+                            "original_url": capture.original_url,
+                            "source_type": cap_type,
+                            "cos_dist": dist,
                         })
             return MockQueryResult(results)
 
         if "from github_activities ga" in stmt_str:
             user_id = compiled_params.get("user_id")
+            query_str = compiled_params.get("query", "").strip().lower()
+            raw_query = str(compiled_params.get("raw_query", "")).strip()
+            github_types = set(compiled_params.get("github_types") or [])
             results = []
+            words = [w for w in query_str.split() if w]
             for act in self.db.github_activities.values():
+                act_type_str = act.activity_type.value if hasattr(act.activity_type, "value") else str(act.activity_type)
+                if github_types and act_type_str not in github_types:
+                    continue
                 repo = self.db.github_repositories.get(act.repository_id)
-                if repo:
-                    conn = self.db.github_connections.get(repo.connection_id)
-                    if conn and conn.user_id == user_id:
-                        results.append({
-                            "activity_id": act.id,
-                            "repository_id": repo.id,
-                            "activity_type": act.activity_type.value,
-                            "external_id": act.external_id,
-                            "title": act.title,
-                            "body": act.body,
-                            "html_url": act.html_url,
-                            "author_login": act.author_login,
-                            "state": act.state,
-                            "repository_name": repo.full_name,
-                            "tsv_rank": 1.0,
-                            "title_match": 1.0,
-                            "id_match": 0.0,
-                            "author_match": 0.0,
-                            "repo_match": 0.0,
-                        })
+                if not repo:
+                    continue
+                conn = self.db.github_connections.get(repo.connection_id)
+                if not conn or conn.user_id != user_id:
+                    continue
+
+                title = (act.title or "").lower()
+                body = (act.body or "").lower()
+                author = (act.author_login or "").lower()
+                repo_name = (repo.full_name or "").lower()
+
+                id_match = 1.0 if act.external_id == raw_query else 0.0
+                title_match = 1.0 if query_str and query_str in title else 0.0
+                author_match = 1.0 if query_str and query_str in author else 0.0
+                repo_match = 1.0 if query_str and query_str in repo_name else 0.0
+
+                tsv_words_matched = sum(1 for w in words if w in title or w in body) if words else 0
+                tsv_rank = (tsv_words_matched / len(words)) if words else 0.0
+
+                # Check WHERE condition
+                if id_match or title_match or author_match or repo_match or (tsv_words_matched > 0) or not query_str:
+                    results.append({
+                        "activity_id": act.id,
+                        "repository_id": repo.id,
+                        "activity_type": act_type_str,
+                        "external_id": act.external_id,
+                        "title": act.title,
+                        "body": act.body,
+                        "html_url": act.html_url,
+                        "author_login": act.author_login,
+                        "state": act.state,
+                        "repository_name": repo.full_name,
+                        "tsv_rank": tsv_rank,
+                        "title_match": title_match,
+                        "id_match": id_match,
+                        "author_match": author_match,
+                        "repo_match": repo_match,
+                    })
+            results.sort(
+                key=lambda r: (
+                    r["tsv_rank"] + r["id_match"] + 0.5 * r["title_match"] + 0.1 * r["author_match"] + 0.05 * r["repo_match"]
+                ),
+                reverse=True,
+            )
             return MockQueryResult(results)
 
         # Handle User lookup (by email)
@@ -253,6 +479,32 @@ class FakeAsyncSession:
                 count = len(self.db.captures)
             return MockQueryResult(count)
 
+        # Handle GitHubRepository count
+        if "count" in stmt_str and "github_repositories" in stmt_str:
+            target_gh_id = compiled_params.get("github_repository_id_1") or compiled_params.get("github_repository_id")
+            target_conn_id = compiled_params.get("connection_id_1") or compiled_params.get("connection_id")
+            matched = list(self.db.github_repositories.values())
+            if target_gh_id is not None:
+                matched = [r for r in matched if r.github_repository_id == str(target_gh_id)]
+            if target_conn_id is not None:
+                matched = [r for r in matched if r.connection_id == target_conn_id]
+            return MockQueryResult(len(matched))
+
+        # Handle GitHubActivity count
+        if "count" in stmt_str and "github_activities" in stmt_str:
+            target_repo_id = compiled_params.get("repository_id_1") or compiled_params.get("repository_id")
+            target_type = compiled_params.get("activity_type_1") or compiled_params.get("activity_type")
+            matched = list(self.db.github_activities.values())
+            if target_repo_id is not None:
+                matched = [a for a in matched if a.repository_id == target_repo_id]
+            if target_type is not None:
+                type_str = target_type.value if hasattr(target_type, "value") else str(target_type)
+                matched = [
+                    a for a in matched
+                    if (a.activity_type.value if hasattr(a.activity_type, "value") else str(a.activity_type)) == type_str
+                ]
+            return MockQueryResult(len(matched))
+
         # Handle Captures select
         if "from captures" in stmt_str:
             target_user_id = compiled_params.get("user_id_1") or compiled_params.get("user_id")
@@ -267,14 +519,65 @@ class FakeAsyncSession:
         # Handle Delete GitHubConnection (MUST be before "from github_connections" check)
         if "delete from github_connections" in stmt_str:
             target_user_id = compiled_params.get("user_id_1") or compiled_params.get("user_id")
-            if target_user_id is not None:
+            target_id = compiled_params.get("id_1") or compiled_params.get("id")
+            if target_id is not None:
+                to_delete = [k for k in self.db.github_connections.keys() if k == target_id]
+            elif target_user_id is not None:
                 to_delete = [k for k, v in self.db.github_connections.items() if v.user_id == target_user_id]
             else:
                 to_delete = list(self.db.github_connections.keys())
             for k in to_delete:
                 del self.db.github_connections[k]
+                self.identity_map.pop((GitHubConnection, k), None)
             res = MockQueryResult()
             res.rowcount = len(to_delete)
+            return res
+
+        # Handle Delete GitHubRepository
+        if "delete from github_repositories" in stmt_str:
+            to_delete = list(self.db.github_repositories.keys())
+            for k in to_delete:
+                del self.db.github_repositories[k]
+            res = MockQueryResult()
+            res.rowcount = len(to_delete)
+            return res
+
+        # Handle Delete GitHubActivity
+        if "delete from github_activities" in stmt_str:
+            target_repo_id = compiled_params.get("repository_id_1") or compiled_params.get("repository_id")
+            if target_repo_id is not None:
+                to_delete = [k for k, v in self.db.github_activities.items() if v.repository_id == target_repo_id]
+            else:
+                to_delete = list(self.db.github_activities.keys())
+            for k in to_delete:
+                del self.db.github_activities[k]
+            res = MockQueryResult()
+            res.rowcount = len(to_delete)
+            return res
+
+        # Handle Delete ContentChunk
+        if "delete from content_chunks" in stmt_str:
+            count = len(self.db.chunks)
+            self.db.chunks.clear()
+            res = MockQueryResult()
+            res.rowcount = count
+            return res
+
+        # Handle Delete Capture
+        if "delete from captures" in stmt_str:
+            count = len(self.db.captures)
+            self.db.captures.clear()
+            self.db.chunks.clear()
+            res = MockQueryResult()
+            res.rowcount = count
+            return res
+
+        # Handle Delete SourceMetadata
+        if "delete from source_metadata" in stmt_str:
+            count = len(self.db.source_metadata)
+            self.db.source_metadata.clear()
+            res = MockQueryResult()
+            res.rowcount = count
             return res
 
         # Handle GitHubConnection select
@@ -283,20 +586,99 @@ class FakeAsyncSession:
             matched = list(self.db.github_connections.values())
             if target_user_id is not None:
                 matched = [c for c in matched if c.user_id == target_user_id]
-            return MockQueryResult(matched)
+            results = []
+            for item in matched:
+                key = (GitHubConnection, item.id)
+                if key in self.identity_map:
+                    results.append(self.identity_map[key])
+                else:
+                    cloned = copy.copy(item)
+                    self.identity_map[key] = cloned
+                    results.append(cloned)
+            return MockQueryResult(results)
 
         # Handle GitHubRepository select
         if "from github_repositories" in stmt_str:
             target_conn_id = compiled_params.get("connection_id_1") or compiled_params.get("connection_id")
-            target_repo_id = compiled_params.get("id_1") or compiled_params.get("repository_id")
             matched = list(self.db.github_repositories.values())
             if target_conn_id is not None:
                 matched = [r for r in matched if r.connection_id == target_conn_id]
+
+            target_ids: set[Any] = set()
+            for k, v in compiled_params.items():
+                if k == "id_1" or k == "repository_id" or k.startswith("id_"):
+                    if isinstance(v, (list, set, tuple)):
+                        target_ids.update(v)
+                    elif v is not None:
+                        target_ids.add(v)
+            if target_ids:
+                matched = [r for r in matched if r.id in target_ids]
+            if "is_selected is true" in stmt_str or "is_selected = true" in stmt_str or "is_selected = 1" in stmt_str:
+                matched = [r for r in matched if r.is_selected]
+            return MockQueryResult(matched)
+
+        # Handle GitHubActivity ORM select
+        if "from github_activities" in stmt_str:
+            target_repo_id = compiled_params.get("repository_id_1") or compiled_params.get("repository_id")
+            target_id = compiled_params.get("id_1") or compiled_params.get("activity_id")
+
+            matched = list(self.db.github_activities.values())
             if target_repo_id is not None:
-                matched = [r for r in matched if r.id == target_repo_id]
+                matched = [a for a in matched if a.repository_id == target_repo_id]
+            if target_id is not None:
+                matched = [a for a in matched if a.id == target_id]
+
+            ext_ids: set[str] = set()
+            for k, v in compiled_params.items():
+                if "external_id" in k:
+                    if isinstance(v, (list, set, tuple)):
+                        ext_ids.update(str(x) for x in v)
+                    elif v is not None:
+                        ext_ids.add(str(v))
+            if ext_ids:
+                matched = [a for a in matched if a.external_id in ext_ids]
+
+            type_vals: set[str] = set()
+            for k, v in compiled_params.items():
+                if "activity_type" in k:
+                    val_str = v.value if hasattr(v, "value") else str(v)
+                    type_vals.add(val_str)
+            if type_vals and not ext_ids:
+                matched = [
+                    a for a in matched
+                    if (a.activity_type.value if hasattr(a.activity_type, "value") else str(a.activity_type)) in type_vals
+                ]
+
+            if "order by" in stmt_str or "desc" in stmt_str:
+                matched.sort(
+                    key=lambda a: (
+                        getattr(a, "source_created_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+                        getattr(a, "ingested_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                    reverse=True,
+                )
+
             return MockQueryResult(matched)
 
         return MockQueryResult([])
+
+
+class FakeAsyncSessionMaker:
+    """Session factory producing FakeAsyncSession instances."""
+
+    def __init__(self, db_store: InMemoryDatabase):
+        self.db_store = db_store
+
+    def __call__(self) -> FakeAsyncSession:
+        return FakeAsyncSession(self.db_store)
+
+
+FakeAsyncSessionLocal = FakeAsyncSessionMaker(test_db)
+
+
+async def fake_close_connections() -> None:
+    """No-op connection closer for in-memory test database."""
+    pass
 
 
 async def override_get_db() -> AsyncGenerator[AsyncSession, None]:

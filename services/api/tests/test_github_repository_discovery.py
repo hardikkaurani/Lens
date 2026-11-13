@@ -65,8 +65,17 @@ if worker_path not in sys.path:
 
 from app.core.config import get_settings
 from app.core.encryption import decrypt_secret, encrypt_secret
-from app.db.models import GitHubConnection, GitHubRepository, RepositorySyncStatus
-from app.db.session import AsyncSessionLocal, close_connections
+from app.db.models import GitHubConnection, GitHubRepository, RepositorySyncStatus, User
+from app.db.session import get_db
+from tests.test_security_multitenancy import (
+    FakeAsyncSession,
+    FakeAsyncSessionLocal as AsyncSessionLocal,
+    auth_headers,
+    create_test_user,
+    fake_close_connections as close_connections,
+    override_get_db,
+    test_db,
+)
 from app.integrations.github.client import (
     GitHubApiError,
     GitHubAuthError,
@@ -103,27 +112,37 @@ from app.main import app
 from worker.processor import process_github_repo_sync
 
 
+default_test_user: Optional[User] = None
+
+
 async def clean_database() -> None:
     """Purge repositories and connections for clean test state."""
-    async with AsyncSessionLocal() as session:
-        await session.execute(delete(GitHubRepository))
-        await session.execute(delete(GitHubConnection))
-        await session.commit()
+    app.dependency_overrides.pop(get_github_client, None)
+    test_db.github_repositories.clear()
+    test_db.github_connections.clear()
+    test_db.github_activities.clear()
     _memory_lock_cache.clear()
 
 
-async def create_test_connection(user_id: str = "gh_user_test", username: str = "testuser") -> uuid.UUID:
+async def create_test_connection(user_id: Optional[uuid.UUID] = None, username: str = "testuser") -> uuid.UUID:
     """Helper to insert an active test GitHubConnection."""
+    global default_test_user
+    if user_id is None:
+        if default_test_user is None or default_test_user.id not in test_db.users:
+            default_test_user = create_test_user(f"gh_user_{uuid.uuid4().hex[:8]}@example.com")
+        user_id = default_test_user.id
     async with AsyncSessionLocal() as session:
         encrypted = encrypt_secret("gho_test_secret_token_12345")
         now = datetime.now(timezone.utc)
         conn = GitHubConnection(
+            user_id=user_id,
             provider="github",
-            github_user_id=user_id,
+            github_user_id=str(user_id),
             github_username=username,
             encrypted_access_token=encrypted,
             token_type="bearer",
             scope="read:user,repo",
+            token_metadata={},
             created_at=now,
             updated_at=now,
             last_verified_at=now,
@@ -138,7 +157,8 @@ async def create_test_connection(user_id: str = "gh_user_test", username: str = 
 async def test_async_sync_refreshes_stale_metadata_after_enqueue_lock() -> None:
     """A second session must observe sync state committed by the first request."""
     await clean_database()
-    connection_id = await create_test_connection()
+    test_user = create_test_user("sync_test_user_1@example.com")
+    connection_id = await create_test_connection(user_id=test_user.id)
 
     try:
         async with AsyncSessionLocal() as first_session, AsyncSessionLocal() as second_session:
@@ -167,11 +187,13 @@ async def test_async_sync_refreshes_stale_metadata_after_enqueue_lock() -> None:
             ):
                 first_response = await sync_github_repositories(
                     async_sync=True,
+                    current_user=test_user,
                     db=first_session,
                     github_client=cast(GitHubClient, AsyncMock()),
                 )
                 second_response = await sync_github_repositories(
                     async_sync=True,
+                    current_user=test_user,
                     db=second_session,
                     github_client=cast(GitHubClient, AsyncMock()),
                 )
@@ -193,7 +215,8 @@ async def test_async_sync_refreshes_stale_metadata_after_enqueue_lock() -> None:
 async def test_async_sync_enqueue_failure_persists_failure_and_releases_lock() -> None:
     """Enqueue failures leave a safe state and release the enqueue lock."""
     await clean_database()
-    connection_id = await create_test_connection()
+    test_user = create_test_user("sync_test_user_2@example.com")
+    connection_id = await create_test_connection(user_id=test_user.id)
 
     try:
         async with AsyncSessionLocal() as session:
@@ -218,6 +241,7 @@ async def test_async_sync_enqueue_failure_persists_failure_and_releases_lock() -
                 with pytest.raises(HTTPException) as response:
                     await sync_github_repositories(
                         async_sync=True,
+                        current_user=test_user,
                         db=session,
                         github_client=cast(GitHubClient, AsyncMock()),
                     )
@@ -274,9 +298,18 @@ async def run_all_stage14_tests() -> None:
     print("\n--- Starting Stage 14 GitHub Repository Discovery & Import Tests ---")
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    await clean_database()
+    app.dependency_overrides[get_db] = override_get_db
+    global default_test_user
+    default_test_user = create_test_user("stage14_main_user@example.com")
+    headers = auth_headers(default_test_user)
+
+    patcher = patch("app.integrations.github.service.get_redis_client", side_effect=Exception("Redis unavailable in test"))
+    patcher.start()
+    client = httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers)
+    try:
         await clean_database()
-        app.dependency_overrides.clear()
+        app.dependency_overrides[get_db] = override_get_db
 
         # ----------------------------------------------------------------------
         # Test 1: no GitHub connection -> 404
@@ -636,9 +669,9 @@ async def run_all_stage14_tests() -> None:
         # ----------------------------------------------------------------------
         worker_repos = [make_mock_github_repo(501, "worker-repo")]
         with patch.object(GitHubClient, "list_user_repositories", return_value=worker_repos):
-            w1 = await process_github_repo_sync(conn_id)
+            w1 = await process_github_repo_sync(conn_id, session_factory=AsyncSessionLocal)
             assert w1 is True
-            w2 = await process_github_repo_sync(conn_id)
+            w2 = await process_github_repo_sync(conn_id, session_factory=AsyncSessionLocal)
             assert w2 is True
         async with AsyncSessionLocal() as session:
             count = (await session.execute(select(func.count(GitHubRepository.id)).where(GitHubRepository.github_repository_id == "501"))).scalar()
@@ -692,7 +725,7 @@ async def run_all_stage14_tests() -> None:
         # ----------------------------------------------------------------------
         # Test 32: database rollback on transaction error
         # ----------------------------------------------------------------------
-        with patch("sqlalchemy.ext.asyncio.AsyncSession.commit", side_effect=Exception("DB Error")):
+        with patch.object(FakeAsyncSession, "commit", side_effect=Exception("DB Error")):
             try:
                 await client.post("/integrations/github/repositories/sync")
             except Exception:
@@ -746,8 +779,74 @@ async def run_all_stage14_tests() -> None:
         # Test 36: Queue crash recovery
         # ----------------------------------------------------------------------
         from app.queue.job import GitHubRepoSyncJob
-        from app.db.session import get_redis_client
-        redis_conn = get_redis_client()
+
+        main_queue: list[Any] = []
+        processing_queue: list[Any] = []
+
+        class FakeRedisQueue:
+            async def delete(self, *keys):
+                for k in keys:
+                    if k == GITHUB_REPO_SYNC_QUEUE:
+                        main_queue.clear()
+                    elif k == GITHUB_REPO_SYNC_PROCESSING_QUEUE:
+                        processing_queue.clear()
+
+            async def rpush(self, key, *values):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                target.extend(values)
+                return len(target)
+
+            async def lpush(self, key, *values):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                for v in values:
+                    target.insert(0, v)
+                return len(target)
+
+            async def lrange(self, key, start, stop):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                return list(target)
+
+            async def lrem(self, key, count, value):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                if value in target:
+                    target.remove(value)
+                    return 1
+                return 0
+
+            async def lpop(self, key):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                return target.pop(0) if target else None
+
+            async def llen(self, key):
+                target = main_queue if key == GITHUB_REPO_SYNC_QUEUE else processing_queue
+                return len(target)
+
+            def pipeline(self):
+                class FakePipeline:
+                    def __init__(self, outer):
+                        self.outer = outer
+                        self.ops = []
+
+                    def rpush(self, key, val):
+                        self.ops.append(("rpush", key, val))
+                        return self
+
+                    def lrem(self, key, count, val):
+                        self.ops.append(("lrem", key, count, val))
+                        return self
+
+                    async def execute(self):
+                        results = []
+                        for op, key, val in self.ops:
+                            if op == "rpush":
+                                results.append(await self.outer.rpush(key, val))
+                            elif op == "lrem":
+                                results.append(await self.outer.lrem(key, 1, val))
+                        return results
+
+                return FakePipeline(self)
+
+        redis_conn = cast(Any, FakeRedisQueue())
         # Clean test queue keys
         await redis_conn.delete(GITHUB_REPO_SYNC_QUEUE)
         await redis_conn.delete(GITHUB_REPO_SYNC_PROCESSING_QUEUE)
@@ -760,7 +859,7 @@ async def run_all_stage14_tests() -> None:
         poison_job = GitHubRepoSyncJob(connection_id=conn_id, retry_count=3, max_retries=3)
         await cast(Awaitable[int], redis_conn.rpush(GITHUB_REPO_SYNC_PROCESSING_QUEUE, poison_job.model_dump_json()))
 
-        recovered_count = await recover_stranded_github_repo_sync_jobs()
+        recovered_count = await recover_stranded_github_repo_sync_jobs(client=redis_conn)
         assert recovered_count == 1
         # Check that valid_job was moved back to main queue with incremented retry_count
         main_queue_item = await cast(Awaitable[Any], redis_conn.lpop(GITHUB_REPO_SYNC_QUEUE))
@@ -920,6 +1019,9 @@ async def run_all_stage14_tests() -> None:
                     await discover_and_sync_repositories(session, test_conn)
                 mock_rollback.assert_awaited()
         print("Test 43: failure persistence DB commit error resilience -> PASS")
+    finally:
+        await client.aclose()
+        patcher.stop()
 
     print("\n--- ALL 43 STAGE 14 BACKEND TESTS PASSED SUCCESSFULLY ---")
 

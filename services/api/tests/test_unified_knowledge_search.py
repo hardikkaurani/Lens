@@ -42,8 +42,19 @@ from app.db.models import (
     GitHubConnection,
     GitHubRepository,
     SourceType,
+    User,
 )
-from app.db.session import AsyncSessionLocal
+from unittest.mock import patch
+from app.db.session import get_db
+from tests.test_security_multitenancy import (
+    FakeAsyncSession,
+    FakeAsyncSessionLocal as AsyncSessionLocal,
+    auth_headers,
+    create_test_user,
+    fake_close_connections as close_connections,
+    override_get_db,
+    test_db,
+)
 from app.embeddings.base import EmbeddingProvider, EmbeddingProviderError
 from app.embeddings.factory import (
     reset_embedding_provider_override,
@@ -52,6 +63,34 @@ from app.embeddings.factory import (
 from app.embeddings.test_provider import DeterministicTestEmbeddingProvider
 from app.main import app
 from app.search.schemas import SearchResponse
+
+default_search_user: Optional[User] = None
+
+
+def get_or_create_search_user() -> User:
+    global default_search_user
+    if default_search_user is None or default_search_user.id not in test_db.users:
+        default_search_user = create_test_user(f"search_stage16_{uuid.uuid4().hex[:8]}@example.com")
+    return default_search_user
+
+
+@pytest.fixture(autouse=True)
+def auto_auth_search_client():
+    orig_init = httpx.AsyncClient.__init__
+
+    def new_init(self, *args, **kwargs):
+        headers = kwargs.get("headers")
+        if headers is None:
+            headers = {}
+        if isinstance(headers, dict) and "Authorization" not in headers:
+            headers = dict(headers)
+            user = get_or_create_search_user()
+            headers.update(auth_headers(user))
+            kwargs["headers"] = headers
+        orig_init(self, *args, **kwargs)
+
+    with patch.object(httpx.AsyncClient, "__init__", new_init):
+        yield
 
 
 class SimulatedFailureEmbeddingProvider(EmbeddingProvider):
@@ -74,23 +113,35 @@ class SimulatedFailureEmbeddingProvider(EmbeddingProvider):
 
 async def clean_database() -> None:
     """Purge all captures, chunks, activities, repositories, and connections."""
-    async with AsyncSessionLocal() as session:
-        await session.execute(delete(ContentChunk))
-        await session.execute(delete(Capture))
-        await session.execute(delete(GitHubActivity))
-        await session.execute(delete(GitHubRepository))
-        await session.execute(delete(GitHubConnection))
-        await session.commit()
+    test_db.chunks.clear()
+    test_db.captures.clear()
+    test_db.source_metadata.clear()
+    test_db.github_activities.clear()
+    test_db.github_repositories.clear()
+    test_db.github_connections.clear()
 
 
-async def create_test_connection(user_id: str = "gh_user_stage16", username: str = "lens_user") -> uuid.UUID:
+async def create_test_connection(user_id: Any = "gh_user_stage16", username: str = "lens_user") -> uuid.UUID:
     """Create a verified test GitHubConnection."""
+    su = get_or_create_search_user()
+    if user_id == "gh_user_stage16" or user_id is None:
+        actual_user_id = su.id
+        gh_uid = str(su.id)
+    elif isinstance(user_id, uuid.UUID):
+        actual_user_id = user_id
+        gh_uid = str(user_id)
+    else:
+        other_user = create_test_user(f"{user_id}_{uuid.uuid4().hex[:6]}@example.com")
+        actual_user_id = other_user.id
+        gh_uid = str(user_id)
+
     async with AsyncSessionLocal() as session:
         encrypted = encrypt_secret("gho_stage16_test_token_123456")
         now = datetime.now(timezone.utc)
         conn = GitHubConnection(
+            user_id=actual_user_id,
             provider="github",
-            github_user_id=user_id,
+            github_user_id=gh_uid,
             github_username=username,
             encrypted_access_token=encrypted,
             token_type="bearer",
@@ -129,7 +180,9 @@ async def prepare_test_env() -> None:
     """Setup deterministic embedding provider and clean DB."""
     test_provider = DeterministicTestEmbeddingProvider(dimension=1536)
     set_embedding_provider_override(test_provider)
+    app.dependency_overrides[get_db] = override_get_db
     await clean_database()
+    get_or_create_search_user()
 
 
 @pytest.fixture(autouse=True)
@@ -720,7 +773,7 @@ async def test_unified_search_transaction_savepoint_isolation_and_distinct_degra
     from app.search.service import SearchService
     search_service = SearchService()
 
-    real_execute = AsyncSession.execute
+    real_execute = FakeAsyncSession.execute
 
     async def faulty_execute(self_session, statement, params=None, *args, **kwargs):
         # Fail specifically if it's the GitHub query by executing an invalid statement in PostgreSQL
@@ -733,10 +786,11 @@ async def test_unified_search_transaction_savepoint_isolation_and_distinct_degra
 
     async with AsyncSessionLocal() as session:
         import unittest.mock as mock
-        with mock.patch.object(AsyncSession, "execute", faulty_execute):
+        with mock.patch.object(FakeAsyncSession, "execute", faulty_execute):
             search_res = await search_service.search(
                 query="savepoints",
                 session=session,
+                user_id=get_or_create_search_user().id,
                 embedding_provider=test_provider,
             )
 

@@ -68,8 +68,18 @@ from app.db.models import (
     GitHubConnection,
     GitHubRepository,
     RepositorySyncStatus,
+    User,
 )
-from app.db.session import AsyncSessionLocal
+from app.db.session import get_db
+from tests.test_security_multitenancy import (
+    FakeAsyncSession,
+    FakeAsyncSessionLocal as AsyncSessionLocal,
+    auth_headers,
+    create_test_user,
+    fake_close_connections as close_connections,
+    override_get_db,
+    test_db,
+)
 from app.integrations.github.client import (
     GitHubApiError,
     GitHubAuthError,
@@ -112,24 +122,46 @@ from app.main import app
 from worker.processor import process_github_activity_sync
 
 
+default_test_user: Optional[User] = None
+
+
+@pytest.fixture(autouse=True)
+def mock_redis_unavailable():
+    with patch("app.integrations.github.service.get_redis_client", side_effect=Exception("Redis down in test")):
+        yield
+
+
 async def clean_database() -> None:
     """Purge activities, repositories, and connections for clean test state."""
-    async with AsyncSessionLocal() as session:
-        await session.execute(delete(GitHubActivity))
-        await session.execute(delete(GitHubRepository))
-        await session.execute(delete(GitHubConnection))
-        await session.commit()
+    test_db.github_activities.clear()
+    test_db.github_repositories.clear()
+    test_db.github_connections.clear()
     _memory_lock_cache.clear()
 
 
-async def create_test_connection(user_id: str = "gh_user_stage15", username: str = "activity_user") -> uuid.UUID:
+async def create_test_connection(user_id: Any = "gh_user_stage15", username: str = "activity_user") -> uuid.UUID:
     """Helper to insert an active test GitHubConnection."""
+    global default_test_user
+    if user_id == "gh_user_stage15" or user_id is None:
+        if default_test_user is None or default_test_user.id not in test_db.users:
+            default_test_user = create_test_user(f"activity_stage15_{uuid.uuid4().hex[:8]}@example.com")
+        actual_user_id = default_test_user.id
+        gh_uid = str(default_test_user.id)
+    elif isinstance(user_id, uuid.UUID):
+        actual_user_id = user_id
+        gh_uid = str(user_id)
+    else:
+        other_user = create_test_user(f"{user_id}_{uuid.uuid4().hex[:6]}@example.com")
+        actual_user_id = other_user.id
+        gh_uid = str(user_id)
+
     async with AsyncSessionLocal() as session:
         encrypted = encrypt_secret("gho_stage15_secret_token_abcde")
         now = datetime.now(timezone.utc)
         conn = GitHubConnection(
+            user_id=actual_user_id,
             provider="github",
-            github_user_id=user_id,
+            github_user_id=gh_uid,
             github_username=username,
             encrypted_access_token=encrypted,
             token_type="bearer",
@@ -439,8 +471,14 @@ async def run_all_stage15_integration_scenarios() -> None:
     """Execute all Stage 15 database integration, sync, worker, and API scenarios sequentially."""
     print("\n--- Starting Stage 15 GitHub Activity Ingestion Integration Scenarios ---")
     transport = httpx.ASGITransport(app=app)
+    app.dependency_overrides[get_db] = override_get_db
+    await clean_database()
+    global default_test_user
+    if default_test_user is None or default_test_user.id not in test_db.users:
+        default_test_user = create_test_user(f"activity_stage15_{uuid.uuid4().hex[:8]}@example.com")
+    headers = auth_headers(default_test_user)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as http_client:
         await clean_database()
 
         # ----------------------------------------------------------------------
@@ -724,8 +762,8 @@ async def run_all_stage15_integration_scenarios() -> None:
             "app.integrations.github.service.sync_selected_repositories_activities",
             new=AsyncMock(return_value={"status": "completed", "synced_activities": 5}),
         ):
-            assert await process_github_activity_sync(str(conn_id), [str(repo_id)]) is True
-            assert await process_github_activity_sync(str(conn_id), [str(repo_id)]) is True
+            assert await process_github_activity_sync(str(conn_id), [str(repo_id)], session_factory=AsyncSessionLocal) is True
+            assert await process_github_activity_sync(str(conn_id), [str(repo_id)], session_factory=AsyncSessionLocal) is True
         print("Scenario 9: Worker activity sync idempotency -> PASS")
 
         # ----------------------------------------------------------------------

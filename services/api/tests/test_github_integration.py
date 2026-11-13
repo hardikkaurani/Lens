@@ -64,8 +64,17 @@ from app.core.encryption import (
     decrypt_secret,
     encrypt_secret,
 )
-from app.db.models import GitHubConnection
-from app.db.session import AsyncSessionLocal, close_connections
+from app.db.models import GitHubConnection, User
+from app.db.session import get_db
+from tests.test_security_multitenancy import (
+    FakeAsyncSession,
+    FakeAsyncSessionLocal as AsyncSessionLocal,
+    auth_headers,
+    create_test_user,
+    fake_close_connections as close_connections,
+    override_get_db,
+    test_db,
+)
 from app.integrations.github.client import (
     GitHubApiError,
     GitHubAuthError,
@@ -85,11 +94,21 @@ from app.integrations.github.service import (
 from app.main import app
 
 
+_orig_store_oauth_state = store_oauth_state
+default_test_user: Any = None
+
+
+async def store_oauth_state(state: str, session_binding: str, metadata: Any = None) -> None:
+    meta = dict(metadata or {})
+    global default_test_user
+    if "user_id" not in meta and default_test_user is not None:
+        meta["user_id"] = str(default_test_user.id)
+    return await _orig_store_oauth_state(state, session_binding, meta)
+
+
 async def clean_github_connections() -> None:
     """Purge github connection records created during testing."""
-    async with AsyncSessionLocal() as session:
-        await session.execute(delete(GitHubConnection))
-        await session.commit()
+    test_db.github_connections.clear()
 
 
 async def run_all_stage13_tests() -> None:
@@ -99,9 +118,19 @@ async def run_all_stage13_tests() -> None:
     settings = get_settings()
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    global default_test_user
+    await clean_github_connections()
+    app.dependency_overrides[get_db] = override_get_db
+    if default_test_user is None or default_test_user.id not in test_db.users:
+        default_test_user = create_test_user("stage13_main_user@example.com")
+    headers = auth_headers(default_test_user)
+
+    patcher = patch("app.integrations.github.service.get_redis_client", side_effect=Exception("Redis down in test"))
+    patcher.start()
+    client = httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers)
+    try:
         await clean_github_connections()
-        app.dependency_overrides.clear()
+        app.dependency_overrides[get_db] = override_get_db
 
         # ----------------------------------------------------------------------
         # 1. OAuth configuration missing
@@ -709,7 +738,8 @@ async def run_all_stage13_tests() -> None:
         # 39. Threat Test K: Redis production boundary
         # ----------------------------------------------------------------------
         # When APP_ENV == 'production', Redis is mandatory; failure raises OAuthStorageError & does not write memory
-        with patch.object(settings, "APP_ENV", "production"):
+        with patch.object(settings, "APP_ENV", "production"), \
+             patch.object(settings, "JWT_SECRET", "super_secret_jwt_key_at_least_32_characters_long"):
             with patch("app.integrations.github.service.get_redis_client") as mock_redis_getter:
                 mock_redis = AsyncMock()
                 mock_redis.set.side_effect = ConnectionError("Redis cluster unreachable")
@@ -728,7 +758,11 @@ async def run_all_stage13_tests() -> None:
                 assert test_st_prod not in _memory_state_cache, "In production mode, must NEVER silently fall back to memory cache"
 
                 # Verify connect endpoint returns 503 Service Unavailable
-                res39 = await client.get("/integrations/github/connect", follow_redirects=False)
+                res39 = await client.get(
+                    "/integrations/github/connect",
+                    headers=auth_headers(default_test_user),
+                    follow_redirects=False,
+                )
                 assert res39.status_code == 503
                 assert "unavailable" in res39.json()["detail"].lower()
         print("Test 39 (Threat Test K): Redis production boundary strictly enforced -> PASS")
@@ -797,8 +831,13 @@ async def run_all_stage13_tests() -> None:
         print("Test 40 (Threat Test L): AES-256-GCM encryption & tamper verification -> PASS")
 
         # Final cleanup
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_github_client, None)
+        app.dependency_overrides[get_db] = override_get_db
         await clean_github_connections()
+    finally:
+        app.dependency_overrides.pop(get_github_client, None)
+        await client.aclose()
+        patcher.stop()
 
     await close_connections()
     print("\n--- ALL 40 STAGE 13 & 13.1 INTEGRATION & SECURITY TESTS PASSED SUCCESSFULLY ---")

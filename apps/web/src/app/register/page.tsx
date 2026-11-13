@@ -110,7 +110,12 @@ function RegisterForm() {
           "Your account has been created successfully, but automatic sign-in could not be completed. Please sign in below."
         );
       } else if (err instanceof ApiClientError) {
-        if (err.status === 409) {
+        if (
+          err.status === 409 ||
+          (err.status === 400 &&
+            (err.message?.toLowerCase().includes("already exists") ||
+              err.message?.toLowerCase().includes("user with this email")))
+        ) {
           setServerError("An account with this email address already exists. Please sign in instead.");
         } else if (err.status === 422) {
           setServerError(err.message || "Invalid registration details. Please verify your email and password.");

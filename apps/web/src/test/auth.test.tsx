@@ -501,6 +501,34 @@ describe("Web Authentication & Client Integration", () => {
         await screen.findByText("An account with this email address already exists. Please sign in instead.")
       ).toBeDefined();
     });
+
+    it("displays friendly message on duplicate email registration 400 from backend", async () => {
+      vi.spyOn(apiClient, "register").mockRejectedValueOnce(
+        new ApiClientError(400, "A user with this email address already exists.")
+      );
+
+      render(
+        <AuthProvider>
+          <RegisterPage />
+        </AuthProvider>
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email Address/i), {
+        target: { value: "existing@example.com" },
+      });
+      fireEvent.change(screen.getByLabelText(/Password \(min\. 8 characters\)/i), {
+        target: { value: "Password123!" },
+      });
+      fireEvent.change(screen.getByLabelText(/Confirm Password/i), {
+        target: { value: "Password123!" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
+
+      expect(
+        await screen.findByText("An account with this email address already exists. Please sign in instead.")
+      ).toBeDefined();
+    });
   });
 
   describe("5. Protected Route Guard", () => {
